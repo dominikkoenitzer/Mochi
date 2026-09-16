@@ -62,6 +62,8 @@ mochi-testwin move --hwnd H --x X --y Y
 mochi-testwin minimize --hwnd H
 mochi-testwin restore --hwnd H
 mochi-testwin rename --hwnd H --title T
+mochi-testwin cloak --hwnd H --on | --off
+mochi-testwin alpha --hwnd H --value N | --clear
 ```
 
 Defaults: `--count 3`, `--monitor 0`, `--title-prefix MochiTest`. Handles are
@@ -75,13 +77,23 @@ tests:
 |---|---|
 | `--x --y` | Exact top left corner instead of the staggered placement. Taken as given, off the monitor included. Both or neither. |
 | `--w --h` | Exact size in physical pixels. Both or neither. |
-| `--min-size W H` | The size the window defends on `WM_GETMINMAXINFO`. Default 120x80, which lets a layout make it as small as it likes; a larger value simulates an application that refuses to shrink. |
+| `--min-size W H` | The size the window defends, on `WM_GETMINMAXINFO` against a user drag and on `WM_WINDOWPOSCHANGING` against the `SetWindowPos` a tiling manager uses. Without the flag nothing is defended and a layout may make the window as small as it likes; with it the window simulates an application that refuses to shrink. |
 | `--owned` | Each window becomes an owned popup: a hidden owner window of the class `MochiTestOwnerWindow`, never shown and never listed, owns the visible one. The usual manageability rules skip a window with an owner. |
 | `--no-title` | The windows are created with an empty title, which the usual manageability rules also skip. |
 
 `spawn` waits until every window of the batch is visible and its extended frame
 bounds have stopped moving before it returns or prints, so the first thing a
 test reads is never a half created window.
+
+`cloak` and `alpha` drive from the command line the two states a window manager
+sets from the outside, so a manual session can put a window into the same state
+a test does:
+
+| | |
+|---|---|
+| `cloak --on` / `--off` | `DWMWA_CLOAKED`: the window disappears from the screen while `IsWindowVisible` still says true. This is how a manager hides a workspace, and `list` reports it as `cloaked`. |
+| `alpha --value N` | A transparency from 0, invisible, to 255, opaque. The window becomes layered, and `list` reports the value as `alpha`. |
+| `alpha --clear` | Takes the transparency away again, layered bit included, so `alpha` reads `null`. |
 
 Beside the state a window is in, `list` reports what a tiling test asserts on:
 
@@ -112,7 +124,10 @@ ways, on purpose:
   can do: `spawn` into the running process and `close --all`, which shuts the
   host down. One request is one line of JSON, one response is one line of JSON.
   The first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a
-  second host refuses to start rather than serving half the requests.
+  second host refuses to start rather than serving half the requests. The
+  listener does nothing but accept: every connection is handed to a short-lived
+  worker thread, so a client that connects and then says nothing stalls only
+  itself and the next client is still served.
 * Straight through **Win32 on the window handle** for everything else: `list`,
   `move`, `resize`, `focus`, `minimize`, `restore`, `rename` and
   `close --hwnd`. Those are cross-process calls by nature and are exactly the

@@ -263,7 +263,19 @@ pub fn live_host() -> Option<Session> {
 /// # Errors
 /// [`Error::NotFound`] when no host is listening, or an IO error from the pipe.
 pub fn send(request: &Request) -> Result<Response> {
-    let pipe = OwnedHandle(open_client()?);
+    send_on(PIPE_NAME, request)
+}
+
+/// The same against a pipe name of the caller's choosing.
+///
+/// A test serves on a private name so that it neither disturbs nor is disturbed
+/// by a host the user has running on [`PIPE_NAME`].
+///
+/// # Errors
+/// [`Error::NotFound`] when nobody is listening on that name, or an IO error
+/// from the pipe.
+pub fn send_on(pipe_name: &str, request: &Request) -> Result<Response> {
+    let pipe = OwnedHandle(open_client(pipe_name)?);
     write_line(pipe.0, &serde_json::to_string(request)?)?;
     let line = read_line(pipe.0)?;
     if line.trim().is_empty() {
@@ -284,18 +296,62 @@ pub fn send(request: &Request) -> Result<Response> {
 /// When the pipe cannot be created, which normally means another host owns it.
 pub fn serve<H>(handler: H) -> Result<()>
 where
-    H: Fn(Request) -> Response + Send + 'static,
+    H: Fn(Request) -> Response + Send + Sync + 'static,
 {
-    let first = create_instance(true)?;
+    serve_on(PIPE_NAME, handler)
+}
+
+/// The same on a pipe name of the caller's choosing.
+///
+/// The listener does nothing but accept: every accepted connection is handed to
+/// a short-lived worker thread, so a client that connects and then says nothing
+/// stalls only its own worker and the next client is still served. The listener
+/// has the next instance of the pipe created before the worker starts, which is
+/// what makes a client that connects while another one is busy find a pipe
+/// rather than `ERROR_FILE_NOT_FOUND`.
+///
+/// Neither the listener nor its workers are ever joined: they block in Win32
+/// calls and the process exit takes them down.
+///
+/// # Errors
+/// When the pipe cannot be created, which normally means something else already
+/// owns that name.
+pub fn serve_on<H>(pipe_name: &str, handler: H) -> Result<()>
+where
+    H: Fn(Request) -> Response + Send + Sync + 'static,
+{
+    let first = create_instance(pipe_name, true)?;
+    let handler = std::sync::Arc::new(handler);
+    let name = pipe_name.to_string();
     std::thread::Builder::new()
         .name("mochi-testbed-control".to_string())
         .spawn(move || {
             let mut instance = first;
             loop {
-                serve_one(instance.0, &handler);
-                match create_instance(false) {
-                    Ok(next) => instance = next,
+                // Blocking accept, and the only thing this thread ever waits
+                // on. Everything after the connection happens elsewhere.
+                let connected = accept(instance.0);
+                let next = match create_instance(&name, false) {
+                    Ok(next) => next,
                     Err(_) => return,
+                };
+                let connection = std::mem::replace(&mut instance, next);
+                if !connected {
+                    continue;
+                }
+                let handler = std::sync::Arc::clone(&handler);
+                let worker = std::thread::Builder::new()
+                    .name("mochi-testbed-control-worker".to_string())
+                    .spawn(move || {
+                        // Bound whole, not by field: the handle itself is not
+                        // `Send`, the owning wrapper is, and it has to be the
+                        // wrapper that crosses into the worker so the instance
+                        // is closed when the worker is done with it.
+                        let connection = connection;
+                        serve_one(connection.0, handler.as_ref());
+                    });
+                if worker.is_err() {
+                    return;
                 }
             }
         })
@@ -303,15 +359,20 @@ where
     Ok(())
 }
 
-fn serve_one<H: Fn(Request) -> Response>(pipe: HANDLE, handler: &H) {
-    let connected = unsafe { ConnectNamedPipe(pipe, None) };
-    if let Err(e) = connected {
+/// Waits for a client on one instance of the pipe. False when the wait failed,
+/// in which case the instance is thrown away rather than served.
+fn accept(pipe: HANDLE) -> bool {
+    match unsafe { ConnectNamedPipe(pipe, None) } {
+        Ok(()) => true,
         // ERROR_PIPE_CONNECTED means the client beat us to it, which is fine.
-        if e.code().0 != hresult_from_win32(ERROR_PIPE_CONNECTED.0) {
-            return;
-        }
+        Err(e) => e.code().0 == hresult_from_win32(ERROR_PIPE_CONNECTED.0),
     }
+}
 
+/// Reads one request off an accepted connection, answers it, and hangs up.
+/// Runs on a worker thread: every blocking call in here is on a client that
+/// may never say anything.
+fn serve_one<H: Fn(Request) -> Response>(pipe: HANDLE, handler: &H) {
     let response = match read_line(pipe) {
         Ok(line) => match serde_json::from_str::<Request>(line.trim()) {
             Ok(request) => handler(request),
@@ -329,8 +390,8 @@ fn serve_one<H: Fn(Request) -> Response>(pipe: HANDLE, handler: &H) {
     }
 }
 
-fn create_instance(first: bool) -> Result<OwnedHandle> {
-    let name = to_wide(PIPE_NAME);
+fn create_instance(pipe_name: &str, first: bool) -> Result<OwnedHandle> {
+    let name = to_wide(pipe_name);
     let mode = if first {
         // Refuses to start when another host already owns the name.
         PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE
@@ -355,8 +416,8 @@ fn create_instance(first: bool) -> Result<OwnedHandle> {
     Ok(OwnedHandle(handle))
 }
 
-fn open_client() -> Result<HANDLE> {
-    let name = to_wide(PIPE_NAME);
+fn open_client(pipe_name: &str) -> Result<HANDLE> {
+    let name = to_wide(pipe_name);
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_millis(u64::from(CONNECT_TIMEOUT_MS));
     loop {
