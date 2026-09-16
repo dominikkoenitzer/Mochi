@@ -24,6 +24,7 @@ pub mod events;
 pub mod ipc;
 pub mod logging;
 pub mod platform;
+pub mod recover;
 pub mod safety;
 pub mod single_instance;
 pub mod state;

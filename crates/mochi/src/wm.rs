@@ -20,6 +20,7 @@
 //! them yet; that is milestone 5.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -37,7 +38,8 @@ use crate::events::{Event, EventReceiver, EventSender, MonitorEventKind, WindowE
 use crate::ipc::Subscribers;
 use crate::platform::types::Unmanageable;
 use crate::platform::{
-    Hwnd, MonitorInfo, Platform, ShowState, WindowInfo, WindowPlacement, is_manageable_with,
+    CloakUnsupported, Hwnd, MonitorInfo, Platform, ShowState, WindowInfo, WindowPlacement,
+    is_manageable_with,
 };
 use crate::state::{Settings, State, snapshot};
 
@@ -60,17 +62,61 @@ enum Flow {
 pub struct Hidden {
     windows: BTreeMap<Hwnd, HidingBehaviour>,
     faded: BTreeSet<Hwnd>,
+    /// Where the record is mirrored so a crash can be undone, and what is
+    /// needed to tell a reused handle from the window that was hidden.
+    record: Option<PathBuf>,
+    identity: BTreeMap<Hwnd, (u32, String)>,
 }
 
 impl Hidden {
+    /// Mirrors every change to `path`, so the next start can undo a crash.
+    pub fn with_record(path: PathBuf) -> Self {
+        Self {
+            record: Some(path),
+            ..Self::default()
+        }
+    }
+
+    /// Remembers how to recognise a window, so a reused handle is not touched.
+    pub fn identify(&mut self, hwnd: Hwnd, pid: u32, class: &str) {
+        self.identity.insert(hwnd, (pid, class.to_owned()));
+    }
+
     /// Records that a window was taken off screen with `behaviour`.
     pub fn hide(&mut self, hwnd: Hwnd, behaviour: HidingBehaviour) {
         self.windows.insert(hwnd, behaviour);
+        self.write();
     }
 
     /// Forgets a window and reports how it had been hidden.
     pub fn show(&mut self, hwnd: Hwnd) -> Option<HidingBehaviour> {
-        self.windows.remove(&hwnd)
+        let previous = self.windows.remove(&hwnd);
+        if previous.is_some() {
+            self.write();
+        }
+        previous
+    }
+
+    /// Writes the mirror, if there is one.
+    fn write(&self) {
+        let Some(path) = self.record.as_deref() else {
+            return;
+        };
+        let entries: Vec<crate::recover::Entry> = self
+            .windows
+            .iter()
+            .map(|(hwnd, behaviour)| {
+                let (pid, class) = self.identity.get(hwnd).cloned().unwrap_or_default();
+                crate::recover::Entry {
+                    hwnd: hwnd.0,
+                    pid,
+                    class,
+                    behaviour: *behaviour,
+                    faded: self.faded.contains(hwnd),
+                }
+            })
+            .collect();
+        crate::recover::save(path, &entries);
     }
 
     /// True when Mochi is the reason the window is off screen.
@@ -81,6 +127,7 @@ impl Hidden {
     /// Records that Mochi set an alpha value on a window.
     pub fn fade(&mut self, hwnd: Hwnd) {
         self.faded.insert(hwnd);
+        self.write();
     }
 
     /// How many windows are off screen because of Mochi.
@@ -95,6 +142,10 @@ impl Hidden {
 
     /// Everything Mochi owes the user back, emptying the record.
     fn drain(&mut self) -> (Vec<(Hwnd, HidingBehaviour)>, Vec<Hwnd>) {
+        if let Some(path) = self.record.as_deref() {
+            crate::recover::save(path, &[]);
+        }
+        self.identity.clear();
         (
             std::mem::take(&mut self.windows).into_iter().collect(),
             std::mem::take(&mut self.faded).into_iter().collect(),
@@ -200,6 +251,18 @@ impl WindowManager {
         rx: EventReceiver,
         session: State,
     ) -> Result<Self> {
+        // A previous session may have been killed while windows were off
+        // screen. Put those back before anything else looks at the desktop,
+        // so they are enumerated and tiled like any other window.
+        let record = crate::recover::default_path();
+        let recovered = crate::recover::recover(platform.as_ref(), &record);
+        if !recovered.is_empty() {
+            tracing::info!(
+                count = recovered.len(),
+                "brought back windows a previous session left off screen"
+            );
+        }
+
         let mut wm = Self {
             platform,
             rx,
@@ -208,7 +271,7 @@ impl WindowManager {
             manage_classes: session.manage_classes.clone(),
             session,
             subscribers: Subscribers::start()?,
-            hidden: Arc::new(Mutex::new(Hidden::default())),
+            hidden: Arc::new(Mutex::new(Hidden::with_record(record))),
             mouse: None,
             workspace_rules: Vec::new(),
             routed: HashSet::new(),
@@ -576,17 +639,33 @@ impl WindowManager {
 
     /// Takes a window off screen the way the configuration asked for.
     fn hide_window(&mut self, hwnd: Hwnd) {
-        let behaviour = self.core.window_hiding_behaviour;
-        let result = match behaviour {
+        let mut behaviour = self.core.window_hiding_behaviour;
+        let mut result = match behaviour {
             HidingBehaviour::Cloak => self.platform.set_cloaked(hwnd, true),
             HidingBehaviour::Minimize => self.platform.show(hwnd, ShowState::Minimize),
             HidingBehaviour::Hide => self.platform.show(hwnd, ShowState::Hide),
         };
+        // A few windows cannot be cloaked by anyone, tool windows and splash
+        // screens among them. Hiding is the closest thing, and the record
+        // keeps the method actually used so the restore path undoes it.
+        if matches!(behaviour, HidingBehaviour::Cloak)
+            && result
+                .as_ref()
+                .is_err_and(|e| e.downcast_ref::<CloakUnsupported>().is_some())
+        {
+            tracing::debug!(%hwnd, "window cannot be cloaked, hiding it instead");
+            behaviour = HidingBehaviour::Hide;
+            result = self.platform.show(hwnd, ShowState::Hide);
+        }
         match result {
             // The record is only written after the call succeeded, so the
             // restore path never promises a window it did not actually hide.
             Ok(()) => {
+                let identity = self.platform.window_info(hwnd).ok();
                 if let Ok(mut hidden) = self.hidden.lock() {
+                    if let Some(info) = identity {
+                        hidden.identify(hwnd, info.pid, &info.class);
+                    }
                     hidden.hide(hwnd, behaviour);
                 }
             }
