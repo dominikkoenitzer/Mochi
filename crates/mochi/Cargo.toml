@@ -44,5 +44,8 @@ windows = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+mochi-testbed = { path = "../mochi-testbed" }
+
 [build-dependencies]
 embed-manifest = { workspace = true }
