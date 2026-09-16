@@ -84,10 +84,7 @@ jobs:
 
       - name: Generate JSON schema
         shell: bash
-        run: |
-          # `mochic schema` lands with the config loader. Until then the zip ships without it.
-          ./target/release/mochic.exe schema > "$STAGE_DIR/mochi.schema.json" || true
-          [ -s "$STAGE_DIR/mochi.schema.json" ] || rm -f "$STAGE_DIR/mochi.schema.json"
+        run: ./target/release/mochic.exe schema > "$STAGE_DIR/mochi.schema.json"
 
       - name: Package
         shell: pwsh

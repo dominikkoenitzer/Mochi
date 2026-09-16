@@ -50,6 +50,8 @@ enum Cmd {
     },
     /// Write a default mochi.json to %USERPROFILE% if there is none
     Quickstart,
+    /// Print the JSON schema of the configuration file
+    Schema,
     /// Pause and resume window management
     TogglePause,
     /// Re-read the configuration file
@@ -335,6 +337,10 @@ fn run() -> Result<()> {
             dry_run,
         } => return start(whkd, config.as_deref(), dry_run),
         Cmd::Quickstart => return quickstart(),
+        Cmd::Schema => {
+            println!("{}", mochi_core::config::json_schema());
+            return Ok(());
+        }
         Cmd::Subscribe { ref name } => return subscribe(name),
         _ => {}
     }
@@ -416,6 +422,7 @@ fn quickstart() -> Result<()> {
 ///
 /// Kept minimal on purpose: `mochi-core` owns the schema and fills this in.
 const DEFAULT_CONFIG: &str = r#"{
+  "$schema": "https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/schema.json",
   "window_hiding_behaviour": "Cloak",
   "default_workspace_padding": 10,
   "default_container_padding": 10,
@@ -449,7 +456,7 @@ fn to_command(cmd: Cmd) -> Command {
     match cmd {
         // Handled before this point.
         Cmd::Start { whkd, .. } => Command::Start { whkd },
-        Cmd::Quickstart => Command::Quickstart,
+        Cmd::Quickstart | Cmd::Schema => Command::Quickstart,
         Cmd::Subscribe { name } => Command::SubscribePipe { name },
 
         Cmd::Stop { whkd } => Command::Stop { whkd },
@@ -765,6 +772,21 @@ mod tests {
         assert_eq!(scalar(&serde_json::json!("0.1.0")), "0.1.0");
         assert_eq!(scalar(&serde_json::json!(2)), "2");
         assert_eq!(scalar(&serde_json::json!(true)), "true");
+    }
+
+    /// The schema committed at the repository root is what the CLI prints.
+    ///
+    /// Configuration files point their `$schema` at that file, so a change to
+    /// the config types that is not written back would leave every editor
+    /// validating against a stale schema.
+    #[test]
+    fn the_committed_schema_is_current() {
+        let committed = include_str!("../../../schema.json");
+        assert_eq!(
+            committed.trim(),
+            mochi_core::config::json_schema().trim(),
+            "schema.json is out of date, regenerate it with `mochic schema > schema.json`"
+        );
     }
 
     #[test]

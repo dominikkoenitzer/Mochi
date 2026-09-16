@@ -13,6 +13,7 @@
 mochi.json
 mochi-*.json
 mochi.schema.json
+!/schema.json
 whkdrc
 
 # Release artefacts built by hand rather than by the workflow
