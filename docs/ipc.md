@@ -155,13 +155,46 @@ with a search and replace.
 `focused-container-index`, `focused-window-index`, `focused-workspace-name`,
 `monitor-count`, `window-count`, `paused`, `dry-run`, `config-path`, `version`.
 
-## State so far
+## What `state` answers with
 
-Until the tiling model lands, the daemon answers everything that needs a
-monitor / workspace / container tree with
+Every command in the table above reaches the model. `state` returns one
+document built by the daemon, not `mochi-core`'s internal serialisation, so its
+shape is stable across changes to the model:
 
 ```json
-{"response":"error","message":"`focus` is accepted by the protocol but the tiling model from mochi-core is not wired up yet"}
+{
+  "version": "0.1.0", "dry_run": false, "paused": false,
+  "config_path": "C:\Users\you\mochi.json",
+  "manage_classes": [],
+  "focused_monitor": 0, "focused_workspace": 0, "focused_window": 852368,
+  "window_count": 4,
+  "monitors": [{
+    "index": 0, "name": "DISPLAY1", "device": "\\.\DISPLAY1",
+    "size": {"left":0,"top":0,"right":3840,"bottom":2160,"width":3840,"height":2160},
+    "work_area": {"...": 0}, "dpi": 144, "scale": 1.5,
+    "focused_workspace": 0,
+    "workspaces": [{
+      "index": 0, "name": "1", "layout": "BSP", "visible": true,
+      "monocle": false, "maximized": false,
+      "workspace_padding": 14, "container_padding": 10,
+      "focused_container": 0,
+      "containers": [{
+        "index": 0, "stack": false,
+        "rect": {"left":24,"top":24,"right":1920,"bottom":2088,"width":1896,"height":2064},
+        "windows": [{"hwnd":852368,"title":"Cargo.toml","exe":"Code.exe","class":"Chrome_WidgetWin_1","visible":true}]
+      }],
+      "monocle_container": null, "maximized_window": null, "floating_windows": []
+    }]
+  }],
+  "settings": { "border": true, "transparency": true },
+  "behaviour": { "window_hiding_behaviour": "Cloak", "cross_monitor_move_behaviour": "Insert" },
+  "rules": 312, "subscribers": []
+}
 ```
 
-The protocol itself is final; only the handlers behind it are still empty.
+A `rect` is always the rectangle the last layout gave the container, in physical
+pixels, describing the perceived frame: the daemon compensates for the invisible
+resize border itself, so these are the numbers a screenshot shows.
+
+The visual commands (`border*`, `animation*`, `toggle-transparency`) are
+accepted, stored and reported in `settings`, but nothing draws them yet.

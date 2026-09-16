@@ -314,11 +314,35 @@ impl std::fmt::Display for Unmanageable {
     }
 }
 
+impl Unmanageable {
+    /// True for the verdicts a `manage_rules` entry is allowed to overrule.
+    ///
+    /// A rule may say "this untitled owned tool window is a real window"; it may
+    /// not say "this child window of the taskbar is a real window", because the
+    /// remaining verdicts describe windows that cannot be tiled at all.
+    pub const fn is_overridable(self) -> bool {
+        matches!(
+            self,
+            Self::ToolWindow | Self::NoActivate | Self::Owned | Self::NoTitle
+        )
+    }
+}
+
 /// Decides whether a window is a tiling candidate, and says why not when it is not.
 ///
 /// This is the static half of the decision. User rules from the configuration
-/// are applied on top of it by `mochi-core` once that lands.
+/// are applied on top of it by [`crate::wm::WindowManager`].
 pub fn is_manageable(w: &WindowInfo) -> Result<(), Unmanageable> {
+    is_manageable_with(w, false)
+}
+
+/// [`is_manageable`] with the tool window rejection optionally lifted.
+///
+/// `allow_tool_window` is what `--manage-class` turns on, and it is the only
+/// rule that switch is allowed to relax: a class named on the command line is
+/// still rejected when it is a child window, a shell window, invisible,
+/// cloaked or too small.
+pub fn is_manageable_with(w: &WindowInfo, allow_tool_window: bool) -> Result<(), Unmanageable> {
     if w.has_style(style::WS_CHILD) {
         return Err(Unmanageable::Child);
     }
@@ -333,7 +357,7 @@ pub fn is_manageable(w: &WindowInfo) -> Result<(), Unmanageable> {
     }
 
     let forced = w.has_ex_style(ex_style::WS_EX_APPWINDOW);
-    if w.has_ex_style(ex_style::WS_EX_TOOLWINDOW) && !forced {
+    if w.has_ex_style(ex_style::WS_EX_TOOLWINDOW) && !forced && !allow_tool_window {
         return Err(Unmanageable::ToolWindow);
     }
     if w.has_ex_style(ex_style::WS_EX_NOACTIVATE) && !forced {
@@ -448,6 +472,48 @@ mod tests {
 
         w.ex_style |= ex_style::WS_EX_APPWINDOW;
         assert_eq!(is_manageable(&w), Ok(()));
+    }
+
+    #[test]
+    fn manage_class_lifts_the_tool_window_rejection_and_nothing_else() {
+        // What `--manage-class MochiTestWindow` has to accept.
+        let mut w = app_window();
+        w.class = "MochiTestWindow".into();
+        w.ex_style = ex_style::WS_EX_TOOLWINDOW;
+        assert_eq!(is_manageable(&w), Err(Unmanageable::ToolWindow));
+        assert_eq!(is_manageable_with(&w, true), Ok(()));
+
+        // Every other rejection survives the switch.
+        type Break = &'static dyn Fn(&mut WindowInfo);
+        let breakages: [(Break, Unmanageable); 5] = [
+            (&|w| w.style |= style::WS_CHILD, Unmanageable::Child),
+            (&|w| w.visible = false, Unmanageable::NotVisible),
+            (&|w| w.cloaked = true, Unmanageable::Cloaked),
+            (
+                &|w| w.frame = Rect::new(0, 0, 10, 10),
+                Unmanageable::TooSmall,
+            ),
+            (&|w| w.title = String::new(), Unmanageable::NoTitle),
+        ];
+        for (broken, expected) in breakages {
+            let mut w = app_window();
+            w.class = "MochiTestWindow".into();
+            w.ex_style = ex_style::WS_EX_TOOLWINDOW;
+            broken(&mut w);
+            assert_eq!(is_manageable_with(&w, true), Err(expected));
+        }
+    }
+
+    #[test]
+    fn only_the_soft_verdicts_may_be_overridden_by_a_manage_rule() {
+        assert!(Unmanageable::ToolWindow.is_overridable());
+        assert!(Unmanageable::NoTitle.is_overridable());
+        assert!(Unmanageable::Owned.is_overridable());
+        assert!(Unmanageable::NoActivate.is_overridable());
+        assert!(!Unmanageable::Child.is_overridable());
+        assert!(!Unmanageable::ShellClass.is_overridable());
+        assert!(!Unmanageable::Cloaked.is_overridable());
+        assert!(!Unmanageable::TooSmall.is_overridable());
     }
 
     #[test]

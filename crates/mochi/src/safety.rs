@@ -5,9 +5,10 @@
 //! Alt-Tab, and the only way back is a reboot or another manager. So every path
 //! out of the process, clean or not, runs [`restore_all`].
 //!
-//! Right now [`restore_all`] only logs. The hook is here so that the tiling
-//! step has one obvious place to plug into: call [`set_restore_hook`] once with
-//! a closure that uncloaks and repositions every managed window.
+//! [`restore_all`] runs the closure [`set_restore_hook`] was given. The daemon
+//! installs one in `WindowManager::install_restore_hook` that uncloaks, shows
+//! or un-minimizes every window Mochi took off screen and clears any alpha it
+//! set, working from an `Arc<Mutex<..>>` it shares with the loop.
 //!
 //! # What does and does not reach [`restore_all`]
 //!
@@ -23,8 +24,10 @@
 //! The last row is the one a hard kill cannot cover: user-mode code does not get
 //! to run, so any window still cloaked stays cloaked until something uncloaks
 //! it. The mitigation is not in this module but in the tiling step: cloak as
-//! late and uncloak as early as possible, and keep [`crate::wm::WindowManager::cloaked`]
-//! exact, because a stale entry there is a window the user cannot get back.
+//! late and uncloak as early as possible, and keep [`crate::wm::Hidden`] exact,
+//! because a window missing from it is a window the user cannot get back. A
+//! daemon that was killed hard leaves its windows cloaked; the next start
+//! uncloaks them again before it manages them.
 
 use std::cell::Cell;
 use std::panic::AssertUnwindSafe;

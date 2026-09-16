@@ -1,11 +1,16 @@
-//! Where the configuration lives and how Mochi notices that it changed.
+//! Where the configuration lives, how it is read and how Mochi notices that it
+//! changed.
 //!
-//! Parsing is deliberately not here. `mochi-core` owns the schema; this module
-//! only resolves the path, writes the quickstart stub and watches the file.
+//! The schema itself belongs to `mochi-core`: this module resolves the path,
+//! reads the two files ([`Loaded`]), writes the quickstart stub and watches for
+//! changes. Applying a [`mochi_core::config::Config`] to the model is
+//! [`crate::wm::WindowManager::reload_config`]'s job.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use mochi_core::config::Config;
+use mochi_core::rules::{RuleSets, load_app_specific_configuration};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::events::{Event, EventSender};
@@ -68,6 +73,127 @@ pub fn write_default(path: &Path) -> Result<bool> {
     std::fs::write(path, DEFAULT_CONFIG)
         .with_context(|| format!("could not write {}", path.display()))?;
     Ok(true)
+}
+
+/// Everything one configuration load produced.
+#[derive(Debug, Clone, Default)]
+pub struct Loaded {
+    /// The parsed `mochi.json`. [`Config::default`] when there is no file.
+    pub config: Config,
+    /// The rules from `app_specific_configuration_path`, empty when there is none.
+    pub app_rules: RuleSets,
+    /// The community rule file that was read, for the log and for `state`.
+    pub app_path: Option<PathBuf>,
+    /// `false` when no configuration file existed and the defaults were used.
+    pub present: bool,
+}
+
+/// Reads `mochi.json` and, if it names one, the community rule file next to it.
+///
+/// A missing `mochi.json` is not an error: Mochi has working defaults, and
+/// refusing to start because a file is absent would be the wrong trade for a
+/// window manager. A file that *is* there but does not parse is an error, so a
+/// typo is loud instead of silently reverting the desktop to the defaults.
+///
+/// # Errors
+///
+/// When the file exists and cannot be read or parsed. A broken community rule
+/// file is only logged, because it is not Mochi's file.
+pub fn load(path: &Path) -> Result<Loaded> {
+    if !path.exists() {
+        tracing::info!(path = %path.display(), "no configuration file, using the defaults");
+        return Ok(Loaded::default());
+    }
+
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("could not read {}", path.display()))?;
+    let config =
+        Config::from_json(&text).with_context(|| format!("could not parse {}", path.display()))?;
+
+    let mut loaded = Loaded {
+        app_rules: RuleSets::new(),
+        app_path: None,
+        present: true,
+        config,
+    };
+
+    if let Some(raw) = loaded.config.app_specific_configuration_path.clone() {
+        let app_path = PathBuf::from(expand_env(&raw.to_string_lossy()));
+        match std::fs::read_to_string(&app_path) {
+            Ok(text) => match load_app_specific_configuration(&text) {
+                Ok(rules) => {
+                    tracing::info!(
+                        path = %app_path.display(),
+                        rules = rules.len(),
+                        "loaded the application rules"
+                    );
+                    loaded.app_rules = rules;
+                }
+                Err(e) => tracing::warn!(
+                    path = %app_path.display(),
+                    error = %e,
+                    "the application rules could not be parsed, ignoring them"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                path = %app_path.display(),
+                error = %e,
+                "the application rules could not be read, ignoring them"
+            ),
+        }
+        loaded.app_path = Some(app_path);
+    }
+
+    Ok(loaded)
+}
+
+/// Expands the three environment variable spellings a migrated config can carry.
+///
+/// `$Env:USERPROFILE` is what a config written next to a PowerShell setup uses,
+/// `%USERPROFILE%` is what the rest of Windows uses, and `$USERPROFILE` turns up
+/// in files that travelled through a shell script. An unset variable is left as
+/// it was, so the failure shows up as a path in the log rather than as a
+/// mysteriously empty one.
+#[must_use]
+pub fn expand_env(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+
+    while let Some(start) = rest.find(['$', '%']) {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+
+        let (name, consumed) = if let Some(tail) = rest.strip_prefix('%') {
+            match tail.find('%') {
+                // `%NAME%`: the marker, the name and the closing marker.
+                Some(end) => (&tail[..end], end + 2),
+                None => {
+                    out.push('%');
+                    rest = tail;
+                    continue;
+                }
+            }
+        } else {
+            let tail = &rest[1..];
+            let (tail, marker) = tail
+                .strip_prefix("Env:")
+                .or_else(|| tail.strip_prefix("env:"))
+                .map_or((tail, 1), |t| (t, 5));
+            let len = tail
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(tail.len());
+            (&tail[..len], marker + len)
+        };
+
+        match std::env::var_os(name).filter(|v| !v.is_empty()) {
+            Some(value) if !name.is_empty() => out.push_str(&value.to_string_lossy()),
+            _ => out.push_str(&rest[..consumed]),
+        }
+        rest = &rest[consumed..];
+    }
+
+    out.push_str(rest);
+    out
 }
 
 /// Watches the configuration file and turns changes into [`Event::ConfigChanged`].
@@ -183,6 +309,100 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"mine\":true}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_file_loads_the_defaults_instead_of_failing() {
+        let loaded = load(Path::new(r"C:\nowhere\at\all\mochi.json")).unwrap();
+        assert!(!loaded.present);
+        assert!(loaded.app_rules.is_empty());
+        assert_eq!(loaded.config, Config::default());
+    }
+
+    #[test]
+    fn the_real_config_of_this_machine_loads_with_its_rules() {
+        let dir = std::env::temp_dir().join(format!("mochi-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let apps = dir.join("applications.json");
+        std::fs::write(
+            &apps,
+            r#"{ "$schema": "x", "Zoom": { "ignore": [{ "kind": "Exe", "id": "Zoom.exe" }] } }"#,
+        )
+        .unwrap();
+
+        let path = dir.join("mochi.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                  "app_specific_configuration_path": "{}",
+                  "window_hiding_behaviour": "Cloak",
+                  "cross_monitor_move_behaviour": "Insert",
+                  "default_workspace_padding": 14,
+                  "default_container_padding": 10,
+                  "monitors": [{{ "workspaces": [{{ "name": "1", "layout": "BSP" }}] }}]
+                }}"#,
+                apps.display().to_string().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let loaded = load(&path).unwrap();
+        assert!(loaded.present);
+        assert_eq!(loaded.config.default_workspace_padding, Some(14));
+        assert_eq!(loaded.config.default_container_padding, Some(10));
+        assert_eq!(loaded.app_path.as_deref(), Some(apps.as_path()));
+        assert_eq!(loaded.app_rules.ignore_rules.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_broken_file_is_an_error_rather_than_a_silent_reset() {
+        let dir = std::env::temp_dir().join(format!("mochi-broken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mochi.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(load(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_environment_variable_spelling_expands() {
+        let profile = std::env::var("USERPROFILE").unwrap_or_default();
+        if profile.is_empty() {
+            return;
+        }
+        for raw in [
+            "$Env:USERPROFILE/applications.json",
+            "$env:USERPROFILE/applications.json",
+            "%USERPROFILE%/applications.json",
+            "$USERPROFILE/applications.json",
+        ] {
+            assert_eq!(
+                expand_env(raw),
+                format!("{profile}/applications.json"),
+                "for {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_variable_and_a_lone_marker_are_left_alone() {
+        assert_eq!(
+            expand_env("$Env:MOCHI_NOT_SET_ANYWHERE/x"),
+            "$Env:MOCHI_NOT_SET_ANYWHERE/x"
+        );
+        assert_eq!(
+            expand_env("%MOCHI_NOT_SET_ANYWHERE%"),
+            "%MOCHI_NOT_SET_ANYWHERE%"
+        );
+        assert_eq!(expand_env("100% done"), "100% done");
+        assert_eq!(
+            expand_env(r"C:\Users\x\mochi.json"),
+            r"C:\Users\x\mochi.json"
+        );
+        assert_eq!(expand_env(""), "");
     }
 
     #[test]
