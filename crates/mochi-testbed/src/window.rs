@@ -33,9 +33,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, HICON,
     IDC_ARROW, IsIconic, LoadCursorW, MINMAXINFO, MSG, PostQuitMessage, RegisterClassW, SW_SHOWNA,
-    SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WM_CLOSE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-    WM_SETTEXT, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+    SWP_NOSIZE, SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WINDOWPOS,
+    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE,
+    WM_NCDESTROY, WM_PAINT, WM_SETTEXT, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::PCWSTR;
 
@@ -222,6 +223,7 @@ impl TestWindows {
                 color: PALETTE[(index as usize) % PALETTE.len()],
                 emit: options.emit_events,
                 min_size: options.min_size.unwrap_or(DEFAULT_MIN_SIZE),
+                enforce_min: options.min_size.is_some(),
                 owned: options.owned,
             };
 
@@ -446,6 +448,7 @@ struct WindowSpec {
     color: COLORREF,
     emit: bool,
     min_size: (i32, i32),
+    enforce_min: bool,
     owned: bool,
 }
 
@@ -456,6 +459,9 @@ struct WindowState {
     color: COLORREF,
     emit: bool,
     min_size: (i32, i32),
+    /// True when the spawn asked for a minimum size. Only then does the window
+    /// defend it against `SetWindowPos`; see `WM_WINDOWPOSCHANGING`.
+    enforce_min: bool,
     /// The hidden owner of an owned popup, destroyed with the popup.
     owner: isize,
     /// True for the hidden owner window itself, which paints nothing, emits
@@ -526,6 +532,7 @@ unsafe fn create_owner_window(module: HINSTANCE) -> Result<HWND> {
         color: COLORREF(0),
         emit: false,
         min_size: DEFAULT_MIN_SIZE,
+        enforce_min: false,
         owner: 0,
         is_owner: true,
     }));
@@ -566,6 +573,7 @@ unsafe fn create_window(spec: &WindowSpec) -> Result<HWND> {
         color: spec.color,
         emit: spec.emit,
         min_size: spec.min_size,
+        enforce_min: spec.enforce_min,
         owner: owner.map_or(0, |o| o.0 as isize),
         is_owner: false,
     }));
@@ -670,6 +678,24 @@ unsafe extern "system" fn window_proc(
             WM_PAINT => {
                 paint(hwnd);
                 LRESULT(0)
+            }
+            // `WM_GETMINMAXINFO` is only consulted while the *user* drags a
+            // border; `SetWindowPos`, which is the only way a tiling manager
+            // ever resizes anything, goes straight past it. So a window that
+            // was spawned with a minimum size defends it here, which is what a
+            // real application with a minimum size does.
+            WM_WINDOWPOSCHANGING => {
+                let result = DefWindowProcW(hwnd, message, wparam, lparam);
+                let pos = lparam.0 as *mut WINDOWPOS;
+                if !pos.is_null()
+                    && (*pos).flags.0 & SWP_NOSIZE.0 == 0
+                    && let Some(state) = state_of(hwnd)
+                    && state.enforce_min
+                {
+                    (*pos).cx = (*pos).cx.max(state.min_size.0);
+                    (*pos).cy = (*pos).cy.max(state.min_size.1);
+                }
+                result
             }
             WM_WINDOWPOSCHANGED => {
                 emit_if_enabled(hwnd, EventKind::Pos);
