@@ -33,6 +33,7 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
@@ -43,6 +44,7 @@ windows = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+windows-core = { workspace = true }
 
 [dev-dependencies]
 mochi-testbed = { path = "../mochi-testbed" }
