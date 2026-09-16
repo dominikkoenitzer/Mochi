@@ -260,6 +260,14 @@ fn infos(windows: &TestWindows) -> Vec<TestWindowInfo> {
     windows.windows()
 }
 
+/// Whether the window manager has taken this window off screen.
+///
+/// Cloaking is the usual way, but a window the shell does not track cannot be
+/// cloaked by anyone, and those are hidden instead. Both count as off screen.
+fn off_screen(w: &TestWindowInfo) -> bool {
+    w.cloaked || !w.visible
+}
+
 /// The extended frame bounds of every window of the batch that is on screen.
 fn visible_frames(windows: &TestWindows) -> Vec<Rect> {
     infos(windows)
@@ -704,28 +712,25 @@ fn the_daemon_tiles_and_drives_four_real_windows() {
     });
 
     // --- workspaces -------------------------------------------------------
-    steps.step("focus-workspace 1 cloaks all four", || {
+    steps.step("focus-workspace 1 takes all four off screen", || {
         command(&Command::FocusWorkspace { index: 1 })?;
         wait_for(STEP, || {
-            infos(&windows).iter().filter(|w| w.cloaked).count() == 4
+            infos(&windows).iter().filter(|w| off_screen(w)).count() == 4
         })
         .map_err(|_| {
             format!(
-                "{} of 4 windows are cloaked",
-                infos(&windows).iter().filter(|w| w.cloaked).count()
+                "{} of 4 windows are off screen",
+                infos(&windows).iter().filter(|w| off_screen(w)).count()
             )
         })
     });
 
-    steps.step("focus-workspace 0 uncloaks them again", || {
+    steps.step("focus-workspace 0 brings them back", || {
         command(&Command::FocusWorkspace { index: 0 })?;
-        wait_for(STEP, || {
-            infos(&windows).iter().all(|w| !w.cloaked && w.visible)
-        })
-        .map_err(|_| {
+        wait_for(STEP, || infos(&windows).iter().all(|w| !off_screen(w))).map_err(|_| {
             format!(
-                "{} windows are still cloaked",
-                infos(&windows).iter().filter(|w| w.cloaked).count()
+                "{} windows are still off screen",
+                infos(&windows).iter().filter(|w| off_screen(w)).count()
             )
         })?;
         wait_for_tiling(&windows, 4).map(|_| ())
@@ -738,9 +743,9 @@ fn the_daemon_tiles_and_drives_four_real_windows() {
             infos(&windows)
                 .iter()
                 .filter(|w| w.hwnd != focused)
-                .all(|w| w.cloaked)
+                .all(off_screen)
         })
-        .map_err(|_| "the three windows left behind were not cloaked".to_owned())?;
+        .map_err(|_| "the three windows left behind are still on screen".to_owned())?;
         check(
             frame_of(&windows, focused).is_some(),
             "the moved window vanished".to_owned(),
@@ -750,7 +755,7 @@ fn the_daemon_tiles_and_drives_four_real_windows() {
             infos(&windows)
                 .iter()
                 .filter(|w| w.hwnd != focused)
-                .all(|w| !w.cloaked)
+                .all(|w| !off_screen(w))
         })
         .map_err(|_| "the original workspace did not come back".to_owned())?;
         // put the window back where the rest of the test expects it
@@ -884,16 +889,16 @@ fn a_hard_killed_daemon_gives_its_windows_back_on_the_next_start() {
             .map_err(|_| format!("state shows {} windows", managed_count()))
     });
 
-    steps.step("focus-workspace 1 cloaks both", || {
+    steps.step("focus-workspace 1 takes both off screen", || {
         command(&Command::FocusWorkspace { index: 1 })?;
-        wait_for(STEP, || infos(&windows).iter().all(|w| w.cloaked))
-            .map_err(|_| "the windows were not cloaked".to_owned())
+        wait_for(STEP, || infos(&windows).iter().all(off_screen))
+            .map_err(|_| "the windows are still on screen".to_owned())
     });
 
-    steps.step("a hard kill leaves them cloaked", || {
+    steps.step("a hard kill leaves them off screen", || {
         daemon.hard_kill();
         check(
-            infos(&windows).iter().all(|w| w.cloaked),
+            infos(&windows).iter().all(off_screen),
             "the windows came back on their own, so the kill was not hard".to_owned(),
         )
     });
@@ -901,14 +906,14 @@ fn a_hard_killed_daemon_gives_its_windows_back_on_the_next_start() {
     let mut second = Daemon::start("hard-kill-2");
     let second_log = second.log();
 
-    steps.step("the next start uncloaks and re-tiles them", || {
+    steps.step("the next start brings them back and re-tiles them", || {
         wait_for(Duration::from_secs(10), || {
-            infos(&windows).iter().all(|w| !w.cloaked && w.visible)
+            infos(&windows).iter().all(|w| !off_screen(w))
         })
         .map_err(|_| {
             format!(
-                "{} of 2 windows are still cloaked",
-                infos(&windows).iter().filter(|w| w.cloaked).count()
+                "{} of 2 windows are still off screen",
+                infos(&windows).iter().filter(|w| off_screen(w)).count()
             )
         })?;
         wait_for(Duration::from_secs(10), || managed_count() == 2)
@@ -922,9 +927,9 @@ fn a_hard_killed_daemon_gives_its_windows_back_on_the_next_start() {
     steps.step("stop leaves both windows visible", || {
         second.stop();
         wait_for(Duration::from_secs(5), || {
-            infos(&windows).iter().all(|w| w.visible && !w.cloaked)
+            infos(&windows).iter().all(|w| !off_screen(w))
         })
-        .map_err(|_| "a window stayed hidden after stop".to_owned())
+        .map_err(|_| "a window stayed off screen after stop".to_owned())
     });
 
     drop(windows);

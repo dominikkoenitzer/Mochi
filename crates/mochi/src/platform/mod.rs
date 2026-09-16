@@ -11,12 +11,28 @@ pub mod dpi;
 pub mod types;
 pub mod wide;
 
+mod appview;
 mod dry_run;
 mod win32;
 
 pub use dry_run::DryRunPlatform;
 pub use types::{Hwnd, MonitorInfo, Unmanageable, WindowInfo, is_manageable, is_manageable_with};
 pub use win32::Win32Platform;
+
+/// Nothing on this system can cloak this window: the shell has no view for it
+/// and DWM only cloaks windows of the calling process.
+///
+/// The window manager hides such a window instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloakUnsupported;
+
+impl std::fmt::Display for CloakUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this window cannot be cloaked")
+    }
+}
+
+impl std::error::Error for CloakUnsupported {}
 
 /// Where a window should end up in the z-order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

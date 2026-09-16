@@ -30,14 +30,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic,
     IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, PostMessageW, SET_WINDOW_POS_FLAGS, SW_HIDE,
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
     SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE,
     WindowFromPoint,
 };
 
+use super::appview::{self, ViewCloakError};
 use super::types::{Hwnd, MonitorId, MonitorInfo, WindowInfo, ex_style};
 use super::wide::{file_name, from_wide};
-use super::{Platform, ShowState, WindowPlacement, ZOrder};
+use super::{CloakUnsupported, Platform, ShowState, WindowPlacement, ZOrder};
 
 /// `MONITORINFOF_PRIMARY`, missing from the `windows` crate metadata.
 const MONITORINFOF_PRIMARY: u32 = 1;
@@ -374,8 +375,13 @@ fn z_order_args(z: ZOrder) -> (Option<HWND>, SET_WINDOW_POS_FLAGS) {
 }
 
 /// Flags shared by every Mochi move: never steal focus, never repaint twice.
+/// Flags shared by the batched and the one at a time move paths.
+///
+/// `SWP_NOSENDCHANGING` is deliberately absent: `DeferWindowPos` rejects it
+/// with `ERROR_INVALID_PARAMETER`, which would push every layout onto the slow
+/// path.
 const MOVE_FLAGS: SET_WINDOW_POS_FLAGS =
-    SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0 | SWP_NOSENDCHANGING.0 | SWP_FRAMECHANGED.0);
+    SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0 | SWP_FRAMECHANGED.0);
 
 impl Platform for Win32Platform {
     fn name(&self) -> &'static str {
@@ -491,16 +497,29 @@ impl Platform for Win32Platform {
     }
 
     fn set_cloaked(&self, h: Hwnd, cloaked: bool) -> Result<()> {
+        // The shell cloaks any window it tracks, whichever process owns it.
+        match appview::set_cloak(hwnd(h), cloaked) {
+            Ok(()) => return Ok(()),
+            Err(e @ ViewCloakError::NoView) => {
+                tracing::debug!(hwnd = %h, error = %e, "falling back to DWM cloaking");
+            }
+            Err(e) => tracing::warn!(hwnd = %h, error = %e, "falling back to DWM cloaking"),
+        }
+        // DWM only cloaks windows of the calling process, so this covers
+        // Mochi's own windows and nothing else.
         let value: i32 = i32::from(cloaked);
-        unsafe {
+        let dwm = unsafe {
             DwmSetWindowAttribute(
                 hwnd(h),
                 DWMWA_CLOAK,
                 (&raw const value).cast::<c_void>(),
                 size_of::<i32>() as u32,
             )
-        }
-        .with_context(|| format!("DWMWA_CLOAK={cloaked} failed for {h}"))
+        };
+        dwm.map_err(|e| {
+            anyhow::Error::new(CloakUnsupported)
+                .context(format!("DWMWA_CLOAK={cloaked} failed for {h}: {e}"))
+        })
     }
 
     fn show(&self, h: Hwnd, state: ShowState) -> Result<()> {
