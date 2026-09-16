@@ -26,6 +26,17 @@ pub struct Args {
     /// Defaults to $MOCHI_CONFIG, then %USERPROFILE%\mochi.json.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+
+    /// Manage only windows of this class, and manage them even though they
+    /// are tool windows.
+    ///
+    /// May be repeated. This is the testbed switch: with it Mochi takes over
+    /// exactly the given classes and leaves every other window on the desktop
+    /// completely alone, which is what makes an end-to-end tiling run safe
+    /// next to another window manager and the user's real applications. The
+    /// tool window rejection is the only manageability rule it overrides.
+    #[arg(long, value_name = "CLASS")]
+    pub manage_class: Vec<String>,
 }
 
 impl Args {
@@ -54,5 +65,19 @@ mod tests {
         let args = Args::try_parse_from(["mochi"]).unwrap();
         assert!(!args.dry_run);
         assert!(args.config.is_none());
+        assert!(args.manage_class.is_empty());
+    }
+
+    #[test]
+    fn manage_class_may_be_repeated() {
+        let args = Args::try_parse_from([
+            "mochi",
+            "--manage-class",
+            "MochiTestWindow",
+            "--manage-class",
+            "OtherClass",
+        ])
+        .unwrap();
+        assert_eq!(args.manage_class, ["MochiTestWindow", "OtherClass"]);
     }
 }

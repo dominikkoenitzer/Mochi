@@ -83,10 +83,17 @@ fn main() -> Result<()> {
 
     let (tx, rx) = std::sync::mpsc::channel::<Event>();
     let platform = platform::new(args.dry_run);
-    let state = state::State::new(config_path.clone(), args.dry_run);
+    let mut session = state::State::new(config_path.clone(), args.dry_run);
+    session.manage_classes.clone_from(&args.manage_class);
+    if !session.manage_classes.is_empty() {
+        tracing::warn!(
+            classes = ?session.manage_classes,
+            "managing only these window classes, every other window is left alone"
+        );
+    }
 
     let mut manager =
-        wm::WindowManager::new(std::sync::Arc::clone(&platform), tx.clone(), rx, state)?;
+        wm::WindowManager::new(std::sync::Arc::clone(&platform), tx.clone(), rx, session)?;
     manager.install_restore_hook();
     let mut restore_guard = safety::RestoreGuard::new();
 

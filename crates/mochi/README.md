@@ -5,13 +5,13 @@ The daemon. One thread owns all state; everything else is a producer on a single
 
 ```
 main.rs          argument parsing, startup order, shutdown order, Ctrl-C
-cli.rs           --dry-run, --config
+cli.rs           --dry-run, --config, --manage-class
 logging.rs       stderr (RUST_LOG, default info) + %LOCALAPPDATA%\mochi\mochi.log, daily rotation
 single_instance.rs   named mutex Local\mochi-single-instance
-safety.rs        panic hook, RestoreGuard, the restore_all hook point
-config.rs        config path resolution, quickstart stub, notify-based file watcher
-state.rs         State, TrackedWindow, Settings, the JSON `mochic state` prints
-wm.rs            the event loop, command handling, the tiling hook points
+safety.rs        panic hook, RestoreGuard, the restore hook the daemon installs
+config.rs        config path resolution, reading mochi.json plus applications.json, quickstart stub, file watcher
+state.rs         the session facts, Settings, and snapshot(), the JSON `mochic state` prints
+wm.rs            the event loop, the mochi-core model, command handling, Changes to Win32
 
 platform/
   mod.rs         the Platform trait, WindowPlacement, ZOrder, ShowState
@@ -62,33 +62,52 @@ before the first window exists, so the manifest is the real mechanism.
 a fallback for the case where the manifest is lost, and logs what it ended up
 with.
 
-## Hook points for mochi-core
+## How a turn works
 
-Everything below is written, logged and unit tested; the bodies that need a
-monitor / workspace / container tree say so and do nothing else.
+`wm.rs` owns one `mochi_core::State`. Everything follows the same three steps:
 
-| Hook | Where | What it should become |
+1. an event or a command becomes one call on the model,
+2. the model hands back a `Changes`,
+3. `apply_changes` turns that into Win32 calls, in this order: hide, restore,
+   retile, show, minimize, maximize, close, focus, warp the mouse.
+
+`restore` comes before the retile on purpose: a window that is still maximized
+cannot be given a tile, and restoring it afterwards would undo the move.
+
+| Piece | Where | What it does |
 |---|---|---|
-| `WindowManager::on_window_event` | `wm.rs` | feed the tree: add on show/uncloak, remove on destroy/cloak, re-home on move |
-| `WindowManager::retile` | `wm.rs` | ask `mochi-core` for the rectangles of the visible workspace on each monitor, then call `apply_layout` |
-| `WindowManager::apply_layout` | `wm.rs` | already complete: batches into `DeferWindowPos`, honours pause and `--dry-run` |
-| `WindowManager::reload_config` | `wm.rs` | parse `mochi.json` with `mochi-core`, apply it, retile |
-| `WindowManager::cloaked` | `wm.rs` | push every handle Mochi cloaks, remove it on uncloak |
-| `WindowManager::restore_all` | `wm.rs` | already complete: uncloaks everything in `cloaked()` |
-| `safety::set_restore_hook` | `safety.rs` | installed once by `install_restore_hook`, runs from `Drop` and from the panic hook |
-| `wm::pending` | `wm.rs` | the single place that answers "not wired up yet"; delete a match arm from `handle_command` as each command lands |
-| `platform::Platform` | `platform/mod.rs` | the whole Win32 surface, already implemented for real and for dry runs |
-| `platform::types::is_manageable` | `platform/types.rs` | static half of the decision; user rules from the config are applied on top |
-| `state::State` | `state.rs` | the flat `windows` map is what the tree replaces |
+| the model | `wm.rs`, field `core` | monitors, workspaces, containers, windows; every command is a method on it |
+| `apply_changes` | `wm.rs` | the only place a `Changes` becomes a window move |
+| `apply_layout` | `wm.rs` | batches into `DeferWindowPos`, honours pause and `--dry-run` |
+| `Hidden` | `wm.rs` | every window Mochi took off screen, and how; the list `restore` works from |
+| `wm::restore` | `wm.rs` | uncloaks, shows or un-minimizes all of them and clears any alpha |
+| `safety::set_restore_hook` | `safety.rs` | installed once, runs from `Drop` and from the panic hook |
+| `platform::Platform` | `platform/mod.rs` | the whole Win32 surface, real and dry-run |
+| `platform::types::is_manageable` | `platform/types.rs` | the static half of the decision; the config rules are applied on top |
 
-The command handlers that still return `pending` are: `focus`, `move`,
-`resize-axis`, `promote`, `toggle-float`, `toggle-maximize`, `toggle-monocle`,
-`minimize`, `close`, `manage`, `unmanage`, `stack`, `unstack`, `cycle-stack`,
-`cycle-layout`, `change-layout`, `flip-layout`, `focus-workspace`,
-`move-to-workspace`, `cycle-workspace`, `focus-last-workspace`,
-`workspace-padding`, `container-padding`, `focus-monitor`, `move-to-monitor`,
-`cycle-monitor`, `border-colour`, `border-style`, `animation-style`,
-`float-rule`, `ignore-rule`, and the three workspace-shaped `query` targets.
+Every command in `docs/cli.md` reaches the model. What is still only *stored*:
+`border`, `border-width`, `border-offset`, `border-style`, `border-colour`,
+`toggle-transparency`, `animation`, `animation-duration`, `animation-style` and
+`animation-fps`. They show up in `mochic state` under `settings`; nothing draws
+them until milestone 5.
+
+## Testing against real windows
+
+`--manage-class <CLASS>` makes the daemon manage exactly the given classes and
+ignore every other window on the desktop. It is the only switch that lifts the
+tool window rejection, which is what `crates/mochi-testbed` needs, and it is the
+only safe way to exercise the tiling path on a machine where another window
+manager and the user's real applications are running:
+
+```
+mochi-testwin spawn --count 4 --monitor 0
+mochi --manage-class MochiTestWindow --config %TEMP%\mochi-e2e\mochi.json
+mochic state
+```
+
+A window that is cloaked at startup and would otherwise be managed is uncloaked
+first: a daemon killed with `taskkill /F` never runs its restore hook, and its
+windows have to come back on the next start.
 
 ## Protocol
 

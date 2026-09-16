@@ -15,7 +15,7 @@ mod dry_run;
 mod win32;
 
 pub use dry_run::DryRunPlatform;
-pub use types::{Hwnd, MonitorInfo, WindowInfo, is_manageable};
+pub use types::{Hwnd, MonitorInfo, Unmanageable, WindowInfo, is_manageable, is_manageable_with};
 pub use win32::Win32Platform;
 
 /// Where a window should end up in the z-order.
