@@ -5,13 +5,18 @@
 //! hands each frame back in one callback, so the daemon can push a whole frame
 //! through a single `DeferWindowPos` batch.
 //!
+//! The curves and the configuration block both come from `mochi-core`:
+//! [`AnimationStyle`] is the enum the config file names and
+//! [`AnimationConfig`] is the `animation` block itself. [`AnimationConfigExt`]
+//! adds the two things a driver needs on top of it, a [`Duration`] and a frame
+//! rate a timer thread can actually serve.
+//!
 //! Timing is kept out of the thread on purpose: [`Timeline`] is a pure state
 //! machine driven by an [`Instant`] the caller passes in, which is what the
 //! tests do.
 //!
 //! ```no_run
-//! use std::time::Duration;
-//! use mochi_render::{AnimationConfig, Animator, Rect, WindowHandle};
+//! use mochi_render::{AnimationConfig, AnimationConfigExt, Animator, Rect, WindowHandle};
 //!
 //! # fn main() -> mochi_render::Result<()> {
 //! let config = AnimationConfig::default();
@@ -39,68 +44,76 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mochi_core::Rect;
-use serde::{Deserialize, Serialize};
+use mochi_core::animation::AnimationStyle;
+use mochi_core::config::AnimationConfig;
 
-use crate::easing::Easing;
 use crate::geometry::lerp_rect;
 use crate::{RenderError, Result, WindowHandle};
 
 /// The lowest frame rate worth running, and the highest one worth allowing.
 const FPS_RANGE: std::ops::RangeInclusive<u32> = 1..=1000;
 
-/// How windows move when the layout changes.
+/// What a driver needs from the `animation` block of the config file.
 ///
-/// The field names match the `animation` block of the config file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AnimationConfig {
-    /// Animate at all. When this is off the daemon applies the target rect in
-    /// one go and never starts a job.
-    pub enabled: bool,
-    /// How long one move takes, in milliseconds.
-    #[serde(rename = "duration")]
-    pub duration_ms: u64,
-    /// Which curve to follow.
-    pub style: Easing,
-    /// How many frames per second to produce.
-    pub fps: u32,
-}
-
-impl Default for AnimationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            duration_ms: 250,
-            style: Easing::EaseOutQuad,
-            fps: 60,
-        }
-    }
-}
-
-impl AnimationConfig {
-    /// The duration as a [`Duration`].
+/// [`AnimationConfig`] answers what the config file says; these three answer
+/// what the timer thread has to do about it.
+pub trait AnimationConfigExt {
+    /// The configured duration as a [`Duration`].
     #[must_use]
-    pub const fn duration(&self) -> Duration {
-        Duration::from_millis(self.duration_ms)
-    }
+    fn duration(&self) -> Duration;
 
-    /// The frame rate, clamped to something a timer thread can actually serve.
+    /// The configured frame rate, clamped to something a timer thread can
+    /// serve. [`AnimationConfig::fps`] reports the raw number.
     #[must_use]
-    pub fn fps(&self) -> u32 {
-        self.fps.clamp(*FPS_RANGE.start(), *FPS_RANGE.end())
-    }
+    fn frame_rate(&self) -> u32;
 
     /// A job for one window, using this configuration.
     #[must_use]
-    pub fn job(&self, handle: WindowHandle, from: Rect, to: Rect) -> AnimationJob {
+    fn job(&self, handle: WindowHandle, from: Rect, to: Rect) -> AnimationJob;
+}
+
+impl AnimationConfigExt for AnimationConfig {
+    fn duration(&self) -> Duration {
+        Duration::from_millis(self.duration_ms())
+    }
+
+    fn frame_rate(&self) -> u32 {
+        self.fps().clamp(*FPS_RANGE.start(), *FPS_RANGE.end())
+    }
+
+    fn job(&self, handle: WindowHandle, from: Rect, to: Rect) -> AnimationJob {
         AnimationJob {
             handle,
             from,
             to,
             duration: self.duration(),
-            easing: self.style,
-            fps: self.fps(),
+            easing: self.style(),
+            fps: self.frame_rate(),
         }
+    }
+}
+
+/// What the interpolation has to know about a curve.
+pub trait AnimationStyleExt {
+    /// `true` for the curves that leave `0.0..=1.0` on the way, so a caller
+    /// that wants to clamp knows which ones it would ruin. It is why the driver
+    /// interpolates with [`crate::geometry::lerp_rect`] instead of
+    /// [`Rect::lerp`], which clamps.
+    #[must_use]
+    fn overshoots(self) -> bool;
+}
+
+impl AnimationStyleExt for AnimationStyle {
+    fn overshoots(self) -> bool {
+        matches!(
+            self,
+            AnimationStyle::EaseInBack
+                | AnimationStyle::EaseOutBack
+                | AnimationStyle::EaseInOutBack
+                | AnimationStyle::EaseInElastic
+                | AnimationStyle::EaseOutElastic
+                | AnimationStyle::EaseInOutElastic
+        )
     }
 }
 
@@ -117,7 +130,7 @@ pub struct AnimationJob {
     /// How long to take.
     pub duration: Duration,
     /// Which curve to follow.
-    pub easing: Easing,
+    pub easing: AnimationStyle,
     /// How many frames per second this job wants.
     pub fps: u32,
 }
@@ -130,7 +143,7 @@ impl AnimationJob {
         from: Rect,
         to: Rect,
         duration: Duration,
-        easing: Easing,
+        easing: AnimationStyle,
         fps: u32,
     ) -> Self {
         Self {
@@ -151,9 +164,11 @@ pub struct FrameUpdate {
     pub handle: WindowHandle,
     /// Where to put it.
     pub rect: Rect,
-    /// `true` on the last frame of this window's job. The daemon can use it to
-    /// write the rect back into its model, or to end a `DeferWindowPos` batch
-    /// with the real target rather than an interpolated one.
+    /// `true` on the last frame of this window's job, and on that frame only:
+    /// the job is dropped as it is reported, so an arriving window is flushed
+    /// exactly once. The daemon can use it to write the rect back into its
+    /// model, or to end a `DeferWindowPos` batch with the real target rather
+    /// than an interpolated one.
     pub finished: bool,
 }
 
@@ -164,7 +179,7 @@ struct Running {
     to: Rect,
     start: Instant,
     duration: Duration,
-    easing: Easing,
+    easing: AnimationStyle,
     fps: u32,
 }
 
@@ -264,7 +279,8 @@ impl Timeline {
     ///
     /// Every job in flight contributes exactly one update, so the daemon gets
     /// the whole frame in one callback and can push it through a single
-    /// `DeferWindowPos` batch.
+    /// `DeferWindowPos` batch. A job that has arrived is reported once, with
+    /// `finished` set and the exact target rectangle, and is then gone.
     pub fn tick(&mut self, now: Instant) -> Vec<FrameUpdate> {
         self.last_frame = Some(now);
 
@@ -283,7 +299,7 @@ impl Timeline {
             let rect = if done {
                 job.to
             } else {
-                lerp_rect(job.from, job.to, job.easing.apply(progress))
+                lerp_rect(job.from, job.to, job.easing.evaluate(progress))
             };
 
             updates.push(FrameUpdate {
@@ -357,7 +373,9 @@ impl Animator {
     ///
     /// `apply` is called once per frame with every window that moved in it, on
     /// the animation thread. It must be quick and must not block: the daemon
-    /// wraps `DeferWindowPos` here.
+    /// wraps `DeferWindowPos` here and hands the same slice to
+    /// [`crate::border::BorderManager::follow_frame`], which is what makes the
+    /// borders ride along. The crate documentation has the whole flow.
     ///
     /// # Errors
     ///
@@ -504,9 +522,15 @@ mod tests {
             from,
             to,
             Duration::from_millis(ms),
-            Easing::Linear,
+            AnimationStyle::Linear,
             60,
         )
+    }
+
+    /// The `animation` block of the real config file.
+    fn rice() -> AnimationConfig {
+        serde_json::from_str(r#"{"enabled":true,"duration":250,"style":"EaseOutQuad","fps":60}"#)
+            .expect("the animation block has to load")
     }
 
     #[test]
@@ -539,6 +563,30 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_job_is_flushed_exactly_once() {
+        let start = Instant::now();
+        let mut timeline = Timeline::new();
+        timeline.insert(job(A, Rect::default(), Rect::new(1, 1, 2, 2), 100), start);
+        timeline.insert(job(B, Rect::default(), Rect::new(1, 1, 2, 2), 400), start);
+
+        let done = start + Duration::from_millis(100);
+        let frame = timeline.tick(done);
+        assert_eq!(frame.len(), 2);
+        assert!(frame[0].finished, "A has arrived");
+        assert!(!frame[1].finished, "B is still going");
+
+        // However often the thread ticks afterwards, A is never reported again.
+        for step in 1..=5 {
+            let frame = timeline.tick(done + Duration::from_millis(step));
+            assert!(
+                frame.iter().all(|update| update.handle != A),
+                "A was flushed twice"
+            );
+        }
+        assert_eq!(timeline.len(), 1);
+    }
+
+    #[test]
     fn the_last_frame_is_exactly_the_target() {
         let start = Instant::now();
         let mut timeline = Timeline::new();
@@ -549,7 +597,7 @@ mod tests {
                 Rect::new(0, 0, 10, 10),
                 to,
                 Duration::from_millis(250),
-                Easing::EaseOutElastic,
+                AnimationStyle::EaseOutElastic,
                 60,
             ),
             start,
@@ -677,7 +725,7 @@ mod tests {
                 Rect::default(),
                 Rect::new(1, 1, 2, 2),
                 Duration::from_millis(100),
-                Easing::Linear,
+                AnimationStyle::Linear,
                 30,
             ),
             start,
@@ -693,7 +741,7 @@ mod tests {
                 Rect::default(),
                 Rect::new(1, 1, 2, 2),
                 Duration::from_millis(100),
-                Easing::Linear,
+                AnimationStyle::Linear,
                 144,
             ),
             start,
@@ -715,7 +763,7 @@ mod tests {
                 Rect::default(),
                 Rect::new(1, 1, 2, 2),
                 Duration::from_millis(100),
-                Easing::Linear,
+                AnimationStyle::Linear,
                 0,
             ),
             start,
@@ -723,18 +771,18 @@ mod tests {
         assert_eq!(timeline.frame_interval(), Duration::from_secs(1));
         assert_eq!(
             AnimationConfig {
-                fps: 0,
+                fps: Some(0),
                 ..Default::default()
             }
-            .fps(),
+            .frame_rate(),
             1
         );
         assert_eq!(
             AnimationConfig {
-                fps: 100_000,
+                fps: Some(100_000),
                 ..Default::default()
             }
-            .fps(),
+            .frame_rate(),
             1000
         );
     }
@@ -780,7 +828,7 @@ mod tests {
                 Rect::new(0, 0, 100, 100),
                 Rect::new(1000, 0, 1100, 100),
                 Duration::from_millis(100),
-                Easing::EaseOutQuad,
+                AnimationStyle::EaseOutQuad,
                 60,
             ),
             start,
@@ -791,27 +839,45 @@ mod tests {
     }
 
     #[test]
-    fn the_config_builds_jobs_with_the_rice_defaults() {
-        let config = AnimationConfig::default();
-        assert!(config.enabled);
+    fn only_the_back_and_elastic_curves_overshoot() {
+        for style in AnimationStyle::ALL {
+            let leaves_the_range = (0..=100)
+                .map(|step| style.evaluate(f64::from(step) / 100.0))
+                .any(|value| !(-1e-9..=1.0 + 1e-9).contains(&value));
+            assert_eq!(
+                style.overshoots(),
+                leaves_the_range,
+                "{style} is misfiled, and the driver must never clamp an overshooting curve"
+            );
+        }
+    }
+
+    #[test]
+    fn the_config_builds_jobs_from_the_rice_block() {
+        let config = rice();
+        assert!(config.is_enabled());
         assert_eq!(config.duration(), Duration::from_millis(250));
-        assert_eq!(config.style, Easing::EaseOutQuad);
-        assert_eq!(config.fps(), 60);
+        assert_eq!(config.style(), AnimationStyle::EaseOutQuad);
+        assert_eq!(config.frame_rate(), 60);
 
         let job = config.job(A, Rect::default(), Rect::new(1, 1, 2, 2));
         assert_eq!(job.handle, A);
         assert_eq!(job.duration, Duration::from_millis(250));
-        assert_eq!(job.easing, Easing::EaseOutQuad);
+        assert_eq!(job.easing, AnimationStyle::EaseOutQuad);
         assert_eq!(job.fps, 60);
     }
 
     #[test]
-    fn the_config_reads_an_animation_block() {
-        let config: AnimationConfig = serde_json::from_str(
-            r#"{"enabled":true,"duration":250,"style":"EaseOutQuad","fps":60}"#,
-        )
-        .unwrap();
-        assert_eq!(config, AnimationConfig::default());
+    fn an_empty_config_block_still_builds_a_job() {
+        let config = AnimationConfig::default();
+        assert!(
+            !config.is_enabled(),
+            "animation is off until it is asked for"
+        );
+        let job = config.job(A, Rect::default(), Rect::new(1, 1, 2, 2));
+        assert_eq!(job.duration, Duration::from_millis(250));
+        assert_eq!(job.easing, AnimationStyle::Linear);
+        assert_eq!(job.fps, 60);
     }
 
     #[test]
@@ -825,8 +891,8 @@ mod tests {
         .unwrap();
 
         let config = AnimationConfig {
-            duration_ms: 60,
-            ..Default::default()
+            duration: Some(60),
+            ..rice()
         };
         animator
             .animate(vec![config.job(
@@ -866,8 +932,8 @@ mod tests {
         .unwrap();
 
         let config = AnimationConfig {
-            duration_ms: 2000,
-            ..Default::default()
+            duration: Some(2000),
+            ..rice()
         };
         animator
             .animate(vec![config.job(

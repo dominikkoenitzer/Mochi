@@ -6,6 +6,7 @@
 use std::sync::OnceLock;
 
 use mochi_core::Rect;
+use mochi_core::config::Colour;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{
@@ -19,8 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::border::{BorderConfig, BorderKind};
-use crate::color::Color;
+use crate::border::{BorderColoursExt, BorderConfig, BorderKind, BorderStyleExt};
+use crate::color::{ColourExt, TRANSPARENT};
 use crate::geometry::{FrameGeometry, RectF, frame_geometry};
 use crate::win::{
     LayeredSurface, dpi_for_rect, is_window, is_window_visible, module_handle, stack_above, wide,
@@ -39,7 +40,7 @@ struct Painted {
     stroke: RectF,
     stroke_width: f32,
     radius: f32,
-    colour: Color,
+    colour: Colour,
 }
 
 /// A single border frame.
@@ -153,7 +154,7 @@ impl BorderWindow {
             return Ok(());
         }
 
-        let colour = self.config.colours.for_kind(kind);
+        let colour = self.config.colours.resolve(kind);
         let size = (geometry.window.width(), geometry.window.height());
         let wanted = Painted {
             size,
@@ -182,7 +183,7 @@ impl BorderWindow {
     }
 
     /// Paints the frame into the off-screen surface.
-    fn paint(&mut self, geometry: &FrameGeometry, colour: Color) -> Result<()> {
+    fn paint(&mut self, geometry: &FrameGeometry, colour: Colour) -> Result<()> {
         let width = geometry.window.width();
         let height = geometry.window.height();
 
@@ -204,7 +205,7 @@ impl BorderWindow {
         // EndDraw is what reports the failure.
         let result = unsafe {
             target.BeginDraw();
-            target.Clear(Some(&Color::TRANSPARENT.to_d2d()));
+            target.Clear(Some(&TRANSPARENT));
             target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
             let brush = target.CreateSolidColorBrush(&colour.to_d2d(), None);

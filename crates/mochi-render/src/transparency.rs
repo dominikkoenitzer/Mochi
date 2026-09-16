@@ -2,7 +2,9 @@
 //!
 //! This is the one place in the crate that touches a window Mochi did not
 //! create, so it is deliberately small: set a style bit, set an alpha, put both
-//! back.
+//! back. [`TransparencyManager`] is the bookkeeping on top of those three
+//! calls, so that the daemon can hand it a whole unfocused set per pass and
+//! nothing is faded twice or left faded.
 //!
 //! # The gotcha
 //!
@@ -26,13 +28,15 @@
 //! like the ignore rules for tiling, and skips those windows here. There is no
 //! way to detect the problem from the outside, so the list is the only cure.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW,
     WINDOW_EX_STYLE, WS_EX_LAYERED,
 };
 
-use crate::Result;
+use crate::{Result, WindowHandle};
 
 /// Fully opaque, the alpha a window has when nothing has touched it.
 pub const OPAQUE: u8 = 255;
@@ -133,8 +137,205 @@ fn set_ex_style(hwnd: HWND, style: WINDOW_EX_STYLE) -> Result<()> {
     Ok(())
 }
 
+/// The three window operations a [`TransparencyManager`] performs.
+///
+/// The real implementation is [`Win32Alpha`], which is the three free functions
+/// above; the tests use a fake, which is how the bookkeeping is tested without
+/// a desktop.
+pub trait WindowAlpha {
+    /// Whether the window was layered before Mochi touched it.
+    fn is_layered(&self, handle: WindowHandle) -> bool;
+
+    /// Fades the window.
+    ///
+    /// # Errors
+    ///
+    /// When the window has gone away or refuses the style.
+    fn set_alpha(&self, handle: WindowHandle, alpha: u8) -> Result<()>;
+
+    /// Puts the window back the way it was.
+    ///
+    /// # Errors
+    ///
+    /// When the window has gone away or refuses the style.
+    fn clear_alpha(&self, handle: WindowHandle) -> Result<()>;
+}
+
+/// The real window operations.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Win32Alpha;
+
+impl WindowAlpha for Win32Alpha {
+    fn is_layered(&self, handle: WindowHandle) -> bool {
+        is_layered(handle.hwnd())
+    }
+
+    fn set_alpha(&self, handle: WindowHandle, alpha: u8) -> Result<()> {
+        set_alpha(handle.hwnd(), alpha)
+    }
+
+    fn clear_alpha(&self, handle: WindowHandle) -> Result<()> {
+        clear_alpha(handle.hwnd())
+    }
+}
+
+/// Fades the unfocused windows and keeps track of which ones it faded.
+///
+/// The daemon hands over the whole unfocused set after every focus change:
+/// everything in it is faded to [`TransparencyManager::alpha`], everything this
+/// manager faded before and that is no longer in it is put back, and everything
+/// else is left alone. A window that was already layered when it was first seen
+/// is remembered and never touched again, because taking the style away from it
+/// would break whatever it was using it for.
+#[derive(Debug, Clone)]
+pub struct TransparencyManager<A: WindowAlpha = Win32Alpha> {
+    alpha: u8,
+    backend: A,
+    /// The windows this manager faded, and the alpha it last set on them.
+    faded: BTreeMap<isize, u8>,
+    /// The windows that were layered before this manager saw them.
+    foreign: BTreeSet<isize>,
+}
+
+impl TransparencyManager<Win32Alpha> {
+    /// A manager that fades unfocused windows to `alpha`.
+    #[must_use]
+    pub fn new(alpha: u8) -> Self {
+        Self::with_backend(alpha, Win32Alpha)
+    }
+}
+
+impl<A: WindowAlpha> TransparencyManager<A> {
+    /// A manager over explicit window operations.
+    #[must_use]
+    pub fn with_backend(alpha: u8, backend: A) -> Self {
+        Self {
+            alpha,
+            backend,
+            faded: BTreeMap::new(),
+            foreign: BTreeSet::new(),
+        }
+    }
+
+    /// The alpha unfocused windows are faded to.
+    #[must_use]
+    pub const fn alpha(&self) -> u8 {
+        self.alpha
+    }
+
+    /// Changes the alpha. The next [`TransparencyManager::update`] applies it
+    /// to every window that is still faded.
+    pub const fn set_alpha(&mut self, alpha: u8) {
+        self.alpha = alpha;
+    }
+
+    /// How many windows are faded right now.
+    #[must_use]
+    pub fn faded_count(&self) -> usize {
+        self.faded.len()
+    }
+
+    /// `true` when this manager has faded that window.
+    #[must_use]
+    pub fn is_faded(&self, handle: WindowHandle) -> bool {
+        self.faded.contains_key(&handle.0)
+    }
+
+    /// `true` when that window was layered before the manager saw it, and is
+    /// therefore left alone.
+    #[must_use]
+    pub fn is_foreign(&self, handle: WindowHandle) -> bool {
+        self.foreign.contains(&handle.0)
+    }
+
+    /// Fades everything in `unfocused` and puts everything else back.
+    ///
+    /// A window that is already faded to the same alpha costs nothing, so this
+    /// is cheap enough to call after every focus change. A window that refuses
+    /// the call, normally because it has just died, is dropped from the
+    /// bookkeeping and the rest of the set is still applied.
+    ///
+    /// # Errors
+    ///
+    /// The first error any window reported, after every other window has been
+    /// dealt with.
+    pub fn update(&mut self, unfocused: &[WindowHandle]) -> Result<()> {
+        let mut failure = None;
+        let wanted: BTreeSet<isize> = unfocused.iter().map(|handle| handle.0).collect();
+
+        for handle in unfocused {
+            if self.foreign.contains(&handle.0) {
+                continue;
+            }
+            if self.faded.get(&handle.0) == Some(&self.alpha) {
+                continue;
+            }
+            if !self.faded.contains_key(&handle.0) && self.backend.is_layered(*handle) {
+                // Somebody else owns this window's compositing.
+                self.foreign.insert(handle.0);
+                continue;
+            }
+            match self.backend.set_alpha(*handle, self.alpha) {
+                Ok(()) => {
+                    self.faded.insert(handle.0, self.alpha);
+                }
+                Err(error) => {
+                    self.faded.remove(&handle.0);
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+
+        let stale: Vec<isize> = self
+            .faded
+            .keys()
+            .copied()
+            .filter(|key| !wanted.contains(key))
+            .collect();
+        for key in stale {
+            self.faded.remove(&key);
+            if let Err(error) = self.backend.clear_alpha(WindowHandle(key)) {
+                failure.get_or_insert(error);
+            }
+        }
+
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Puts every window this manager faded back, and forgets everything.
+    ///
+    /// This is the restore path: the daemon calls it when transparency is
+    /// switched off and on shutdown. Afterwards the manager is as fresh as a
+    /// new one, so the next update checks every window again.
+    ///
+    /// # Errors
+    ///
+    /// The first error any window reported. Every window is still attempted and
+    /// the bookkeeping is emptied either way, because a failure here means the
+    /// window is gone.
+    pub fn clear_all(&mut self) -> Result<()> {
+        let mut failure = None;
+        for key in std::mem::take(&mut self.faded).into_keys() {
+            if let Err(error) = self.backend.clear_alpha(WindowHandle(key)) {
+                failure.get_or_insert(error);
+            }
+        }
+        self.foreign.clear();
+
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
 
     /// A handle that is certainly not a window. The functions must refuse it
@@ -150,5 +351,152 @@ mod tests {
     #[test]
     fn opaque_is_full_alpha() {
         assert_eq!(OPAQUE, u8::MAX);
+    }
+
+    const A: WindowHandle = WindowHandle(0x1111);
+    const B: WindowHandle = WindowHandle(0x2222);
+    const OWN: WindowHandle = WindowHandle(0x3333);
+    const DEAD: WindowHandle = WindowHandle(0x4444);
+
+    /// What a fake window did, so a test can assert on the calls themselves
+    /// rather than on the bookkeeping only.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Call {
+        Set(isize, u8),
+        Clear(isize),
+    }
+
+    /// A desktop of four windows: two ordinary, one that is layered already and
+    /// one that has died.
+    #[derive(Default)]
+    struct Fake {
+        calls: RefCell<Vec<Call>>,
+    }
+
+    impl Fake {
+        fn calls(&self) -> std::cell::Ref<'_, Vec<Call>> {
+            self.calls.borrow()
+        }
+
+        fn forget(&self) {
+            self.calls.borrow_mut().clear();
+        }
+    }
+
+    impl WindowAlpha for &Fake {
+        fn is_layered(&self, handle: WindowHandle) -> bool {
+            handle == OWN
+        }
+
+        fn set_alpha(&self, handle: WindowHandle, alpha: u8) -> Result<()> {
+            self.calls.borrow_mut().push(Call::Set(handle.0, alpha));
+            if handle == DEAD {
+                return Err(crate::RenderError::ThreadGone("fake window"));
+            }
+            Ok(())
+        }
+
+        fn clear_alpha(&self, handle: WindowHandle) -> Result<()> {
+            self.calls.borrow_mut().push(Call::Clear(handle.0));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_unfocused_set_is_faded_and_the_rest_put_back() {
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        assert_eq!(manager.alpha(), 235);
+
+        manager.update(&[A, B]).unwrap();
+        assert_eq!(
+            *fake.calls(),
+            vec![Call::Set(A.0, 235), Call::Set(B.0, 235)]
+        );
+        assert_eq!(manager.faded_count(), 2);
+
+        // A takes the focus, so it goes back to opaque and B stays faded.
+        fake.forget();
+        manager.update(&[B]).unwrap();
+        assert_eq!(*fake.calls(), vec![Call::Clear(A.0)], "B was already faded");
+        assert!(!manager.is_faded(A));
+        assert!(manager.is_faded(B));
+    }
+
+    #[test]
+    fn an_unchanged_set_costs_nothing() {
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        manager.update(&[A, B]).unwrap();
+
+        fake.forget();
+        manager.update(&[A, B]).unwrap();
+        assert!(fake.calls().is_empty(), "nothing changed, nothing was set");
+    }
+
+    #[test]
+    fn a_window_that_was_already_layered_is_never_touched() {
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+
+        manager.update(&[A, OWN]).unwrap();
+        assert_eq!(*fake.calls(), vec![Call::Set(A.0, 235)]);
+        assert!(manager.is_foreign(OWN));
+        assert!(!manager.is_faded(OWN));
+
+        // Not on the way back out either: clear_alpha would take its style bit.
+        fake.forget();
+        manager.update(&[]).unwrap();
+        assert_eq!(*fake.calls(), vec![Call::Clear(A.0)]);
+
+        fake.forget();
+        manager.update(&[OWN]).unwrap();
+        assert!(fake.calls().is_empty(), "it is left alone for good");
+    }
+
+    #[test]
+    fn a_new_alpha_is_applied_to_everything_still_faded() {
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        manager.update(&[A, B]).unwrap();
+
+        fake.forget();
+        manager.set_alpha(200);
+        manager.update(&[A, B]).unwrap();
+        assert_eq!(
+            *fake.calls(),
+            vec![Call::Set(A.0, 200), Call::Set(B.0, 200)]
+        );
+    }
+
+    #[test]
+    fn a_window_that_refuses_is_dropped_and_the_rest_still_runs() {
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+
+        let failure = manager.update(&[DEAD, A]);
+        assert!(failure.is_err(), "the caller hears about it");
+        assert!(!manager.is_faded(DEAD));
+        assert!(manager.is_faded(A), "A was faded anyway");
+    }
+
+    #[test]
+    fn clear_all_puts_everything_back_and_forgets_it() {
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        manager.update(&[A, B, OWN]).unwrap();
+
+        fake.forget();
+        manager.clear_all().unwrap();
+        assert_eq!(*fake.calls(), vec![Call::Clear(A.0), Call::Clear(B.0)]);
+        assert_eq!(manager.faded_count(), 0);
+        assert!(
+            !manager.is_foreign(OWN),
+            "a fresh manager checks every window again"
+        );
+
+        fake.forget();
+        manager.clear_all().unwrap();
+        assert!(fake.calls().is_empty(), "twice over is not an error");
     }
 }
