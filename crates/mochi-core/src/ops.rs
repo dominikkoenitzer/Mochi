@@ -12,8 +12,8 @@ use crate::error::{Error, Result};
 use crate::geometry::{Axis, Direction};
 use crate::layout::{Layout, Sizing};
 use crate::model::{
-    Changes, Container, CycleDirection, MoveBehaviour, State, Window, WindowContainerBehaviour,
-    WindowId, Workspace,
+    Changes, Container, CycleDirection, Monitor, MoveBehaviour, Ring, State, Window,
+    WindowContainerBehaviour, WindowId, Workspace,
 };
 use crate::rules::RuleDecision;
 
@@ -981,6 +981,231 @@ impl State {
         Ok(changes)
     }
 
+    /// Drops a tiled window at a point on the virtual desktop.
+    ///
+    /// This is the model half of drag and drop: the daemon notices the user
+    /// let go of a managed window, hands the cursor position over, and applies
+    /// the returned [`Changes`]. The retile in them is what snaps the dragged
+    /// window back into a tile, so a drop that lands nowhere useful still
+    /// returns one.
+    ///
+    /// - Dropped on another container of the same monitor, the two containers
+    ///   swap places, deltas and all, and the dragged one keeps the focus.
+    /// - Dropped on its own tile, or on nothing at all, only the retile comes
+    ///   back and the window snaps home.
+    /// - Dropped on another monitor, the container moves to the focused
+    ///   workspace of that monitor and is inserted at the container it landed
+    ///   on, or appended when it landed on free space. The destination monitor
+    ///   and its new container take the focus, since that is where the cursor
+    ///   now is.
+    /// - A floating window is left where the user dropped it: nothing moves
+    ///   and the change set is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WindowNotFound`] when the window is not managed.
+    pub fn swap_window_at_point(&mut self, window: WindowId, x: i32, y: i32) -> Result<Changes> {
+        if self.is_paused {
+            return Ok(Changes::none());
+        }
+        let (from_monitor, from_workspace) = self
+            .locate_window(window)
+            .ok_or(Error::WindowNotFound(window))?;
+        let Some(from_container) = self
+            .workspace(from_monitor, from_workspace)?
+            .container_idx_for_window(window)
+        else {
+            // A floating window was never in a tile, so there is nothing to
+            // swap it with and nothing to snap it back to.
+            return Ok(Changes::none());
+        };
+
+        let snap_back = self.retiled(from_monitor, from_workspace);
+        let Some(to_monitor) = self.monitor_idx_at(x, y) else {
+            return Ok(snap_back);
+        };
+        let hit = self.container_at_point(to_monitor, x, y);
+
+        if to_monitor == from_monitor {
+            // Only a drop on the workspace the window is on can swap: the
+            // hit test ran against the focused workspace of this monitor.
+            let focused_workspace = self
+                .monitors()
+                .get(to_monitor)
+                .map_or(from_workspace, |m| m.focused_workspace_idx());
+            let (Some(target), true) = (hit, focused_workspace == from_workspace) else {
+                return Ok(snap_back);
+            };
+            if target == from_container {
+                return Ok(snap_back);
+            }
+            let workspace = self.workspace_mut(from_monitor, from_workspace)?;
+            workspace.focus_container(from_container);
+            if !workspace.swap_focused_container(target) {
+                return Ok(snap_back);
+            }
+            return Ok(self.retiled(from_monitor, from_workspace));
+        }
+
+        let to_workspace = self
+            .monitors()
+            .get(to_monitor)
+            .ok_or(Error::MonitorNotFound(to_monitor))?
+            .focused_workspace_idx();
+
+        let before = self.visible_window_ids();
+        let source = self.workspace_mut(from_monitor, from_workspace)?;
+        source.focus_container(from_container);
+        let Some(container) = source.remove_focused_container() else {
+            return Ok(snap_back);
+        };
+
+        let destination = self.workspace_mut(to_monitor, to_workspace)?;
+        let at = hit
+            .unwrap_or(usize::MAX)
+            .min(destination.containers().len());
+        destination.insert_container(at, container);
+
+        let mut changes = self.retiled(from_monitor, from_workspace);
+        changes.merge(self.retiled(to_monitor, to_workspace));
+        self.monitors_mut().focus(to_monitor);
+        changes.focused_monitor_changed = true;
+        self.visibility_delta(&before, &mut changes);
+        Ok(changes)
+    }
+
+    /// `true` when two monitors are the same display.
+    ///
+    /// The device id is the only identifier that survives a reboot, a cable
+    /// swap or a resolution change, so it decides when both sides have one.
+    /// The friendly name is the fallback, and the platform handle the last
+    /// resort for a monitor that was built without either.
+    fn same_display(a: &Monitor, b: &Monitor) -> bool {
+        if !a.device_id.is_empty() && !b.device_id.is_empty() {
+            return a.device_id == b.device_id;
+        }
+        if !a.name.is_empty() && !b.name.is_empty() {
+            return a.name == b.name;
+        }
+        a.id == b.id
+    }
+
+    /// Rebuilds the monitor ring from the displays the platform reports now.
+    ///
+    /// The daemon calls this once per display change event, with the monitors
+    /// it just enumerated, and applies the returned [`Changes`] in one go:
+    /// they carry the hide and show lists as well as the retiles, because a
+    /// display going away moves whole workspaces around.
+    ///
+    /// - A display that is still there keeps its workspaces, its windows, its
+    ///   focus and its own offsets; only the geometry, the DPI, the platform
+    ///   handle and the identity strings are refreshed from the new value.
+    /// - A display that is gone hands its workspaces to the first remaining
+    ///   monitor: workspace one to workspace one, workspace two to workspace
+    ///   two, created when the survivor does not have that many. Floating
+    ///   windows follow their workspace, so nothing is ever lost.
+    /// - A display that is new arrives with as many empty workspaces as the
+    ///   monitors that were already there have, or one.
+    /// - The ring ends up in the order the platform gave, and the focus stays
+    ///   on the same physical display when it survived, otherwise it falls
+    ///   back to the first one.
+    ///
+    /// An empty list is ignored: a moment without any display, which happens
+    /// while a machine wakes up, is no reason to throw the model away.
+    pub fn reconcile_monitors(&mut self, incoming: Vec<Monitor>) -> Changes {
+        if incoming.is_empty() {
+            return Changes::none();
+        }
+
+        let before = self.visible_window_ids();
+        let focused_before = self.focused_monitor_idx();
+        let mut old: Vec<Option<Monitor>> = std::mem::replace(self.monitors_mut(), Ring::new())
+            .into_vec()
+            .into_iter()
+            .map(Some)
+            .collect();
+        let default_workspaces = old
+            .iter()
+            .flatten()
+            .map(|m| m.workspaces().len())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+
+        let mut ring: Vec<Monitor> = Vec::with_capacity(incoming.len());
+        let mut consumed: Vec<Option<usize>> = Vec::with_capacity(incoming.len());
+
+        for mut monitor in incoming {
+            let found = old.iter().position(|slot| {
+                slot.as_ref()
+                    .is_some_and(|m| Self::same_display(m, &monitor))
+            });
+            match found.and_then(|idx| old[idx].take().map(|m| (idx, m))) {
+                Some((idx, mut kept)) => {
+                    kept.id = monitor.id;
+                    kept.size = monitor.size;
+                    kept.work_area = monitor.work_area;
+                    kept.dpi = monitor.dpi;
+                    if !monitor.name.is_empty() {
+                        kept.name = monitor.name;
+                    }
+                    if !monitor.device.is_empty() {
+                        kept.device = monitor.device;
+                    }
+                    if !monitor.device_id.is_empty() {
+                        kept.device_id = monitor.device_id;
+                    }
+                    ring.push(kept);
+                    consumed.push(Some(idx));
+                }
+                None => {
+                    monitor.ensure_workspaces(default_workspaces);
+                    ring.push(monitor);
+                    consumed.push(None);
+                }
+            }
+        }
+
+        // Whatever nobody claimed is unplugged. Its windows move onto the
+        // first monitor that is left, workspace by workspace.
+        let vanished: Vec<Monitor> = old.into_iter().flatten().collect();
+        if let Some(survivor) = ring.first_mut() {
+            for mut gone in vanished {
+                let workspaces = std::mem::replace(gone.workspaces_mut(), Ring::new()).into_vec();
+                for (idx, workspace) in workspaces.into_iter().enumerate() {
+                    survivor.ensure_workspaces(idx + 1);
+                    if let Some(target) = survivor.workspaces_mut().get_mut(idx) {
+                        target.absorb(workspace);
+                    }
+                }
+            }
+        }
+
+        *self.monitors_mut() = Ring::from_vec(ring);
+        let focus = consumed
+            .iter()
+            .position(|slot| *slot == Some(focused_before))
+            .unwrap_or(0);
+        self.monitors_mut().focus_clamped(focus);
+
+        let mut changes = Changes::none();
+        for monitor in 0..self.monitors().len() {
+            let Some(workspace) = self
+                .monitors()
+                .get(monitor)
+                .map(Monitor::focused_workspace_idx)
+            else {
+                continue;
+            };
+            changes.merge(self.retiled(monitor, workspace));
+        }
+        changes.focused_monitor_changed = true;
+        self.visibility_delta(&before, &mut changes);
+        changes.show.extend(self.visible_window_ids());
+        changes.settle();
+        changes
+    }
+
     /// The container the focused window sits in, as a value the daemon can
     /// hand to a stackbar.
     #[must_use]
@@ -994,7 +1219,7 @@ mod tests {
     use super::*;
     use crate::geometry::Rect;
     use crate::layout::Flip;
-    use crate::model::{HidingBehaviour, Monitor};
+    use crate::model::HidingBehaviour;
     use crate::rules::{ApplicationIdentifier, MatchingRule, MatchingStrategy};
 
     const MAIN: Rect = Rect::new(0, 0, 1920, 1080);
@@ -2045,5 +2270,308 @@ mod tests {
 
         // Nothing was lost along the way.
         assert_eq!(state.all_window_ids().count(), 2, "one was minimized");
+    }
+
+    // -- drop swap ----------------------------------------------------------
+
+    fn container_ids(state: &State, monitor: usize, workspace: usize) -> Vec<WindowId> {
+        state
+            .workspace(monitor, workspace)
+            .unwrap()
+            .containers()
+            .iter()
+            .filter_map(Container::focused_window_id)
+            .collect()
+    }
+
+    #[test]
+    fn a_point_hit_tests_the_tiles_of_the_focused_workspace() {
+        let state = with_windows(2);
+        assert_eq!(state.container_at_point(0, 10, 10), Some(0));
+        assert_eq!(state.container_at_point(0, 1000, 500), Some(1));
+        assert_eq!(state.container_at_point(0, 5000, 10), None, "off the tiles");
+        assert_eq!(state.container_at_point(1, 2000, 10), None, "no containers");
+        assert_eq!(state.container_at_point(9, 10, 10), None, "no monitor");
+    }
+
+    #[test]
+    fn dropping_a_window_on_another_tile_swaps_the_two_containers() {
+        let mut state = with_windows(2);
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(1), WindowId(2)]);
+
+        let changes = state.swap_window_at_point(WindowId(1), 1000, 500).unwrap();
+
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(2), WindowId(1)]);
+        assert_eq!(changes.retiled, vec![crate::model::WorkspaceRef::new(0, 0)]);
+        assert_eq!(
+            state.rect_for_window(WindowId(1)),
+            Some(Rect::new(960, 0, 1920, 1080)),
+            "the dragged window took the tile it was dropped on"
+        );
+        assert_eq!(
+            state.workspace(0, 0).unwrap().focused_container_idx(),
+            1,
+            "the focus follows the dragged container"
+        );
+    }
+
+    #[test]
+    fn dropping_a_window_on_its_own_tile_only_retiles() {
+        let mut state = with_windows(3);
+        let before = container_ids(&state, 0, 0);
+        let rect = state.rect_for_window(WindowId(1)).unwrap();
+
+        let changes = state
+            .swap_window_at_point(WindowId(1), rect.left + 5, rect.top + 5)
+            .unwrap();
+
+        assert_eq!(container_ids(&state, 0, 0), before, "nothing moved");
+        assert_eq!(changes.retiled, vec![crate::model::WorkspaceRef::new(0, 0)]);
+        assert!(changes.show.is_empty() && changes.hide.is_empty());
+    }
+
+    #[test]
+    fn dropping_a_window_off_every_monitor_snaps_it_back() {
+        let mut state = with_windows(2);
+        let before = container_ids(&state, 0, 0);
+
+        let changes = state.swap_window_at_point(WindowId(1), -500, -500).unwrap();
+
+        assert_eq!(container_ids(&state, 0, 0), before);
+        assert_eq!(changes.retiled, vec![crate::model::WorkspaceRef::new(0, 0)]);
+    }
+
+    #[test]
+    fn dropping_a_window_on_free_space_of_its_own_monitor_snaps_it_back() {
+        let mut state = state();
+        state.default_workspace_padding = 200;
+        state.add_window(Window::new(1)).unwrap();
+        let before = container_ids(&state, 0, 0);
+
+        // The workspace padding leaves a margin that belongs to no tile.
+        let changes = state.swap_window_at_point(WindowId(1), 5, 5).unwrap();
+
+        assert_eq!(container_ids(&state, 0, 0), before);
+        assert_eq!(changes.retiled, vec![crate::model::WorkspaceRef::new(0, 0)]);
+    }
+
+    #[test]
+    fn dropping_a_window_on_another_monitor_moves_it_there() {
+        let mut state = with_windows(2);
+        state.add_window_to(1, 0, Window::new(5)).unwrap();
+        state.add_window_to(1, 0, Window::new(6)).unwrap();
+        let target = state.rect_for_window(WindowId(5)).unwrap();
+
+        let changes = state
+            .swap_window_at_point(WindowId(1), target.left + 5, target.top + 5)
+            .unwrap();
+
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(2)]);
+        assert_eq!(
+            container_ids(&state, 1, 0),
+            vec![WindowId(1), WindowId(5), WindowId(6)],
+            "inserted at the container it was dropped on"
+        );
+        assert!(changes.focused_monitor_changed);
+        assert_eq!(state.focused_monitor_idx(), 1);
+        assert!(state.visible_window_ids().contains(&WindowId(1)));
+        assert_eq!(changes.retiled.len(), 2);
+    }
+
+    #[test]
+    fn dropping_a_window_on_the_free_space_of_another_monitor_appends_it() {
+        let mut state = with_windows(2);
+        state.add_window_to(1, 0, Window::new(5)).unwrap();
+        state.default_workspace_padding = 400;
+        state.retile().unwrap();
+
+        let changes = state.swap_window_at_point(WindowId(1), 1925, 5).unwrap();
+
+        assert_eq!(
+            container_ids(&state, 1, 0),
+            vec![WindowId(5), WindowId(1)],
+            "a drop on free space goes to the back"
+        );
+        assert!(!changes.retiled.is_empty());
+    }
+
+    #[test]
+    fn dropping_a_floating_window_changes_nothing() {
+        let mut state = with_windows(2);
+        state.float_window(WindowId(1)).unwrap();
+        let changes = state.swap_window_at_point(WindowId(1), 1000, 500).unwrap();
+        assert!(changes.is_empty());
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(2)]);
+    }
+
+    #[test]
+    fn dropping_an_unmanaged_window_is_an_error_and_a_paused_drop_does_nothing() {
+        let mut state = with_windows(2);
+        assert_eq!(
+            state
+                .swap_window_at_point(WindowId(99), 10, 10)
+                .unwrap_err(),
+            Error::WindowNotFound(WindowId(99))
+        );
+        state.is_paused = true;
+        assert!(
+            state
+                .swap_window_at_point(WindowId(1), 1000, 500)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(1), WindowId(2)]);
+    }
+
+    // -- monitor reconciliation ---------------------------------------------
+
+    fn display(id: isize, name: &str, rect: Rect) -> Monitor {
+        Monitor::new(id, rect, rect).with_name(name)
+    }
+
+    #[test]
+    fn reconciling_an_added_monitor_keeps_everything_and_gives_it_workspaces() {
+        let mut state = with_windows(2);
+        let third = Rect::new(3000, 0, 4920, 1080);
+        let changes = state.reconcile_monitors(vec![
+            display(1, "DISPLAY1", MAIN),
+            display(2, "DISPLAY2", SIDE),
+            display(3, "DISPLAY3", third),
+        ]);
+
+        assert_eq!(state.monitors().len(), 3);
+        assert_eq!(
+            state.monitors().get(2).unwrap().workspaces().len(),
+            9,
+            "as many as the monitors that were already there"
+        );
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(1), WindowId(2)]);
+        assert_eq!(state.monitors().get(2).unwrap().size, third);
+        assert_eq!(changes.retiled.len(), 3);
+        assert!(changes.focused_monitor_changed);
+    }
+
+    #[test]
+    fn reconciling_updates_the_geometry_of_a_display_that_stayed() {
+        let mut state = with_windows(2);
+        let resized = Rect::new(0, 0, 2560, 1440);
+        state.reconcile_monitors(vec![
+            display(11, "DISPLAY1", resized).with_dpi(144),
+            display(2, "DISPLAY2", SIDE),
+        ]);
+
+        let main = state.monitors().get(0).unwrap();
+        assert_eq!(main.size, resized);
+        assert_eq!(main.work_area, resized);
+        assert_eq!(main.dpi, 144);
+        assert_eq!(main.id, 11, "the fresh platform handle wins");
+        assert_eq!(main.workspaces().len(), 9, "the workspaces survived");
+        assert_eq!(
+            state.rect_for_window(WindowId(1)),
+            Some(Rect::new(0, 0, 1280, 1440)),
+            "and the layout followed the new size"
+        );
+    }
+
+    #[test]
+    fn reconciling_a_monitor_away_rescues_its_windows() {
+        let mut state = with_windows(2);
+        state.add_window_to(1, 0, Window::new(5)).unwrap();
+        state.add_window_to(1, 0, Window::new(7)).unwrap();
+        state.float_window(WindowId(7)).unwrap();
+        state.add_window_to(1, 3, Window::new(6)).unwrap();
+
+        let changes = state.reconcile_monitors(vec![display(1, "DISPLAY1", MAIN)]);
+
+        assert_eq!(state.monitors().len(), 1);
+        assert_eq!(
+            container_ids(&state, 0, 0),
+            vec![WindowId(1), WindowId(2), WindowId(5)],
+            "appended to the same-index workspace"
+        );
+        assert_eq!(
+            state
+                .workspace(0, 0)
+                .unwrap()
+                .floating_windows()
+                .iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>(),
+            vec![WindowId(7)],
+            "floating windows follow their workspace"
+        );
+        assert_eq!(container_ids(&state, 0, 3), vec![WindowId(6)]);
+        assert_eq!(state.all_window_ids().count(), 5, "nothing was lost");
+
+        assert!(state.visible_window_ids().contains(&WindowId(5)));
+        assert!(
+            changes.show.contains(&WindowId(5)),
+            "and it is put on screen"
+        );
+        assert!(!changes.hide.contains(&WindowId(5)));
+        assert!(
+            !state.visible_window_ids().contains(&WindowId(6)),
+            "the one on workspace four stays where it was"
+        );
+        assert!(state.rect_for_window(WindowId(5)).is_some());
+        assert_eq!(state.focused_monitor_idx(), 0);
+    }
+
+    #[test]
+    fn reconciling_a_new_order_reorders_the_ring_and_keeps_the_focused_display() {
+        let mut state = with_windows(2);
+        state.focus_monitor(1).unwrap();
+
+        let changes = state.reconcile_monitors(vec![
+            display(7, "DISPLAY2", SIDE),
+            display(8, "DISPLAY1", MAIN),
+        ]);
+
+        assert_eq!(state.monitors().get(0).unwrap().name, "DISPLAY2");
+        assert_eq!(state.monitors().get(1).unwrap().name, "DISPLAY1");
+        assert_eq!(
+            state.focused_monitor_idx(),
+            0,
+            "the focus stayed on the same display, which moved"
+        );
+        assert_eq!(container_ids(&state, 1, 0), vec![WindowId(1), WindowId(2)]);
+        assert!(changes.focused_monitor_changed);
+    }
+
+    #[test]
+    fn reconciling_matches_by_device_id_before_the_name() {
+        let mut state = State::new();
+        state.default_workspace_padding = 0;
+        state.default_container_padding = 0;
+        state.add_monitor(
+            Monitor::new(1, MAIN, MAIN)
+                .with_name("DISPLAY1")
+                .with_device(r"\.\DISPLAY1", "G8-12345"),
+        );
+        state.add_window(Window::new(1)).unwrap();
+
+        // Windows renumbered the friendly names after a reboot.
+        state.reconcile_monitors(vec![
+            Monitor::new(4, MAIN, MAIN)
+                .with_name("DISPLAY2")
+                .with_device(r"\.\DISPLAY2", "G8-12345"),
+        ]);
+
+        assert_eq!(state.monitors().len(), 1);
+        assert_eq!(state.monitors().get(0).unwrap().name, "DISPLAY2");
+        assert_eq!(
+            container_ids(&state, 0, 0),
+            vec![WindowId(1)],
+            "the same panel kept its windows"
+        );
+    }
+
+    #[test]
+    fn reconciling_with_no_displays_at_all_is_ignored() {
+        let mut state = with_windows(2);
+        let changes = state.reconcile_monitors(Vec::new());
+        assert!(changes.is_empty());
+        assert_eq!(state.monitors().len(), 2);
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(1), WindowId(2)]);
     }
 }

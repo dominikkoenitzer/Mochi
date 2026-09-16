@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::geometry::{Axis, Rect};
 use crate::model::CycleDirection;
 pub use split::MIN_TILE_SIZE;
-use split::{boundary_delta, boundary_deltas, divide, divide_weighted, slices_to_rects};
+use split::{
+    boundary_delta, boundary_deltas, divide, divide_weighted, extend_with_rects, rect_from_slice,
+    slices_to_rects,
+};
 
 /// Whether a resize grows or shrinks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
@@ -329,13 +332,17 @@ impl std::str::FromStr for Layout {
 fn columns(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> {
     let deltas = boundary_deltas(resize, 0, len, Axis::Horizontal);
     let slices = divide(area.left, area.right, len, &deltas, min);
-    slices_to_rects(area, Axis::Horizontal, &slices)
+    let mut rects = Vec::with_capacity(len);
+    extend_with_rects(&mut rects, area, Axis::Horizontal, &slices);
+    rects
 }
 
 fn rows(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> {
     let deltas = boundary_deltas(resize, 0, len, Axis::Vertical);
     let slices = divide(area.top, area.bottom, len, &deltas, min);
-    slices_to_rects(area, Axis::Vertical, &slices)
+    let mut rects = Vec::with_capacity(len);
+    extend_with_rects(&mut rects, area, Axis::Vertical, &slices);
+    rects
 }
 
 /// One main container plus a stack of the rest.
@@ -362,8 +369,8 @@ fn main_and_stack(
         &[split_delta],
         min,
     );
-    let cells = slices_to_rects(area, main_axis, &halves);
-    let (main, stack_area) = (cells[0], cells[1]);
+    let main = rect_from_slice(area, main_axis, halves[0].0, halves[0].1);
+    let stack_area = rect_from_slice(area, main_axis, halves[1].0, halves[1].1);
 
     let stack_axis = main_axis.other();
     let stack_deltas = boundary_deltas(resize, 1, len - 1, stack_axis);
@@ -377,7 +384,7 @@ fn main_and_stack(
 
     let mut rects = Vec::with_capacity(len);
     rects.push(main);
-    rects.extend(slices_to_rects(stack_area, stack_axis, &slices));
+    extend_with_rects(&mut rects, stack_area, stack_axis, &slices);
     rects
 }
 
@@ -388,8 +395,10 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<R
             // Secondary on the left, primary on the right.
             let delta = boundary_delta(resize, 1, 0, Axis::Horizontal);
             let slices = divide(area.left, area.right, 2, &[delta], min);
-            let cells = slices_to_rects(area, Axis::Horizontal, &slices);
-            vec![cells[1], cells[0]]
+            vec![
+                rect_from_slice(area, Axis::Horizontal, slices[1].0, slices[1].1),
+                rect_from_slice(area, Axis::Horizontal, slices[0].0, slices[0].1),
+            ]
         }
         _ => {
             // A quarter for the secondary, a half for the primary, a quarter
@@ -403,8 +412,8 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<R
                 &[left_delta, right_delta],
                 min,
             );
-            let cells = slices_to_rects(area, Axis::Horizontal, &slices);
-            let (secondary, primary, stack_area) = (cells[0], cells[1], cells[2]);
+            let cell = |i: usize| rect_from_slice(area, Axis::Horizontal, slices[i].0, slices[i].1);
+            let (secondary, primary, stack_area) = (cell(0), cell(1), cell(2));
 
             let stack_len = len - 2;
             let stack_deltas = boundary_deltas(resize, 2, stack_len, Axis::Vertical);
@@ -419,7 +428,7 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<R
             let mut rects = Vec::with_capacity(len);
             rects.push(primary);
             rects.push(secondary);
-            rects.extend(slices_to_rects(stack_area, Axis::Vertical, &stack_slices));
+            extend_with_rects(&mut rects, stack_area, Axis::Vertical, &stack_slices);
             rects
         }
     }
@@ -470,7 +479,7 @@ fn grid(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> 
             &deltas,
             min,
         );
-        rects.extend(slices_to_rects(column_rect, Axis::Vertical, &slices));
+        extend_with_rects(&mut rects, column_rect, Axis::Vertical, &slices);
     }
     rects
 }
@@ -837,5 +846,27 @@ mod tests {
         assert_eq!(Sizing::from_str("DECREASE"), Ok(Sizing::Decrease));
         assert!(Sizing::from_str("sideways").is_err());
         assert_eq!(Sizing::Increase.to_string(), "increase");
+    }
+
+    /// A rough guard against the layout arithmetic growing a hidden cost.
+    /// Ignored by default, because a timing assertion on a busy machine is a
+    /// flake waiting to happen: `cargo test -p mochi-core -- --ignored`.
+    #[test]
+    #[ignore = "timing"]
+    fn ten_thousand_bsp_layouts_of_eight_containers_stay_under_two_hundred_millis() {
+        let resize = [None; 8];
+        let start = std::time::Instant::now();
+        let mut produced = 0_usize;
+        for _ in 0..10_000 {
+            produced += Layout::Bsp
+                .calculate(AREA, 8, 10, Flip::NONE, &resize)
+                .len();
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(produced, 80_000);
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "10k BSP layouts of eight containers took {elapsed:?} in debug"
+        );
     }
 }

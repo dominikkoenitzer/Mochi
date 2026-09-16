@@ -144,6 +144,23 @@ pub(crate) fn slices_to_rects(area: Rect, axis: Axis, slices: &[(i32, i32)]) -> 
         .collect()
 }
 
+/// Appends the slices of one axis to `out` as rectangles inside `area`.
+///
+/// The same as [`slices_to_rects`] with no vector in between: a layout builds
+/// one output vector and every division writes straight into it.
+pub(crate) fn extend_with_rects(
+    out: &mut Vec<Rect>,
+    area: Rect,
+    axis: Axis,
+    slices: &[(i32, i32)],
+) {
+    out.extend(
+        slices
+            .iter()
+            .map(|(a, b)| rect_from_slice(area, axis, *a, *b)),
+    );
+}
+
 /// One slice of `area` along `axis`, as a rectangle.
 pub(crate) const fn rect_from_slice(area: Rect, axis: Axis, from: i32, to: i32) -> Rect {
     match axis {
