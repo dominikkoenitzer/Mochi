@@ -1283,7 +1283,7 @@
           }
         },
         "name": {
-          "description": "The workspace name shown by a status bar.",
+          "description": "The workspace name, as reported by `mochic state`.",
           "type": [
             "string",
             "null"

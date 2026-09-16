@@ -29,12 +29,12 @@ mochic schema > mochi.schema.json
 | `default_workspace_padding` | integer | `10` | Gap between a workspace and the screen edge, in logical pixels. |
 | `default_container_padding` | integer | `10` | Gap between tiled containers, in logical pixels. |
 | `border` | boolean | `false` | Draw a border around the focused window. |
-| `border_width` | integer | `8` | Border thickness in logical pixels. |
+| `border_width` | integer | `6` | Border thickness in physical pixels, not scaled by DPI. |
 | `border_offset` | integer | `-1` | How far the border sits outside the window frame, negative pulls it in. |
 | `border_style` | `System`, `Rounded`, `Square` | `System` | Border corner shape. |
 | `transparency` | boolean | `false` | Make unfocused windows transparent. |
 | `transparency_alpha` | integer 0 to 255 | `200` | Opacity of unfocused windows, 255 is opaque. |
-| `transparency_ignore_rules` | rule array | `[]` | Windows that stay opaque. |
+| `transparency_ignore_rules` | rule array | `[]` | Windows that stay opaque. They still get a border. |
 | `border_colours` | object | none | Border colour per window kind, see below. |
 | `animation` | object | none | Move and resize animation, see below. |
 | `stackbar` | object | none | Tab bar for stacked containers, see below. Planned, parsed and ignored for now. |

@@ -38,8 +38,7 @@ use crate::events::{Event, EventReceiver, EventSender, MonitorEventKind, WindowE
 use crate::ipc::Subscribers;
 use crate::platform::types::Unmanageable;
 use crate::platform::{
-    CloakUnsupported, Hwnd, MonitorInfo, Platform, ShowState, WindowInfo, WindowPlacement,
-    is_manageable_with,
+    CloakUnsupported, Hwnd, MonitorInfo, Platform, ShowState, WindowInfo, is_manageable_with,
 };
 use crate::state::{Settings, State, snapshot};
 
@@ -128,6 +127,14 @@ impl Hidden {
     pub fn fade(&mut self, hwnd: Hwnd) {
         self.faded.insert(hwnd);
         self.write();
+    }
+
+    /// Forgets that Mochi had faded a window, because it has since been put
+    /// back to opaque. Does not touch the window itself.
+    pub fn unfade(&mut self, hwnd: Hwnd) {
+        if self.faded.remove(&hwnd) {
+            self.write();
+        }
     }
 
     /// How many windows are off screen because of Mochi.
@@ -231,6 +238,9 @@ pub struct WindowManager {
     dragging: Option<Hwnd>,
     /// The foreground window, as far as Mochi knows.
     foreground: Option<Hwnd>,
+    /// Borders, transparency and animation. Optional in every part; a
+    /// setting that is off means the matching manager does not exist.
+    visuals: crate::visuals::Visuals,
 }
 
 impl WindowManager {
@@ -263,6 +273,9 @@ impl WindowManager {
             );
         }
 
+        let hidden = Arc::new(Mutex::new(Hidden::with_record(record)));
+        let visuals = crate::visuals::Visuals::new(Arc::clone(&platform), Arc::clone(&hidden));
+
         let mut wm = Self {
             platform,
             rx,
@@ -271,13 +284,14 @@ impl WindowManager {
             manage_classes: session.manage_classes.clone(),
             session,
             subscribers: Subscribers::start()?,
-            hidden: Arc::new(Mutex::new(Hidden::with_record(record))),
+            hidden,
             mouse: None,
             workspace_rules: Vec::new(),
             routed: HashSet::new(),
             minimized: HashSet::new(),
             dragging: None,
             foreground: None,
+            visuals,
         };
 
         wm.refresh_monitors();
@@ -334,6 +348,7 @@ impl WindowManager {
             }
         }
 
+        self.visuals.stop();
         self.subscribers
             .notify(Notification::new(NotificationEvent::Stop));
         tracing::info!("the event loop has ended");
@@ -371,6 +386,7 @@ impl WindowManager {
             tracing::warn!(error = %broken, "a rule was dropped");
         }
         self.session.settings.apply(&loaded.config);
+        self.visuals.set_settings(&loaded.config);
         self.session.app_config_path.clone_from(&loaded.app_path);
 
         self.workspace_rules = loaded
@@ -625,6 +641,14 @@ impl WindowManager {
         }
         if let Some(id) = changes.focus {
             self.focus_hwnd(handle(id));
+            // A pure focus change, moving between containers or windows
+            // without a retile, does not appear in `changes.retiled`, so
+            // borders and transparency need their own nudge here or they
+            // would only ever follow a layout change.
+            if let Ok((monitor, workspace)) = self.core.focused_indices() {
+                let targets = self.visuals_targets(monitor, workspace);
+                self.visuals.update(&targets);
+            }
         }
         if let Some(rect) = changes.warp_mouse_to
             && self.core.mouse_follows_focus
@@ -710,11 +734,100 @@ impl WindowManager {
     /// Moves every window of one workspace onto its tile.
     fn apply_workspace(&mut self, monitor: usize, workspace: usize) {
         let placements = self.placements_for(monitor, workspace);
-        if placements.is_empty() {
-            return;
+        if !placements.is_empty() {
+            tracing::debug!(monitor, workspace, windows = placements.len(), "retiling");
+            self.apply_layout(&placements);
         }
-        tracing::debug!(monitor, workspace, windows = placements.len(), "retiling");
-        self.apply_layout(&placements);
+        // The visuals pass runs even with nothing to tile: a workspace holding
+        // only floating windows still wants a border on the focused one, and an
+        // emptied workspace has to drop the borders it had.
+        let targets = self.visuals_targets(monitor, workspace);
+        self.visuals.update(&targets);
+    }
+
+    /// Every visible window of a workspace, classified for the borders and
+    /// transparency pass: which one has the focus, the [`mochi_render::BorderKind`]
+    /// it should draw with, and the rest as the transparency set. Empty when
+    /// the workspace is not the one showing on its monitor, matching
+    /// [`WindowManager::placements_for`].
+    fn visuals_targets(&self, monitor: usize, workspace: usize) -> crate::visuals::VisualsTargets {
+        use mochi_render::BorderKind;
+
+        let mut targets = crate::visuals::VisualsTargets::default();
+        let Some(display) = self.core.monitors().get(monitor) else {
+            return targets;
+        };
+        if display.focused_workspace_idx() != workspace {
+            return targets;
+        }
+        let Ok(target) = self.core.workspace(monitor, workspace) else {
+            return targets;
+        };
+        if target.is_maximized() {
+            return targets;
+        }
+
+        let focused = target.focused_window_id().map(handle);
+        targets.focused = focused;
+        let focused_kind = if target.is_monocle() {
+            BorderKind::Monocle
+        } else if target.focus_is_floating() {
+            BorderKind::Floating
+        } else if target
+            .focused_container()
+            .is_some_and(mochi_core::model::Container::is_stack)
+        {
+            BorderKind::Stack
+        } else {
+            BorderKind::Single
+        };
+
+        let platform = self.platform.as_ref();
+        let rules = &self.core.rules;
+        let mut push = |hwnd: Hwnd, rect: Rect| {
+            let kind = if Some(hwnd) == focused {
+                focused_kind
+            } else {
+                BorderKind::Unfocused
+            };
+            // A window named by a transparency ignore rule keeps its borders
+            // but is never faded: some apps paint wrongly once they are layered.
+            if kind == BorderKind::Unfocused
+                && !platform
+                    .window_info(hwnd)
+                    .is_ok_and(|info| rules.should_stay_opaque(&rule_info(&info)))
+            {
+                targets.unfocused.push(hwnd);
+            }
+            targets.tiled.push((hwnd, rect, kind));
+        };
+
+        if let Some(container) = target.monocle_container() {
+            if let Some(id) = container.focused_window_id()
+                && let Some(work_area) = self.core.work_area_for(monitor, workspace)
+            {
+                let rect = target.full_rect(
+                    work_area,
+                    self.core.default_workspace_padding,
+                    self.core.default_container_padding,
+                );
+                push(handle(id), rect);
+            }
+        } else {
+            for (container, rect) in target.containers().iter().zip(target.latest_layout()) {
+                if let Some(id) = container.focused_window_id() {
+                    push(handle(id), *rect);
+                }
+            }
+            for window in target.floating_windows().iter() {
+                let floating_hwnd = handle(window.id);
+                if let Ok(info) = self.platform.window_info(floating_hwnd) {
+                    push(floating_hwnd, info.rect);
+                }
+            }
+        }
+
+        targets
     }
 
     /// The rectangle every visible window of a workspace should occupy.
@@ -1160,6 +1273,11 @@ impl WindowManager {
             Command::TogglePause => {
                 let response = self.run_op(CoreState::toggle_pause);
                 tracing::info!(paused = self.core.is_paused, "pause toggled");
+                if self.core.is_paused {
+                    self.visuals.clear();
+                } else {
+                    self.retile();
+                }
                 self.notify(NotificationEvent::Pause {
                     paused: self.core.is_paused,
                 });
@@ -1517,13 +1635,7 @@ impl WindowManager {
         if self.core.is_paused || placements.is_empty() {
             return;
         }
-        let batch: Vec<WindowPlacement> = placements
-            .iter()
-            .map(|&(hwnd, rect)| WindowPlacement::new(hwnd, rect))
-            .collect();
-        if let Err(e) = self.platform.set_positions(&batch) {
-            tracing::error!(error = %e, count = batch.len(), "could not apply a layout");
-        }
+        self.visuals.apply_layout(placements);
     }
 
     /// Re-reads the configuration file and applies it to the model.
@@ -1725,6 +1837,7 @@ pub fn boolean(state: BooleanState) -> bool {
 mod tests {
     use super::*;
     use crate::platform::ShowState;
+    use crate::platform::WindowPlacement;
     use crate::platform::types::{MonitorId, style};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};

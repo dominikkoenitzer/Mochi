@@ -561,10 +561,15 @@ fn the_daemon_tiles_and_drives_four_real_windows() {
             axis: Axis::Horizontal,
             sizing: Sizing::Decrease,
         })?;
-        let back = wait_some(STEP, || {
+        wait_some(STEP, || {
             frame_of(&windows, focused).filter(|now| now.width() < grown.width() - 4)
         })
         .ok_or("width did not come back down")?;
+        // The shrink itself may still be animating when the check above first
+        // sees it cross the threshold, so let the batch settle before reading
+        // the width the daemon actually converged on.
+        wait_until_still(&windows);
+        let back = frame_of(&windows, focused).ok_or("no frame")?;
         check(
             (back.width() - before.width()).abs() <= 8,
             format!(

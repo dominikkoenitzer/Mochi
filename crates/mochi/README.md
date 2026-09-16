@@ -85,11 +85,39 @@ cannot be given a tile, and restoring it afterwards would undo the move.
 | `platform::Platform` | `platform/mod.rs` | the whole Win32 surface, real and dry-run |
 | `platform::types::is_manageable` | `platform/types.rs` | the static half of the decision; the config rules are applied on top |
 
-Every command in `docs/cli.md` reaches the model. What is still only *stored*:
-`border`, `border-width`, `border-offset`, `border-style`, `border-colour`,
-`toggle-transparency`, `animation`, `animation-duration`, `animation-style` and
-`animation-fps`. They show up in `mochic state` under `settings`; nothing draws
-them until milestone 5.
+Every command in `docs/cli.md` reaches the model. `border`, `border-width`,
+`border-offset`, `border-style`, `border-colour`, `toggle-transparency`,
+`animation`, `animation-duration`, `animation-style` and `animation-fps` all
+show up in `mochic state` under `settings`, and the *configuration file* keys
+of the same name are drawn by [`visuals`](src/visuals.rs): borders, unfocused
+transparency and move/resize animation. The individual CLI commands still only
+update `settings`; a live change needs `mochic reload-configuration` (or a
+watched edit to `mochi.json`) to reach the screen. There is no stackbar and
+`visuals` never builds one: Mochi draws borders and nothing else, on purpose.
+
+`visuals` owns an optional `mochi-render` `BorderManager`, `TransparencyManager`
+and `Animator`, one per setting, created only while that setting is on. It
+translates the daemon's own `Hwnd`/`mochi_core::Rect` into the render crate's
+`WindowHandle`/`Rect` (the same type) and decides the desired end state; every
+Win32 call stays inside `mochi-render`. `WindowManager::apply_workspace` calls
+it after every retile with the focused window, every visible window's rect and
+`BorderKind` (`Single`, `Stack`, `Monocle`, `Floating` or `Unfocused`), and the
+unfocused set; `WindowManager::apply_layout` routes position changes through it
+too, so an animated move is one `Platform::set_positions` batch per frame with
+borders following through `BorderManager::follow_frame`. Pausing, reload and
+stop all call `Visuals::clear`/`Visuals::stop`, which destroy the border frames
+and put every faded window back to opaque; any window `TransparencyManager`
+fades is mirrored into `Hidden` with `Hidden::fade` (and un-mirrored with
+`Hidden::unfade` once it is put back), so a crash mid-fade is still undone by
+`wm::restore` and the panic hook.
+
+Manual check against real windows, since a border cannot be asserted from the
+testbed: start the daemon with `--manage-class MochiTestWindow` and a config
+with `border`, `transparency` and `animation` all on, spawn a few
+`mochi-testwin` windows, and confirm with a screenshot that the focused window
+has a rounded pink border and the rest a dark one, that `mochi-testwin list`
+reports a non-null `alpha` on every unfocused window and none on the focused
+one, and that `mochic stop` leaves every window with no alpha and no border.
 
 ## Testing against real windows
 

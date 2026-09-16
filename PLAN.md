@@ -41,8 +41,22 @@ No code is taken from any existing window manager.
    layout, retile, pause, reload, stop. Done. Missing: `stack`, `unstack` and
    `cycle-stack` are wired but have no stackbar, so a stacked container is only
    visible in `mochic state`.
-5. Polish. Borders, transparency, animations, cross monitor move behaviour, game mode.
-   Later: stackbar, event subscriptions for bars, own hotkey daemon, releases.
+5. Polish. Borders, transparency and animations are wired: `mochi/src/visuals.rs`
+   owns an optional `mochi-render` `BorderManager`, `TransparencyManager` and
+   `Animator`, translates the daemon's `Hwnd`/`Rect` into the render crate's own
+   types, and the window manager drives it after every retile and on pause,
+   reload and stop. Borders follow focus with `Single`/`Stack`/`Monocle`/
+   `Floating`/`Unfocused`, transparency fades exactly the unfocused managed
+   windows, and animated moves batch through `Platform::set_positions` with
+   borders following each frame. Verified against real testbed windows with the
+   user's own rice settings (pink `#ffbbdf` focused border, dark `#313244`
+   unfocused, 235 alpha, 250 ms EaseOutQuad). No stackbar by default and none is
+   built by this module: Mochi draws borders and nothing else, on purpose.
+   Missing: cross monitor move behaviour, game mode; individual `border`/
+   `transparency`/`animation-*` CLI commands still only update `mochic state`
+   and take effect on the next config reload rather than immediately.
+   Later: stackbar (opt-in, off by default), event subscriptions for bars, own
+   hotkey daemon, releases.
 
 ## Layouts to support
 
