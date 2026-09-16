@@ -159,6 +159,10 @@ function Convert-Config {
     }
 
     $raw = Get-Content -LiteralPath $Config -Raw
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        Write-Detail "$Config is empty, skipping the configuration"
+        return
+    }
     $newline = Get-Newline -Text $raw
     $before = Split-Lines -Text $raw
 
@@ -175,6 +179,10 @@ function Convert-Config {
     Show-LineDiff -Before $before -After $after
 
     $json = $raw | ConvertFrom-Json
+    if ($null -eq $json) {
+        Write-Detail "$Config holds no JSON object, skipping the configuration"
+        return
+    }
     $keys = @($json.PSObject.Properties.Name)
     $unknown = @($keys | Where-Object { $script:KnownKeys -notcontains $_ })
     if ($unknown.Count -gt 0) {
@@ -202,6 +210,10 @@ function Convert-Hotkeys {
     }
 
     $raw = Get-Content -LiteralPath $Hotkeys -Raw
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        Write-Detail "$Hotkeys is empty, skipping the hotkeys"
+        return
+    }
     $newline = Get-Newline -Text $raw
     $before = Split-Lines -Text $raw
 

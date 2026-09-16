@@ -1,0 +1,59 @@
+# cargo-deny: the supply chain gate CI runs on every push.
+#
+#   cargo install cargo-deny --locked
+#   cargo deny check
+#
+# The graph is pinned to the only target Mochi ships for, so a Linux-only
+# dependency of a dependency never has to be audited or licensed here.
+
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+all-features = true
+
+[output]
+feature-depth = 1
+
+[advisories]
+# RustSec, unfiltered: an unmaintained or vulnerable crate fails the job.
+ignore = []
+
+[licenses]
+# Everything the current tree actually needs, plus the permissive licenses a
+# new dependency is allowed to arrive with. CI is the check that this list
+# stays complete: `cargo deny check licenses` fails on anything not listed.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",   # notify
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",   # unicode-ident
+    "Unlicense",     # aho-corasick, memchr, walkdir, winapi-util
+    "Zlib",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+# The six workspace crates carry no license field on purpose: the repository is
+# private and all rights are reserved. They are publish = false, so this skips
+# exactly them and nothing from crates.io.
+private = { ignore = true }
+
+[bans]
+# Two majors of the same crate are worth knowing about, but they are not a
+# reason to fail a push.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# crates.io and nothing else: no git dependencies, no private registry.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

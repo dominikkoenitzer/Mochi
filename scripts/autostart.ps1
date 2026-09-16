@@ -126,9 +126,10 @@ function Enable-MochiAutostart {
     $current = Get-RunValue -Name $script:MochiValue
     if ($current -eq $command) {
         Write-Detail 'already registered with the same command'
+        Write-Detail "$script:RunKey\$script:MochiValue = $command"
         return
     }
-    Write-Detail "command: $command"
+    Write-Detail "$script:RunKey\$script:MochiValue = $command"
     if ($PSCmdlet.ShouldProcess("$script:RunKey\$script:MochiValue", 'set')) {
         New-ItemProperty -Path $script:RunKey -Name $script:MochiValue -Value $command -PropertyType String -Force | Out-Null
         Write-Detail 'registered'
@@ -217,9 +218,9 @@ function Show-AutostartStatus {
     $mochi = Get-RunValue -Name $script:MochiValue
     if ($null -eq $mochi) {
         Write-Detail "no Run value called $script:MochiValue"
+        Write-Detail "-Enable would register: $script:RunKey\$script:MochiValue = $(Get-MochiCommand)"
     } else {
-        Write-Detail "$script:RunKey\$script:MochiValue"
-        Write-Detail $mochi
+        Write-Detail "$script:RunKey\$script:MochiValue = $mochi"
     }
 
     Write-Step 'startup items moved aside by this script'

@@ -56,9 +56,16 @@ function Get-Paused {
         Write-Verbose "mochic query paused failed: $($_.Exception.Message)"
     }
 
-    $state = (& mochic state) | ConvertFrom-Json
-    foreach ($name in @('is_paused', 'paused')) {
-        if ($state.PSObject.Properties.Name -contains $name) { return [bool]$state.$name }
+    $state = $null
+    try {
+        $state = (& mochic state) | ConvertFrom-Json
+    } catch {
+        throw "cannot tell whether Mochi is paused, is the daemon running? ($($_.Exception.Message))"
+    }
+    if ($null -ne $state) {
+        foreach ($name in @('is_paused', 'paused')) {
+            if ($state.PSObject.Properties.Name -contains $name) { return [bool]$state.$name }
+        }
     }
     throw 'cannot tell whether Mochi is paused, is the daemon running?'
 }

@@ -37,6 +37,31 @@ enum Command {
         /// Title prefix; the window index is appended.
         #[arg(long, default_value = mochi_testbed::DEFAULT_TITLE_PREFIX)]
         title_prefix: String,
+        /// Left edge in virtual screen coordinates. With --y the batch is
+        /// placed exactly there instead of being staggered.
+        #[arg(long, requires = "y")]
+        x: Option<i32>,
+        /// Top edge in virtual screen coordinates.
+        #[arg(long, requires = "x")]
+        y: Option<i32>,
+        /// Width in physical pixels.
+        #[arg(long, alias = "width", requires = "h")]
+        w: Option<i32>,
+        /// Height in physical pixels.
+        #[arg(long, alias = "height", requires = "w")]
+        h: Option<i32>,
+        /// Minimum size the windows defend on WM_GETMINMAXINFO, as W H. This
+        /// is how an application with a minimum size is simulated.
+        #[arg(long, num_args = 2, value_names = ["W", "H"])]
+        min_size: Option<Vec<i32>>,
+        /// Create owned popups: each window gets a hidden owner window, which
+        /// the usual manageability rules skip.
+        #[arg(long)]
+        owned: bool,
+        /// Create the windows with an empty title, which the usual
+        /// manageability rules skip.
+        #[arg(long)]
+        no_title: bool,
     },
     /// Print every test window on the desktop as JSON.
     List,
@@ -165,7 +190,28 @@ mod imp {
                 count,
                 monitor,
                 title_prefix,
-            } => spawn(count, monitor, title_prefix),
+                x,
+                y,
+                w,
+                h,
+                min_size,
+                owned,
+                no_title,
+            } => spawn(SpawnOptions {
+                count,
+                monitor,
+                title_prefix,
+                // The whole point of the host: a JSON line per window event.
+                emit_events: true,
+                size: w.zip(h),
+                position: x.zip(y),
+                min_size: min_size.and_then(|values| match values[..] {
+                    [width, height] => Some((width, height)),
+                    _ => None,
+                }),
+                owned,
+                no_title,
+            }),
             Command::List => {
                 print(&json!(mochi_testbed::list_windows()?));
                 Ok(())
@@ -239,25 +285,18 @@ mod imp {
 
     /// `spawn`: become the host, or hand the request to the host that is
     /// already running.
-    fn spawn(count: u32, monitor: usize, title_prefix: String) -> Result<()> {
+    fn spawn(options: SpawnOptions) -> Result<()> {
         if control::live_host().is_some() {
+            // The running host owns the message loops, so the options travel to
+            // it rather than being dropped on the floor here.
             let response = control::send(&Request::Spawn {
-                count,
-                monitor,
-                title_prefix,
+                options: control::SpawnRequest::from(&options),
             })?;
             print(&json!(response));
             return Ok(());
         }
 
-        let batch = TestWindows::spawn_with(&SpawnOptions {
-            count,
-            monitor,
-            title_prefix,
-            // The whole point of the host: a JSON line per window event.
-            emit_events: true,
-            size: None,
-        })?;
+        let batch = TestWindows::spawn_with(&options)?;
         let batches: Batches = Arc::new(Mutex::new(vec![batch]));
 
         let served = Arc::clone(&batches);
@@ -357,18 +396,8 @@ mod imp {
                 Ok(windows) => Response::ok().with_windows(windows),
                 Err(e) => Response::failed(e.to_string()),
             },
-            Request::Spawn {
-                count,
-                monitor,
-                title_prefix,
-            } => {
-                let options = SpawnOptions {
-                    count,
-                    monitor,
-                    title_prefix,
-                    emit_events: true,
-                    size: None,
-                };
+            Request::Spawn { options } => {
+                let options = options.into_options();
                 match TestWindows::spawn_with(&options) {
                     Ok(batch) => {
                         let windows = batch.windows();

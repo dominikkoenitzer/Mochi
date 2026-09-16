@@ -1,0 +1,10 @@
+# One toolchain for the checkout, CI and the release build.
+#
+# The channel is deliberately `stable` and not a version number: the MSRV lives
+# in Cargo.toml as rust-version and is what tells a consumer how old a compiler
+# may be, while everyone building this repository tracks stable.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]
+profile = "minimal"
