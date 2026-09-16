@@ -5,7 +5,7 @@
 //! seed is printed with every assertion.
 
 use mochi_core::geometry::{Axis, Direction, Rect};
-use mochi_core::layout::{Flip, Layout, Sizing};
+use mochi_core::layout::{Flip, Layout, MIN_TILE_SIZE, Sizing};
 use mochi_core::model::{Container, CycleDirection, Monitor, State, Window, WindowId};
 
 /// The 4K panel on the left and the portrait panel on the right, the pair this
@@ -435,4 +435,47 @@ fn a_stack_never_loses_a_window() {
         .filter_map(Container::focused_window_id)
         .collect();
     assert_eq!(dedup(&ids).len(), 4);
+}
+
+#[test]
+fn no_random_resize_sequence_shrinks_a_tile_below_the_minimum() {
+    // Every layout, every container count the hotkeys can produce, and a long
+    // random run of resize presses on random containers: no tile may end up
+    // thinner than the minimum while the work area has room for them all.
+    for layout in Layout::ALL {
+        for len in 1..=12_usize {
+            for seed in 0..6_u64 {
+                let mut rng = Rng::new(seed ^ 0x5e51_2e00 ^ len as u64);
+                let mut state = two_monitors(0);
+                state.default_workspace_padding = 0;
+                state.change_layout(layout).unwrap();
+                for id in 1..=len {
+                    state.add_window(Window::new(id as isize)).unwrap();
+                }
+
+                for step in 0..60 {
+                    state
+                        .focused_workspace_mut()
+                        .unwrap()
+                        .focus_container(rng.below(len));
+                    let axis = rng.pick(&[Axis::Horizontal, Axis::Vertical]);
+                    let sizing = rng.pick(&[Sizing::Increase, Sizing::Decrease]);
+                    state.resize_axis(axis, sizing).ok();
+
+                    let context =
+                        format!("{layout} with {len} containers, seed {seed}, step {step}");
+                    let rects = state.workspace(0, 0).unwrap().latest_layout();
+                    for (i, rect) in rects.iter().enumerate() {
+                        assert!(
+                            rect.width() >= MIN_TILE_SIZE && rect.height() >= MIN_TILE_SIZE,
+                            "{context}: tile {i} is {}x{}, below the {MIN_TILE_SIZE} px minimum",
+                            rect.width(),
+                            rect.height()
+                        );
+                    }
+                    check_state(&state, &context);
+                }
+            }
+        }
+    }
 }

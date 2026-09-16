@@ -108,6 +108,16 @@ pub struct State {
     pub work_area_offset: Option<Offset>,
     /// Make every new window float, everywhere.
     pub float_override: bool,
+    /// Multiply the paddings and the minimum tile size by the monitor scale
+    /// factor, so a 14 pixel padding looks the same on every display.
+    pub scale_padding_with_dpi: bool,
+    /// Windows that appeared while the manager was paused.
+    ///
+    /// They are tracked but not managed: nothing is moved, hidden or focused
+    /// for them until [`State::toggle_pause`] turns tiling back on or
+    /// [`State::retile`] runs, which is when they join the focused workspace
+    /// through the normal rules.
+    pub pending_windows: Vec<Window>,
     /// The rules that decide what happens to a window when it appears.
     pub rules: RuleSets,
 }
@@ -128,6 +138,8 @@ impl Default for State {
             resize_delta: 50,
             work_area_offset: None,
             float_override: false,
+            scale_padding_with_dpi: true,
+            pending_windows: Vec::new(),
             rules: RuleSets::new(),
         }
     }
@@ -325,6 +337,39 @@ impl State {
             return Err(Error::WorkspaceIndexOutOfRange(idx));
         }
         Ok(())
+    }
+
+    /// Checks that a workspace index can be used on that monitor.
+    ///
+    /// A workspace the configuration created is always allowed, however many
+    /// there are: [`MAX_WORKSPACES`] only caps the ones the manager creates on
+    /// demand for an index nobody configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WorkspaceIndexOutOfRange`] for an index that neither
+    /// exists nor can be created.
+    pub fn check_workspace_idx_on(&self, monitor: usize, idx: usize) -> Result<()> {
+        let configured = self
+            .monitors
+            .get(monitor)
+            .map_or(0, |m| m.workspaces().len());
+        if idx < configured || idx < MAX_WORKSPACES {
+            return Ok(());
+        }
+        Err(Error::WorkspaceIndexOutOfRange(idx))
+    }
+
+    /// The factor the paddings and the minimum tile size are multiplied by on
+    /// that monitor, or 1.0 when [`State::scale_padding_with_dpi`] is off.
+    #[must_use]
+    pub fn padding_scale(&self, monitor: usize) -> f32 {
+        if !self.scale_padding_with_dpi {
+            return 1.0;
+        }
+        self.monitors
+            .get(monitor)
+            .map_or(1.0, Monitor::scale_factor)
     }
 
     /// A mutable borrow of one workspace.
