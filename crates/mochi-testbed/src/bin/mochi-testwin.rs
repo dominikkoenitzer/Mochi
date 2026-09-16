@@ -118,6 +118,30 @@ enum Command {
         #[arg(long, value_parser = parse_hwnd)]
         hwnd: i64,
     },
+    /// Cloak or uncloak one window, the way a manager hides a workspace.
+    Cloak {
+        /// The window, decimal or 0x hex.
+        #[arg(long, value_parser = parse_hwnd)]
+        hwnd: i64,
+        /// Hide the window through DWM.
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+        /// Show it again.
+        #[arg(long, required_unless_present = "on")]
+        off: bool,
+    },
+    /// Give one window a transparency, or take it away again.
+    Alpha {
+        /// The window, decimal or 0x hex.
+        #[arg(long, value_parser = parse_hwnd)]
+        hwnd: i64,
+        /// Opacity from 0, invisible, to 255, opaque.
+        #[arg(long, conflicts_with = "clear", required_unless_present = "clear")]
+        value: Option<u8>,
+        /// Drop the transparency and the layered bit with it.
+        #[arg(long)]
+        clear: bool,
+    },
     /// Give one window a new title.
     Rename {
         /// The window, decimal or 0x hex.
@@ -255,6 +279,20 @@ mod imp {
             Command::Restore { hwnd } => {
                 mochi_testbed::restore_window(hwnd)?;
                 print(&result("restore", hwnd));
+                Ok(())
+            }
+            Command::Cloak { hwnd, on, off: _ } => {
+                mochi_testbed::set_cloaked(hwnd, on)?;
+                print(&result("cloak", hwnd));
+                Ok(())
+            }
+            Command::Alpha {
+                hwnd,
+                value,
+                clear: _,
+            } => {
+                mochi_testbed::set_window_alpha(hwnd, value)?;
+                print(&result("alpha", hwnd));
                 Ok(())
             }
             Command::Rename { hwnd, title } => {
