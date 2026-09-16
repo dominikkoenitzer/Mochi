@@ -1,0 +1,1328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "description": "The whole configuration file.\n\nEverything is optional. [`Config::default`] is what you get from an empty\nJSON object, and unknown keys are ignored.",
+  "type": "object",
+  "properties": {
+    "animation": {
+      "description": "Window movement animation.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AnimationConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "app_specific_configuration_path": {
+      "description": "The community application rules file to load on top of these rules.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "border": {
+      "description": "Draw a border around the focused window.",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": null
+    },
+    "border_colours": {
+      "description": "The border colour for each window state.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BorderColours"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "border_offset": {
+      "description": "How far the border sits outside the window rectangle.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32",
+      "default": null
+    },
+    "border_overflow_applications": {
+      "description": "Applications whose border sits outside the window rectangle.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
+    "border_style": {
+      "description": "The shape of the border.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BorderStyle"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "border_width": {
+      "description": "Border thickness in pixels.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32",
+      "default": null
+    },
+    "cross_monitor_move_behaviour": {
+      "description": "What moving a container past a monitor edge does.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MoveBehaviour"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "default_container_padding": {
+      "description": "Padding around a container in a workspace that has none of its own.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32",
+      "default": null
+    },
+    "default_workspace_padding": {
+      "description": "Padding around a workspace that has none of its own.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32",
+      "default": null
+    },
+    "display_index_preferences": {
+      "description": "Pins a monitor index to the display with that device id.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "default": null,
+      "patternProperties": {
+        "^\\d+$": {
+          "type": "string"
+        }
+      }
+    },
+    "float_override": {
+      "description": "Make every new window float.",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": null
+    },
+    "floating_applications": {
+      "description": "Windows that are managed but never tiled.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
+    "focus_follows_mouse": {
+      "description": "Whether hovering a window focuses it, and with which implementation.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FocusFollowsMouseImplementation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "global_work_area_offset": {
+      "description": "An alias the existing config format also accepts for `work_area_offset`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Offset"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "ignore_rules": {
+      "description": "Windows that are never touched at all.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
+    "layered_whitelist": {
+      "description": "Layered windows that should be managed anyway.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
+    "manage_rules": {
+      "description": "Windows that are managed even though the heuristics say no.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
+    "monitor_index_preferences": {
+      "description": "Pins a monitor index to the display whose size matches the rectangle.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "default": null,
+      "patternProperties": {
+        "^\\d+$": {
+          "$ref": "#/$defs/Rect"
+        }
+      }
+    },
+    "monitors": {
+      "description": "The monitors, in the order they should be indexed.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MonitorConfig"
+      }
+    },
+    "mouse_follows_focus": {
+      "description": "Warp the cursor onto a window when it takes focus.",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": null
+    },
+    "object_name_change_applications": {
+      "description": "Applications that reuse one window and only change its title.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
+    "resize_delta": {
+      "description": "How many pixels one `resize-axis` step moves a boundary.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32",
+      "default": null
+    },
+    "slow_application_identifiers": {
+      "description": "Applications that need an extra beat before their window is ready.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
+    "stackbar": {
+      "description": "The tab bar above a stacked container.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StackbarConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "transparency": {
+      "description": "Make unfocused windows transparent.",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": null
+    },
+    "transparency_alpha": {
+      "description": "The alpha value applied to unfocused windows, 0 to 255.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint8",
+      "default": null,
+      "maximum": 255,
+      "minimum": 0
+    },
+    "transparency_ignore_rules": {
+      "description": "Windows that must never be made transparent.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
+    "tray_and_multi_window_applications": {
+      "description": "Applications that keep a hidden window alive in the tray.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
+    "unmanaged_window_operation_behaviour": {
+      "description": "What a command aimed at an unmanaged window does.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OperationBehaviour"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "window_container_behaviour": {
+      "description": "Whether a new window stacks onto the focused container.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WindowContainerBehaviour"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "window_hiding_behaviour": {
+      "description": "How windows on an inactive workspace are taken off screen.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HidingBehaviour"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "work_area_offset": {
+      "description": "A work area offset applied to every monitor without one of its own.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Offset"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "$defs": {
+    "AnimationConfig": {
+      "description": "Window movement animation.",
+      "type": "object",
+      "properties": {
+        "duration": {
+          "description": "How long one animation takes, in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "Turns animation on.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "fps": {
+          "description": "How many frames per second to draw.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "style": {
+          "description": "The easing curve.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnimationStyle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "AnimationStyle": {
+      "description": "A standard easing curve.\n\nThe names are the ones from easings.net, which is also what the existing\nconfig format uses, so `\"style\": \"EaseOutQuad\"` in a migrated config keeps\nworking.",
+      "oneOf": [
+        {
+          "description": "No easing at all.",
+          "type": "string",
+          "const": "Linear"
+        },
+        {
+          "description": "Sine, slow start.",
+          "type": "string",
+          "const": "EaseInSine"
+        },
+        {
+          "description": "Sine, slow end.",
+          "type": "string",
+          "const": "EaseOutSine"
+        },
+        {
+          "description": "Sine, slow at both ends.",
+          "type": "string",
+          "const": "EaseInOutSine"
+        },
+        {
+          "description": "Quadratic, slow start.",
+          "type": "string",
+          "const": "EaseInQuad"
+        },
+        {
+          "description": "Quadratic, slow end. The usual choice for window movement.",
+          "type": "string",
+          "const": "EaseOutQuad"
+        },
+        {
+          "description": "Quadratic, slow at both ends.",
+          "type": "string",
+          "const": "EaseInOutQuad"
+        },
+        {
+          "description": "Cubic, slow start.",
+          "type": "string",
+          "const": "EaseInCubic"
+        },
+        {
+          "description": "Cubic, slow end.",
+          "type": "string",
+          "const": "EaseOutCubic"
+        },
+        {
+          "description": "Cubic, slow at both ends.",
+          "type": "string",
+          "const": "EaseInOutCubic"
+        },
+        {
+          "description": "Quartic, slow start.",
+          "type": "string",
+          "const": "EaseInQuart"
+        },
+        {
+          "description": "Quartic, slow end.",
+          "type": "string",
+          "const": "EaseOutQuart"
+        },
+        {
+          "description": "Quartic, slow at both ends.",
+          "type": "string",
+          "const": "EaseInOutQuart"
+        },
+        {
+          "description": "Quintic, slow start.",
+          "type": "string",
+          "const": "EaseInQuint"
+        },
+        {
+          "description": "Quintic, slow end.",
+          "type": "string",
+          "const": "EaseOutQuint"
+        },
+        {
+          "description": "Quintic, slow at both ends.",
+          "type": "string",
+          "const": "EaseInOutQuint"
+        },
+        {
+          "description": "Exponential, slow start.",
+          "type": "string",
+          "const": "EaseInExpo"
+        },
+        {
+          "description": "Exponential, slow end.",
+          "type": "string",
+          "const": "EaseOutExpo"
+        },
+        {
+          "description": "Exponential, slow at both ends.",
+          "type": "string",
+          "const": "EaseInOutExpo"
+        },
+        {
+          "description": "Circular, slow start.",
+          "type": "string",
+          "const": "EaseInCirc"
+        },
+        {
+          "description": "Circular, slow end.",
+          "type": "string",
+          "const": "EaseOutCirc"
+        },
+        {
+          "description": "Circular, slow at both ends.",
+          "type": "string",
+          "const": "EaseInOutCirc"
+        },
+        {
+          "description": "Overshoots backwards at the start.",
+          "type": "string",
+          "const": "EaseInBack"
+        },
+        {
+          "description": "Overshoots forwards at the end.",
+          "type": "string",
+          "const": "EaseOutBack"
+        },
+        {
+          "description": "Overshoots at both ends.",
+          "type": "string",
+          "const": "EaseInOutBack"
+        },
+        {
+          "description": "Springs at the start.",
+          "type": "string",
+          "const": "EaseInElastic"
+        },
+        {
+          "description": "Springs at the end.",
+          "type": "string",
+          "const": "EaseOutElastic"
+        },
+        {
+          "description": "Springs at both ends.",
+          "type": "string",
+          "const": "EaseInOutElastic"
+        },
+        {
+          "description": "Bounces at the start.",
+          "type": "string",
+          "const": "EaseInBounce"
+        },
+        {
+          "description": "Bounces at the end.",
+          "type": "string",
+          "const": "EaseOutBounce"
+        },
+        {
+          "description": "Bounces at both ends.",
+          "type": "string",
+          "const": "EaseInOutBounce"
+        }
+      ]
+    },
+    "ApplicationIdentifier": {
+      "description": "The piece of window metadata a rule looks at.",
+      "oneOf": [
+        {
+          "description": "The file name of the owning executable, for example `firefox.exe`.",
+          "type": "string",
+          "const": "Exe"
+        },
+        {
+          "description": "The Win32 window class.",
+          "type": "string",
+          "const": "Class"
+        },
+        {
+          "description": "The window title.",
+          "type": "string",
+          "const": "Title"
+        },
+        {
+          "description": "The full path of the owning executable.",
+          "type": "string",
+          "const": "Path"
+        }
+      ]
+    },
+    "BorderColours": {
+      "description": "The border colour for each window state.",
+      "type": "object",
+      "properties": {
+        "floating": {
+          "description": "A focused window that is floating.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "monocle": {
+          "description": "A focused window in monocle mode.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "single": {
+          "description": "A focused window that is alone in its container.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stack": {
+          "description": "A focused window that shares its container with others.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "unfocused": {
+          "description": "Every window that is not focused.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "BorderStyle": {
+      "description": "The shape of the focus border.",
+      "oneOf": [
+        {
+          "description": "Follow whatever Windows is doing.",
+          "type": "string",
+          "const": "System"
+        },
+        {
+          "description": "Always rounded corners.",
+          "type": "string",
+          "const": "Rounded"
+        },
+        {
+          "description": "Always square corners.",
+          "type": "string",
+          "const": "Square"
+        }
+      ]
+    },
+    "Colour": {
+      "description": "A colour as \"#rrggbb\", as {r, g, b} or as a Win32 COLORREF integer.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "b": {
+              "type": "integer",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "g": {
+              "type": "integer",
+              "maximum": 255,
+              "minimum": 0
+            },
+            "r": {
+              "type": "integer",
+              "maximum": 255,
+              "minimum": 0
+            }
+          },
+          "required": [
+            "r",
+            "g",
+            "b"
+          ]
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ]
+    },
+    "FocusFollowsMouseImplementation": {
+      "description": "Which implementation of focus follows mouse is in use.",
+      "oneOf": [
+        {
+          "description": "The Windows accessibility setting.",
+          "type": "string",
+          "const": "Windows"
+        },
+        {
+          "description": "Mochi's own mouse tracking.",
+          "type": "string",
+          "const": "Mochi"
+        }
+      ]
+    },
+    "HidingBehaviour": {
+      "description": "How a window is taken off screen when its workspace is not visible.",
+      "oneOf": [
+        {
+          "description": "`ShowWindow(SW_HIDE)`. Fast, but some applications dislike it.",
+          "type": "string",
+          "const": "Hide"
+        },
+        {
+          "description": "Minimize the window. Plays nicely with the taskbar, animates.",
+          "type": "string",
+          "const": "Minimize"
+        },
+        {
+          "description": "Mark the window as cloaked in DWM. Invisible but still composited.",
+          "type": "string",
+          "const": "Cloak"
+        }
+      ]
+    },
+    "IdWithIdentifier": {
+      "description": "One condition: look at `kind`, compare it with `id` using `matching_strategy`.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The value to compare against.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Which piece of metadata to look at.",
+          "$ref": "#/$defs/ApplicationIdentifier"
+        },
+        "matching_strategy": {
+          "description": "How to compare. Missing means [`MatchingStrategy::Legacy`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MatchingStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ]
+    },
+    "Layout": {
+      "description": "How containers are arranged inside a workspace.\n\nThe JSON names are the ones of the existing config format, so\n`\"layout\": \"BSP\"` in a migrated config keeps working.",
+      "oneOf": [
+        {
+          "description": "Binary space partition: every new container halves the space left over\nby the previous one, alternating between vertical and horizontal splits.",
+          "type": "string",
+          "const": "BSP"
+        },
+        {
+          "description": "Equal width columns, left to right.",
+          "type": "string",
+          "const": "Columns"
+        },
+        {
+          "description": "Equal height rows, top to bottom.",
+          "type": "string",
+          "const": "Rows"
+        },
+        {
+          "description": "One container on the left, the rest stacked vertically on the right.",
+          "type": "string",
+          "const": "VerticalStack"
+        },
+        {
+          "description": "One container on top, the rest side by side underneath.",
+          "type": "string",
+          "const": "HorizontalStack"
+        },
+        {
+          "description": "The main container in the middle, the second one on the left and the\nrest stacked on the right. For very wide screens.",
+          "type": "string",
+          "const": "UltrawideVerticalStack"
+        },
+        {
+          "description": "A grid of roughly square cells.",
+          "type": "string",
+          "const": "Grid"
+        }
+      ]
+    },
+    "MatchingRule": {
+      "description": "A rule: either one condition or a set of conditions that all have to hold.",
+      "anyOf": [
+        {
+          "description": "A single condition.",
+          "$ref": "#/$defs/IdWithIdentifier"
+        },
+        {
+          "description": "Several conditions, combined with a logical and.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdWithIdentifier"
+          }
+        }
+      ]
+    },
+    "MatchingStrategy": {
+      "description": "How the rule's `id` is compared against the window's value.",
+      "oneOf": [
+        {
+          "description": "The compatibility fallback used by older rule files.\n\nThe identifier is treated as a regular expression when it contains\nregex metacharacters, and as an exact comparison otherwise.",
+          "type": "string",
+          "const": "Legacy"
+        },
+        {
+          "description": "Exact, case sensitive.",
+          "type": "string",
+          "const": "Equals"
+        },
+        {
+          "description": "Anything but an exact match.",
+          "type": "string",
+          "const": "DoesNotEqual"
+        },
+        {
+          "description": "The value begins with the identifier.",
+          "type": "string",
+          "const": "StartsWith"
+        },
+        {
+          "description": "The value does not begin with the identifier.",
+          "type": "string",
+          "const": "DoesNotStartWith"
+        },
+        {
+          "description": "The value ends with the identifier.",
+          "type": "string",
+          "const": "EndsWith"
+        },
+        {
+          "description": "The value does not end with the identifier.",
+          "type": "string",
+          "const": "DoesNotEndWith"
+        },
+        {
+          "description": "The identifier appears somewhere in the value.",
+          "type": "string",
+          "const": "Contains"
+        },
+        {
+          "description": "The identifier appears nowhere in the value.",
+          "type": "string",
+          "const": "DoesNotContain"
+        },
+        {
+          "description": "The identifier is a regular expression that matches somewhere in the value.",
+          "type": "string",
+          "const": "Regex"
+        }
+      ]
+    },
+    "MonitorConfig": {
+      "description": "One monitor, as configured.",
+      "type": "object",
+      "properties": {
+        "window_based_work_area_offset": {
+          "description": "An offset for workspaces that opt in.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Offset"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "window_based_work_area_offset_limit": {
+          "description": "The container count up to which the offset above applies.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "work_area_offset": {
+          "description": "A work area offset just for this monitor.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Offset"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "workspaces": {
+          "description": "The workspaces on this monitor, in order.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WorkspaceConfig"
+          }
+        }
+      }
+    },
+    "MoveBehaviour": {
+      "description": "What happens when a container is moved past the edge of its monitor.",
+      "oneOf": [
+        {
+          "description": "Swap places with the container that is focused on the target monitor.",
+          "type": "string",
+          "const": "Swap"
+        },
+        {
+          "description": "Insert the container into the target workspace at the edge it entered\nthrough.",
+          "type": "string",
+          "const": "Insert"
+        },
+        {
+          "description": "Do nothing at the edge.",
+          "type": "string",
+          "const": "NoOp"
+        }
+      ]
+    },
+    "Offset": {
+      "description": "Per-edge pixel deltas that shrink (positive) or grow (negative) an area.\n\nThis is the shape the existing config format uses for `work_area_offset`,\nso an existing config migrates unchanged.",
+      "type": "object",
+      "properties": {
+        "bottom": {
+          "description": "Pixels taken off the bottom edge.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "left": {
+          "description": "Pixels taken off the left edge.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "right": {
+          "description": "Pixels taken off the right edge.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "top": {
+          "description": "Pixels taken off the top edge.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        }
+      }
+    },
+    "OperationBehaviour": {
+      "description": "What happens when a command is aimed at a window the manager does not own.",
+      "oneOf": [
+        {
+          "description": "Run the command anyway.",
+          "type": "string",
+          "const": "Op"
+        },
+        {
+          "description": "Refuse the command.",
+          "type": "string",
+          "const": "NoOp"
+        }
+      ]
+    },
+    "Rect": {
+      "description": "An axis-aligned rectangle in physical screen pixels.",
+      "type": "object",
+      "properties": {
+        "bottom": {
+          "description": "The exclusive bottom edge.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "left": {
+          "description": "The inclusive left edge.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "right": {
+          "description": "The exclusive right edge.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "top": {
+          "description": "The inclusive top edge.",
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "required": [
+        "left",
+        "top",
+        "right",
+        "bottom"
+      ]
+    },
+    "StackbarConfig": {
+      "description": "The tab bar drawn above a stacked container.\n\nTypes only for now; nothing in this crate draws anything.",
+      "type": "object",
+      "properties": {
+        "height": {
+          "description": "Bar height in pixels.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "label": {
+          "description": "What a tab says.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StackbarLabel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mode": {
+          "description": "When to draw the bar.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StackbarMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tabs": {
+          "description": "The look of the tabs.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StackbarTabs"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "StackbarLabel": {
+      "description": "What a stackbar tab says.",
+      "oneOf": [
+        {
+          "description": "The window title.",
+          "type": "string",
+          "const": "Title"
+        },
+        {
+          "description": "The name of the owning executable.",
+          "type": "string",
+          "const": "Process"
+        }
+      ]
+    },
+    "StackbarMode": {
+      "description": "When the tab bar above a stacked container is drawn.",
+      "oneOf": [
+        {
+          "description": "Always draw it.",
+          "type": "string",
+          "const": "Always"
+        },
+        {
+          "description": "Only draw it for containers with more than one window.",
+          "type": "string",
+          "const": "OnStack"
+        },
+        {
+          "description": "Never draw it.",
+          "type": "string",
+          "const": "Never"
+        }
+      ]
+    },
+    "StackbarTabs": {
+      "description": "The look of one stackbar tab.",
+      "type": "object",
+      "properties": {
+        "background": {
+          "description": "Tab background colour.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "focused_text": {
+          "description": "Text colour of the focused tab.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "font_family": {
+          "description": "Font family name.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "font_size": {
+          "description": "Font size in points.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "unfocused_text": {
+          "description": "Text colour of the other tabs.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "width": {
+          "description": "Tab width in pixels.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        }
+      }
+    },
+    "WindowContainerBehaviour": {
+      "description": "Whether a new window joins the focused container or gets one of its own.",
+      "oneOf": [
+        {
+          "description": "Give every new window its own container.",
+          "type": "string",
+          "const": "Create"
+        },
+        {
+          "description": "Stack every new window onto the focused container.",
+          "type": "string",
+          "const": "Append"
+        }
+      ]
+    },
+    "WorkspaceConfig": {
+      "description": "One workspace, as configured.",
+      "type": "object",
+      "properties": {
+        "apply_window_based_work_area_offset": {
+          "description": "Apply the monitor's window based work area offset to this workspace.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "container_padding": {
+          "description": "Padding around each container.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "float_override": {
+          "description": "Make every window opened here float.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "initial_workspace_rules": {
+          "description": "Windows matching these rules open here the first time they are seen.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "$ref": "#/$defs/MatchingRule"
+          }
+        },
+        "layout": {
+          "description": "The layout to start with.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Layout"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "layout_rules": {
+          "description": "Layout per container count.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "default": null,
+          "patternProperties": {
+            "^\\d+$": {
+              "$ref": "#/$defs/Layout"
+            }
+          }
+        },
+        "name": {
+          "description": "The workspace name shown by a status bar.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "window_container_behaviour": {
+          "description": "Whether a new window stacks onto the focused container here.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WindowContainerBehaviour"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "workspace_padding": {
+          "description": "Padding around the whole workspace.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "workspace_rules": {
+          "description": "Windows matching these rules always end up here.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "$ref": "#/$defs/MatchingRule"
+          }
+        }
+      }
+    }
+  }
+}
