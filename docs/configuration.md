@@ -42,7 +42,7 @@ mochic schema > mochi.schema.json
 | `manage_rules` | rule array | `[]` | Windows Mochi manages even though the usual checks say no. |
 | `floating_applications` | rule array | `[]` | Windows that are managed but never tiled. |
 | `monitors` | array | `[]` | Per monitor settings in physical order, see below. |
-| `work_area_offset` | offset object | none | Pixels taken off every monitor's work area, for a bar or a dock. |
+| `work_area_offset` | offset object | none | Pixels taken off every monitor's work area, to leave room for something else on screen. |
 | `unmanaged_window_operation_behaviour` | `Op`, `NoOp` | `Op` | Whether commands still act when the focused window is not managed. |
 | `monitor_index_preferences` | object | none | Monitor index to rect, pins an index to the screen at that position. |
 | `display_index_preferences` | object | none | Monitor index to display id, pins an index to a physical display. |
@@ -70,7 +70,8 @@ Hex strings such as `"#ffbbdf"`. Every key is optional.
 
 ## stackbar
 
-Planned for a later milestone. The shape is already fixed, so a copied config keeps
+Off by default and not drawn at all: nothing is ever painted above a window
+unless the configuration asks for it. The shape is already fixed, so a copied config keeps
 validating.
 
 | Key | Type | Meaning |

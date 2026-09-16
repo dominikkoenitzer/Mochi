@@ -66,7 +66,7 @@ The groups below follow the order of the hotkey file.
 |---|---|---|
 | `state` | none | Print the whole daemon state as JSON. |
 | `query` | target | Print one value. Targets: `focused-monitor-index`, `focused-workspace-index`, `focused-container-index`, `focused-window-index` (the index inside the focused container), `focused-workspace-name`, `monitor-count`, `window-count`, `paused`, `dry-run`, `config-path`, `version`. |
-| `subscribe-pipe` | name | Send every event to a named pipe the subscriber created, for a status bar. |
+| `subscribe-pipe` | name | Send every event to a named pipe the subscriber created, for scripts and integrations. |
 | `unsubscribe-pipe` | name | Stop sending events to that pipe. |
 
 ## Control
