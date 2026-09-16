@@ -45,7 +45,7 @@ use crate::geometry::Rect;
 use crate::info::{MonitorInfo, TestWindowInfo};
 use crate::wide::{to_wide, to_wide_unterminated};
 use crate::win32;
-use crate::{DEFAULT_TITLE_PREFIX, TEST_WINDOW_CLASS};
+use crate::{DEFAULT_TITLE_PREFIX, OWNER_WINDOW_CLASS, TEST_WINDOW_CLASS};
 
 /// Where the pointer to the per-window state lives, in the class extra bytes.
 const STATE_SLOT: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(0);
@@ -55,7 +55,19 @@ const STATE_SLOT: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(0);
 static NEXT_INDEX: AtomicU32 = AtomicU32::new(1);
 
 /// How often the close path looks whether the windows are gone.
-const POLL: Duration = Duration::from_millis(15);
+const POLL: Duration = win32::POLL;
+
+/// How long a freshly created window gets to appear with a settled frame.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long `close_all` waits for the windows to disappear, in two halves: one
+/// round of `WM_CLOSE`, and a second round for a window that missed the first.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The smallest a test window lets a layout make it, in physical pixels. Small
+/// on purpose: a test window that fights the tiler hides the tiler's mistakes.
+/// `SpawnOptions::min_size` is how a test asks for an application that does.
+const DEFAULT_MIN_SIZE: (i32, i32) = (120, 80);
 
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(((b as u32) << 16) | ((g as u32) << 8) | (r as u32))
@@ -92,6 +104,22 @@ pub struct SpawnOptions {
     /// Window size in physical pixels. `None` picks something that fits the
     /// monitor and scales with its DPI.
     pub size: Option<(i32, i32)>,
+    /// Top left corner in virtual screen coordinates. `None` staggers the batch
+    /// across the work area; `Some` is taken exactly, so a test can start from
+    /// a known rect instead of from wherever the stagger landed.
+    pub position: Option<(i32, i32)>,
+    /// Minimum track size in physical pixels, answered on `WM_GETMINMAXINFO`.
+    /// `None` keeps the default 120x80, which lets a layout make the window as
+    /// small as it likes. `Some` simulates an application that refuses to go
+    /// below a size, which is the case a tiler gets wrong.
+    pub min_size: Option<(i32, i32)>,
+    /// Create each window as an owned popup: a hidden owner window of the class
+    /// `MochiTestOwnerWindow`, and the visible window owned by it. The usual
+    /// manageability rules skip an owned window.
+    pub owned: bool,
+    /// Create the windows with an empty title. The usual manageability rules
+    /// skip a window without one.
+    pub no_title: bool,
 }
 
 impl Default for SpawnOptions {
@@ -102,6 +130,10 @@ impl Default for SpawnOptions {
             title_prefix: DEFAULT_TITLE_PREFIX.to_string(),
             emit_events: false,
             size: None,
+            position: None,
+            min_size: None,
+            owned: false,
+            no_title: false,
         }
     }
 }
@@ -178,20 +210,29 @@ impl TestWindows {
 
         for slot in 0..options.count {
             let index = NEXT_INDEX.fetch_add(1, Ordering::SeqCst);
-            let title = format!("{} {index}", options.title_prefix);
-            let rect = placement(&monitor, slot, options.size);
-            let color = PALETTE[(index as usize) % PALETTE.len()];
-            let emit = options.emit_events;
+            let title = if options.no_title {
+                String::new()
+            } else {
+                format!("{} {index}", options.title_prefix)
+            };
+            let spec = WindowSpec {
+                index,
+                title: title.clone(),
+                rect: placement(&monitor, slot, options.size, options.position),
+                color: PALETTE[(index as usize) % PALETTE.len()],
+                emit: options.emit_events,
+                min_size: options.min_size.unwrap_or(DEFAULT_MIN_SIZE),
+                owned: options.owned,
+            };
 
             let (tx, rx) = mpsc::channel::<std::result::Result<i64, String>>();
             let alive = Arc::clone(&batch.alive);
             alive.fetch_add(1, Ordering::SeqCst);
 
-            let thread_title = title.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("mochi-testwin-{index}"))
                 .spawn(move || {
-                    match unsafe { create_window(index, &thread_title, rect, color, emit) } {
+                    match unsafe { create_window(&spec) } {
                         Ok(hwnd) => {
                             let _ = tx.send(Ok(win32::as_i64(hwnd)));
                             drop(tx);
@@ -215,6 +256,13 @@ impl TestWindows {
                     return Err(Error::timeout(format!("test window {index} to be created")));
                 }
             }
+        }
+
+        // Nothing is handed back until every window is on the screen with a
+        // frame that has stopped moving. A batch that returns earlier makes
+        // every layout assertion that follows a race.
+        for window in &batch.spawned {
+            win32::wait_until_settled(window.hwnd, SETTLE_TIMEOUT)?;
         }
 
         Ok(batch)
@@ -309,7 +357,18 @@ impl TestWindows {
         for &hwnd in &handles {
             let _ = win32::close_window(hwnd);
         }
-        let gone = win32::wait_until_gone(&handles, Duration::from_secs(5));
+        // Two rounds: a window whose thread was busy when the first WM_CLOSE
+        // arrived gets a second one rather than a timeout, and the call only
+        // returns once every window is really gone from the desktop.
+        let mut gone = win32::wait_until_gone(&handles, CLOSE_TIMEOUT / 2);
+        if gone.is_err() {
+            for &hwnd in &handles {
+                if win32::window_exists(hwnd) {
+                    let _ = win32::close_window(hwnd);
+                }
+            }
+            gone = win32::wait_until_gone(&handles, CLOSE_TIMEOUT / 2);
+        }
 
         // The message loops end on WM_QUIT, a moment after the window is gone.
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -339,7 +398,12 @@ impl Drop for TestWindows {
 
 /// Where window number `slot` of a batch goes: staggered down and right from
 /// the top left of the work area, wrapping before it leaves the monitor.
-fn placement(monitor: &MonitorInfo, slot: u32, size: Option<(i32, i32)>) -> Rect {
+fn placement(
+    monitor: &MonitorInfo,
+    slot: u32,
+    size: Option<(i32, i32)>,
+    position: Option<(i32, i32)>,
+) -> Rect {
     let work = monitor.work_area;
     let margin = monitor.scale(32);
     let stagger = monitor.scale(48);
@@ -353,6 +417,12 @@ fn placement(monitor: &MonitorInfo, slot: u32, size: Option<(i32, i32)>) -> Rect
     let width = width.clamp(160, work.width().max(160));
     let height = height.clamp(120, work.height().max(120));
 
+    // An explicit corner is taken as given, off the monitor included: a test
+    // that asks for a rect has to get exactly that rect back.
+    if let Some((x, y)) = position {
+        return Rect::from_size(x, y, width, height);
+    }
+
     let room_x = (work.width() - width - 2 * margin).max(1);
     let room_y = (work.height() - height - 2 * margin).max(1);
     let x = work.left + margin + (slot as i32 * stagger) % room_x;
@@ -365,17 +435,42 @@ fn placement(monitor: &MonitorInfo, slot: u32, size: Option<(i32, i32)>) -> Rect
     Rect::from_size(x, y, width, height)
 }
 
+/// Everything one test window is created from. One struct rather than eight
+/// arguments, and it is what crosses the thread boundary into the window's own
+/// thread.
+#[derive(Debug, Clone)]
+struct WindowSpec {
+    index: u32,
+    title: String,
+    rect: Rect,
+    color: COLORREF,
+    emit: bool,
+    min_size: (i32, i32),
+    owned: bool,
+}
+
 /// Per-window state, owned by the window: created before `CreateWindowExW`,
 /// freed in `WM_NCDESTROY`.
 struct WindowState {
     index: u32,
     color: COLORREF,
     emit: bool,
+    min_size: (i32, i32),
+    /// The hidden owner of an owned popup, destroyed with the popup.
+    owner: isize,
+    /// True for the hidden owner window itself, which paints nothing, emits
+    /// nothing and must not end its thread's message loop.
+    is_owner: bool,
 }
 
 fn class_name_wide() -> &'static [u16] {
     static NAME: OnceLock<Vec<u16>> = OnceLock::new();
     NAME.get_or_init(|| to_wide(TEST_WINDOW_CLASS))
+}
+
+fn owner_class_name_wide() -> &'static [u16] {
+    static NAME: OnceLock<Vec<u16>> = OnceLock::new();
+    NAME.get_or_init(|| to_wide(OWNER_WINDOW_CLASS))
 }
 
 fn font_name_wide() -> &'static [u16] {
@@ -386,12 +481,16 @@ fn font_name_wide() -> &'static [u16] {
 fn ensure_class() -> Result<()> {
     static REGISTERED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     REGISTERED
-        .get_or_init(|| register_class().map_err(|e| e.to_string()))
+        .get_or_init(|| {
+            register_class(class_name_wide())
+                .and_then(|()| register_class(owner_class_name_wide()))
+                .map_err(|e| e.to_string())
+        })
         .clone()
         .map_err(Error::Other)
 }
 
-fn register_class() -> Result<()> {
+fn register_class(name: &'static [u16]) -> Result<()> {
     unsafe {
         let module = GetModuleHandleW(None).map_err(|e| Error::win32("GetModuleHandleW", &e))?;
         let class = WNDCLASSW {
@@ -406,7 +505,7 @@ fn register_class() -> Result<()> {
             // resizing does not flash the default grey.
             hbrBackground: HBRUSH::default(),
             lpszMenuName: PCWSTR::null(),
-            lpszClassName: PCWSTR(class_name_wide().as_ptr()),
+            lpszClassName: PCWSTR(name.as_ptr()),
         };
         if RegisterClassW(&class) == 0 {
             let error = windows::core::Error::from_thread();
@@ -419,19 +518,59 @@ fn register_class() -> Result<()> {
     }
 }
 
-unsafe fn create_window(
-    index: u32,
-    title: &str,
-    rect: Rect,
-    color: COLORREF,
-    emit: bool,
-) -> Result<HWND> {
+/// The hidden owner of an owned popup. Its own class, so that the desktop wide
+/// listing of test windows never returns it, and never shown.
+unsafe fn create_owner_window(module: HINSTANCE) -> Result<HWND> {
+    let state = Box::into_raw(Box::new(WindowState {
+        index: 0,
+        color: COLORREF(0),
+        emit: false,
+        min_size: DEFAULT_MIN_SIZE,
+        owner: 0,
+        is_owner: true,
+    }));
+    unsafe {
+        CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            PCWSTR(owner_class_name_wide().as_ptr()),
+            PCWSTR::null(),
+            WS_OVERLAPPEDWINDOW,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(module),
+            Some(state.cast::<c_void>()),
+        )
+    }
+    .map_err(|e| Error::win32("CreateWindowExW (owner)", &e))
+}
+
+unsafe fn create_window(spec: &WindowSpec) -> Result<HWND> {
     ensure_class()?;
 
-    let state = Box::into_raw(Box::new(WindowState { index, color, emit }));
-    let title_wide = to_wide(title);
     let module =
         unsafe { GetModuleHandleW(None) }.map_err(|e| Error::win32("GetModuleHandleW", &e))?;
+    let module = HINSTANCE(module.0);
+
+    let owner = if spec.owned {
+        Some(unsafe { create_owner_window(module) }?)
+    } else {
+        None
+    };
+
+    let state = Box::into_raw(Box::new(WindowState {
+        index: spec.index,
+        color: spec.color,
+        emit: spec.emit,
+        min_size: spec.min_size,
+        owner: owner.map_or(0, |o| o.0 as isize),
+        is_owner: false,
+    }));
+    let title_wide = to_wide(&spec.title);
+    let rect = spec.rect;
 
     let hwnd = unsafe {
         CreateWindowExW(
@@ -445,11 +584,13 @@ unsafe fn create_window(
             WS_OVERLAPPEDWINDOW,
             rect.left,
             rect.top,
-            rect.width().max(160),
-            rect.height().max(120),
+            rect.width().max(spec.min_size.0),
+            rect.height().max(spec.min_size.1),
+            // An owner turns this into an owned popup, which the usual
+            // manageability rules skip.
+            owner,
             None,
-            None,
-            Some(HINSTANCE(module.0)),
+            Some(module),
             Some(state.cast::<c_void>()),
         )
     };
@@ -458,8 +599,8 @@ unsafe fn create_window(
         Ok(hwnd) => {
             // Announce the window before showing it, so the stream reads
             // spawned, then the pos event that showing it produces.
-            if emit {
-                unsafe { emit_event(hwnd, index, EventKind::Spawned) };
+            if spec.emit {
+                unsafe { emit_event(hwnd, spec.index, EventKind::Spawned) };
             }
             // Show without activating: spawning a batch must not steal focus
             // from whatever the user is doing.
@@ -471,6 +612,9 @@ unsafe fn create_window(
             // is freed in WM_NCDESTROY. Creation can fail on either side of
             // that, so it is leaked here rather than risking a double free.
             // One failed window leaks a few bytes, once.
+            if let Some(owner) = owner {
+                let _ = unsafe { DestroyWindow(owner) };
+            }
             Err(Error::win32("CreateWindowExW", &e))
         }
     }
@@ -550,10 +694,12 @@ unsafe extern "system" fn window_proc(
                 let result = DefWindowProcW(hwnd, message, wparam, lparam);
                 let info = lparam.0 as *mut MINMAXINFO;
                 if !info.is_null() {
-                    // Let a layout make these windows small. A real app has a
-                    // minimum size, but a test window fighting the tiler would
-                    // only hide the tiler's own mistakes.
-                    (*info).ptMinTrackSize = POINT { x: 120, y: 80 };
+                    // By default a layout may make these windows as small as it
+                    // likes: a test window fighting the tiler would only hide
+                    // the tiler's own mistakes. `SpawnOptions::min_size` is how
+                    // a test asks for an application that does fight back.
+                    let (x, y) = state_of(hwnd).map_or(DEFAULT_MIN_SIZE, |s| s.min_size);
+                    (*info).ptMinTrackSize = POINT { x, y };
                 }
                 result
             }
@@ -562,7 +708,20 @@ unsafe extern "system" fn window_proc(
                 LRESULT(0)
             }
             WM_DESTROY => {
+                // The hidden owner of an owned popup shares the thread with the
+                // popup it owns; only the popup ends the message loop.
+                if state_of(hwnd).is_some_and(|state| state.is_owner) {
+                    return LRESULT(0);
+                }
                 emit_if_enabled(hwnd, EventKind::Closed);
+                // An owner outlives the window it owns, so it is taken down
+                // here, from the thread that created it.
+                if let Some(owner) = state_of(hwnd)
+                    .map(|state| state.owner)
+                    .filter(|owner| *owner != 0)
+                {
+                    let _ = DestroyWindow(HWND(owner as *mut c_void));
+                }
                 PostQuitMessage(0);
                 LRESULT(0)
             }
@@ -723,7 +882,7 @@ mod tests {
     fn every_window_of_a_batch_lands_inside_the_work_area() {
         let monitor = monitor(96);
         for slot in 0..12 {
-            let rect = placement(&monitor, slot, None);
+            let rect = placement(&monitor, slot, None, None);
             assert!(
                 monitor.work_area.contains(&rect),
                 "slot {slot} at {rect} left {}",
@@ -735,8 +894,8 @@ mod tests {
     #[test]
     fn the_windows_are_staggered_rather_than_stacked() {
         let monitor = monitor(96);
-        let first = placement(&monitor, 0, None);
-        let second = placement(&monitor, 1, None);
+        let first = placement(&monitor, 0, None, None);
+        let second = placement(&monitor, 1, None, None);
         assert_ne!(first.left, second.left);
         assert_ne!(first.top, second.top);
         assert_eq!(first.width(), second.width());
@@ -744,14 +903,14 @@ mod tests {
 
     #[test]
     fn a_high_dpi_monitor_gets_larger_windows() {
-        let small = placement(&monitor(96), 0, None);
-        let large = placement(&monitor(192), 0, None);
+        let small = placement(&monitor(96), 0, None, None);
+        let large = placement(&monitor(192), 0, None, None);
         assert!(large.width() > small.width(), "{large} vs {small}");
     }
 
     #[test]
     fn an_explicit_size_is_honoured() {
-        let rect = placement(&monitor(96), 0, Some((640, 400)));
+        let rect = placement(&monitor(96), 0, Some((640, 400)), None);
         assert_eq!((rect.width(), rect.height()), (640, 400));
     }
 
@@ -760,7 +919,7 @@ mod tests {
         let mut tiny = monitor(96);
         tiny.rect = Rect::from_size(0, 0, 200, 150);
         tiny.work_area = tiny.rect;
-        let rect = placement(&tiny, 3, None);
+        let rect = placement(&tiny, 3, None, None);
         assert!(rect.width() >= 133 && rect.height() >= 100, "{rect}");
     }
 

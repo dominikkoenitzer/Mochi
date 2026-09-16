@@ -214,6 +214,24 @@ function Install-Mochi {
         }
     }
 
+    Write-Step 'checking that the installed binaries run'
+    if ($WhatIfPreference) {
+        Write-Detail 'skipped, nothing was copied under -WhatIf'
+    } else {
+        foreach ($binary in $script:Binaries) {
+            $path = Join-Path $script:BinDir $binary
+            $output = & $path --version 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "$path --version exited with $LASTEXITCODE, the install is not usable"
+            }
+            $line = @($output | Where-Object { "$_".Trim() }) | Select-Object -First 1
+            if (-not $line) {
+                throw "$path --version printed nothing, the install is not usable"
+            }
+            Write-Detail "$line"
+        }
+    }
+
     if ($SkipPath) {
         Write-Step 'user PATH left alone (-SkipPath)'
     } else {

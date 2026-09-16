@@ -51,6 +51,8 @@ The constants are exported so a test never has to spell them out:
 
 ```
 mochi-testwin spawn [--count N] [--monitor I] [--title-prefix X]
+                    [--x X --y Y] [--w W --h H] [--min-size W H]
+                    [--owned] [--no-title]
 mochi-testwin list
 mochi-testwin monitors
 mochi-testwin close --all | --hwnd H
@@ -65,6 +67,32 @@ mochi-testwin rename --hwnd H --title T
 Defaults: `--count 3`, `--monitor 0`, `--title-prefix MochiTest`. Handles are
 accepted as `4660` or `0x1234`, which is what `list` prints and what the daemon
 logs show.
+
+The spawn options that exist for the manageability rules and for deterministic
+tests:
+
+| | |
+|---|---|
+| `--x --y` | Exact top left corner instead of the staggered placement. Taken as given, off the monitor included. Both or neither. |
+| `--w --h` | Exact size in physical pixels. Both or neither. |
+| `--min-size W H` | The size the window defends on `WM_GETMINMAXINFO`. Default 120x80, which lets a layout make it as small as it likes; a larger value simulates an application that refuses to shrink. |
+| `--owned` | Each window becomes an owned popup: a hidden owner window of the class `MochiTestOwnerWindow`, never shown and never listed, owns the visible one. The usual manageability rules skip a window with an owner. |
+| `--no-title` | The windows are created with an empty title, which the usual manageability rules also skip. |
+
+`spawn` waits until every window of the batch is visible and its extended frame
+bounds have stopped moving before it returns or prints, so the first thing a
+test reads is never a half created window.
+
+Beside the state a window is in, `list` reports what a tiling test asserts on:
+
+| Field | Source |
+|---|---|
+| `visible` | `IsWindowVisible` |
+| `minimized` | `IsIconic` |
+| `cloaked` | `DWMWA_CLOAKED`, how a manager hides a workspace |
+| `foreground` | `GetForegroundWindow() == hwnd` |
+| `alpha` | The layered alpha, `null` when nothing made the window layered |
+| `owner` | `GetWindow(GW_OWNER)`, `null` for an ordinary top level window |
 
 Every command prints JSON on stdout:
 

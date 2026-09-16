@@ -35,11 +35,16 @@ mod info;
 pub use error::{Error, Result};
 pub use event::{EventKind, WindowEvent, now_ms};
 pub use geometry::Rect;
-pub use info::{MonitorInfo, TestWindowInfo, WS_EX_TOOLWINDOW_BIT};
+pub use info::{MonitorInfo, TestWindowInfo, WS_EX_LAYERED_BIT, WS_EX_TOOLWINDOW_BIT};
 
 /// The class every test window carries, and the only thing the daemon needs to
 /// know about the testbed.
 pub const TEST_WINDOW_CLASS: &str = "MochiTestWindow";
+
+/// The class of the hidden owner window behind a `spawn --owned` popup. It is
+/// never shown and never listed, and it is deliberately not
+/// [`TEST_WINDOW_CLASS`] so that the desktop wide listing cannot return it.
+pub const OWNER_WINDOW_CLASS: &str = "MochiTestOwnerWindow";
 
 /// The default title prefix; the window index is appended, as in `MochiTest 2`.
 pub const DEFAULT_TITLE_PREFIX: &str = "MochiTest";
@@ -60,9 +65,11 @@ mod window;
 
 #[cfg(windows)]
 pub use win32::{
-    close_window, ensure_per_monitor_v2, focus_window, frame_bounds, list_windows, minimize_window,
-    monitor_at, monitors, move_window, rename_window, resize_window, restore_window, set_rect,
-    wait_for_frame, wait_for_rect, wait_until_gone, window_exists, window_info, window_rect,
+    POLL, cloaked, close_window, ensure_per_monitor_v2, focus_window, foreground_window,
+    frame_bounds, list_windows, minimize_window, monitor_at, monitors, move_window, rename_window,
+    resize_window, restore_window, set_cloaked, set_rect, set_window_alpha, wait_for_frame,
+    wait_for_rect, wait_until_gone, wait_until_settled, window_alpha, window_exists, window_info,
+    window_owner, window_rect,
 };
 #[cfg(windows)]
 pub use window::{SpawnOptions, TestWindow, TestWindows};
