@@ -1127,7 +1127,7 @@
           "const": "OnStack"
         },
         {
-          "description": "Never draw it.",
+          "description": "Never draw it. The default: nothing is ever drawn above a window\nunless the configuration asks for it.",
           "type": "string",
           "const": "Never"
         }

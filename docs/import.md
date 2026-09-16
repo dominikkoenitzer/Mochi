@@ -16,9 +16,9 @@ next to the old ones and the switch is reversible.
 | `applications.json` | same file, keep `app_specific_configuration_path` |
 | its log file | `%LOCALAPPDATA%\mochi\mochi.log` |
 
-A status bar that reads the old daemon's event pipe has no counterpart. It goes
+Anything that read the old daemon's event pipe has no counterpart. It goes
 dark while Mochi is the window manager. Mochi's own event subscriptions are
-`mochic subscribe-pipe`, a bar that speaks them comes later.
+`mochic subscribe-pipe`, so a script can follow along.
 
 ## 1. Install
 

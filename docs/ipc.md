@@ -64,7 +64,7 @@ Exactly one response per command, tagged by a `response` field:
 
 ## Notifications
 
-Subscriptions run in the opposite direction, because that lets a status bar and
+Subscriptions run in the opposite direction, because that lets a script and
 the daemon start in any order.
 
 1. The subscriber creates `\\.\pipe\<name>` itself, inbound only, one instance.

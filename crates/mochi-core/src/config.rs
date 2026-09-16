@@ -244,9 +244,10 @@ pub enum StackbarMode {
     /// Always draw it.
     Always,
     /// Only draw it for containers with more than one window.
-    #[default]
     OnStack,
-    /// Never draw it.
+    /// Never draw it. The default: nothing is ever drawn above a window
+    /// unless the configuration asks for it.
+    #[default]
     Never,
 }
 
@@ -300,7 +301,7 @@ pub struct StackbarConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct WorkspaceConfig {
-    /// The workspace name shown by a status bar.
+    /// The workspace name, as reported by `mochic state`.
     pub name: Option<String>,
     /// The layout to start with.
     pub layout: Option<Layout>,
@@ -918,7 +919,7 @@ mod tests {
         assert_eq!(tabs.width, Some(200));
         assert_eq!(tabs.focused_text, Some(Colour::new(255, 187, 223)));
         assert_eq!(tabs.font_family.as_deref(), Some("JetBrainsMono Nerd Font"));
-        assert_eq!(StackbarMode::default(), StackbarMode::OnStack);
+        assert_eq!(StackbarMode::default(), StackbarMode::Never);
         assert_eq!(StackbarLabel::default(), StackbarLabel::Title);
     }
 
