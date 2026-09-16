@@ -65,7 +65,7 @@ The groups below follow the order of the hotkey file.
 | Command | Arguments | Does |
 |---|---|---|
 | `state` | none | Print the whole daemon state as JSON. |
-| `query` | target | Print one value. Targets: `focused-monitor-index`, `focused-workspace-index`, `focused-container-index`, `focused-window-index`, `focused-workspace-name`, `monitor-count`, `window-count`, `paused`, `dry-run`, `config-path`, `version`. |
+| `query` | target | Print one value. Targets: `focused-monitor-index`, `focused-workspace-index`, `focused-container-index`, `focused-window-index` (the index inside the focused container), `focused-workspace-name`, `monitor-count`, `window-count`, `paused`, `dry-run`, `config-path`, `version`. |
 | `subscribe-pipe` | name | Send every event to a named pipe the subscriber created, for a status bar. |
 | `unsubscribe-pipe` | name | Stop sending events to that pipe. |
 
@@ -73,7 +73,7 @@ The groups below follow the order of the hotkey file.
 
 | Command | Arguments | Does |
 |---|---|---|
-| `start` | `--whkd` | Start the daemon, and whkd with it when `--whkd` is given. |
+| `start` | `--whkd`, `--config`, `--dry-run` | Start the daemon, and whkd with it when `--whkd` is given. |
 | `stop` | `--whkd` | Restore every managed window, then exit. Also stops whkd with `--whkd`. |
 | `toggle-pause` | none | Stop and resume management without exiting. |
 | `retile` | none | Recompute and apply every layout. |
@@ -102,6 +102,16 @@ The groups below follow the order of the hotkey file.
 
 Rules added with `float-rule` and `ignore-rule` live until the daemon stops or
 the configuration is reloaded. Put the permanent ones in `mochi.json`.
+
+## Daemon switches
+
+`mochic` talks to a running daemon; these are arguments to `mochi` itself.
+
+| Switch | Does |
+|---|---|
+| `--config PATH` | Use this file instead of `$MOCHI_CONFIG` or `%USERPROFILE%\mochi.json`. |
+| `--dry-run` | Read everything, move nothing: every write becomes a log line. The only safe way to run Mochi next to another window manager. |
+| `--manage-class CLASS` | Manage only windows of that class, even when they are tool windows, and leave every other window alone. May be repeated. This is the switch `crates/mochi-testbed` needs; see its README. |
 
 ## Exit codes
 

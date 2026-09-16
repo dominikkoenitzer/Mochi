@@ -1,80 +1,67 @@
-//! What the daemon knows right now.
+//! What the daemon knows on top of the tiling model.
 //!
-//! Milestone two keeps a flat picture: the monitors and every top-level window
-//! with a manageability verdict. The monitor / workspace / container tree is
-//! `mochi-core`'s job and replaces [`State::windows`] when it lands; the
-//! accessors here are the seam.
+//! The monitor / workspace / container / window tree lives in
+//! [`mochi_core::State`], which [`crate::wm::WindowManager`] owns. Everything
+//! here is the rest: the facts about this process, the visual settings that no
+//! command can put into the model yet, and the JSON document `mochic state`
+//! prints.
+//!
+//! [`snapshot`] is the only place that decides what that document looks like.
+//! Its shape is the daemon's public API, so it is built by hand from the model
+//! rather than derived from `mochi-core`'s internals, which are free to change.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use mochi_client::{BooleanState, Layout};
+use mochi_client::{AnimationStyle, BooleanState, BorderStyle};
+use mochi_core::model::{Container, Monitor, Window, Workspace};
+use mochi_core::{Rect, State as CoreState};
 use serde::Serialize;
+use serde_json::{Value, json};
 
-use crate::platform::{Hwnd, MonitorInfo, WindowInfo, is_manageable};
-
-/// One window plus why Mochi does or does not tile it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TrackedWindow {
-    /// Everything read from Win32.
-    #[serde(flatten)]
-    pub info: WindowInfo,
-    /// True when the static heuristics accept the window.
-    pub manageable: bool,
-    /// Why it was rejected, absent when it was accepted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skipped: Option<&'static str>,
-}
-
-impl From<WindowInfo> for TrackedWindow {
-    fn from(info: WindowInfo) -> Self {
-        let verdict = is_manageable(&info);
-        Self {
-            manageable: verdict.is_ok(),
-            skipped: verdict.err().map(|r| r.as_str()),
-            info,
-        }
-    }
-}
+use crate::platform::Hwnd;
 
 /// Runtime settings a client can flip without touching the configuration file.
+///
+/// These are the ones `mochi-core` has no use for: it decides where windows go,
+/// not what they look like. The tiling settings all live in
+/// [`mochi_core::State`] instead, so there is exactly one copy of each.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Settings {
-    /// Focus whatever the mouse moves over.
-    pub focus_follows_mouse: bool,
-    /// Warp the mouse to a newly focused window.
-    pub mouse_follows_focus: bool,
     /// Fade unfocused windows.
     pub transparency: bool,
+    /// The alpha unfocused windows are drawn with, 0 to 255.
+    pub transparency_alpha: u8,
     /// Draw a border around the focused window.
     pub border: bool,
     /// Border thickness in logical pixels.
     pub border_width: i32,
     /// How far the border sits outside the frame.
     pub border_offset: i32,
+    /// Border corner shape.
+    pub border_style: BorderStyle,
     /// Play move and resize animations.
     pub animation: bool,
     /// Animation length in milliseconds.
     pub animation_duration: u64,
     /// Animation frame rate.
     pub animation_fps: u32,
-    /// Layout new workspaces start with.
-    pub default_layout: Layout,
+    /// Animation easing curve.
+    pub animation_style: AnimationStyle,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            focus_follows_mouse: false,
-            mouse_follows_focus: false,
             transparency: false,
+            transparency_alpha: 200,
             border: false,
             border_width: 6,
             border_offset: -1,
+            border_style: BorderStyle::System,
             animation: false,
             animation_duration: 250,
             animation_fps: 60,
-            default_layout: Layout::Bsp,
+            animation_style: AnimationStyle::Linear,
         }
     }
 }
@@ -84,26 +71,62 @@ impl Settings {
     pub fn set(field: &mut bool, state: BooleanState) {
         *field = state.is_enabled();
     }
+
+    /// Copies the visual keys of a configuration file over these settings.
+    ///
+    /// Only the keys the file actually carries are touched, so a reload never
+    /// resets a setting a command changed and the file says nothing about.
+    pub fn apply(&mut self, config: &mochi_core::config::Config) {
+        if let Some(value) = config.border {
+            self.border = value;
+        }
+        if let Some(value) = config.border_width {
+            self.border_width = value;
+        }
+        if let Some(value) = config.border_offset {
+            self.border_offset = value;
+        }
+        if let Some(style) = config.border_style {
+            self.border_style = match style {
+                mochi_core::config::BorderStyle::System => BorderStyle::System,
+                mochi_core::config::BorderStyle::Rounded => BorderStyle::Rounded,
+                mochi_core::config::BorderStyle::Square => BorderStyle::Square,
+            };
+        }
+        if let Some(value) = config.transparency {
+            self.transparency = value;
+        }
+        if let Some(value) = config.transparency_alpha {
+            self.transparency_alpha = value;
+        }
+        if let Some(animation) = &config.animation {
+            if let Some(value) = animation.enabled {
+                self.animation = value;
+            }
+            if let Some(value) = animation.duration {
+                self.animation_duration = value;
+            }
+            if let Some(value) = animation.fps {
+                self.animation_fps = value;
+            }
+        }
+    }
 }
 
-/// The daemon's whole picture of the desktop.
+/// The facts about this daemon process that the tiling model does not carry.
 #[derive(Debug, Clone, Serialize)]
 pub struct State {
     /// Version of the running daemon.
     pub version: &'static str,
     /// True when every write is only logged.
     pub dry_run: bool,
-    /// True while management is paused.
-    pub paused: bool,
     /// Configuration file in use.
     pub config_path: PathBuf,
-    /// Attached monitors, in enumeration order.
-    pub monitors: Vec<MonitorInfo>,
-    /// Every top-level window, keyed by handle so the output is stable.
-    pub windows: BTreeMap<Hwnd, TrackedWindow>,
-    /// The foreground window, as far as Mochi knows.
-    pub focused: Option<Hwnd>,
-    /// Runtime settings.
+    /// The community rule file the configuration pointed at, if any.
+    pub app_config_path: Option<PathBuf>,
+    /// Window classes forced into management by `--manage-class`.
+    pub manage_classes: Vec<String>,
+    /// Runtime settings nothing draws yet.
     pub settings: Settings,
     /// Registered subscriber pipe names.
     pub subscribers: Vec<String>,
@@ -115,142 +138,377 @@ impl State {
         Self {
             version: env!("CARGO_PKG_VERSION"),
             dry_run,
-            paused: false,
             config_path,
-            monitors: Vec::new(),
-            windows: BTreeMap::new(),
-            focused: None,
+            app_config_path: None,
+            manage_classes: Vec::new(),
             settings: Settings::default(),
             subscribers: Vec::new(),
         }
-    }
-
-    /// Replaces the monitor list.
-    pub fn set_monitors(&mut self, monitors: Vec<MonitorInfo>) {
-        self.monitors = monitors;
-    }
-
-    /// Replaces the window list.
-    pub fn set_windows(&mut self, windows: impl IntoIterator<Item = WindowInfo>) {
-        self.windows = windows
-            .into_iter()
-            .map(|info| (info.hwnd, TrackedWindow::from(info)))
-            .collect();
-    }
-
-    /// Inserts or refreshes one window. Returns true when it is newly tracked.
-    pub fn upsert(&mut self, info: WindowInfo) -> bool {
-        self.windows
-            .insert(info.hwnd, TrackedWindow::from(info))
-            .is_none()
-    }
-
-    /// Forgets a window. Returns what was there.
-    pub fn forget(&mut self, hwnd: Hwnd) -> Option<TrackedWindow> {
-        self.windows.remove(&hwnd)
-    }
-
-    /// A tracked window by handle.
-    pub fn window(&self, hwnd: Hwnd) -> Option<&TrackedWindow> {
-        self.windows.get(&hwnd)
-    }
-
-    /// Every window the static heuristics accept.
-    pub fn manageable(&self) -> impl Iterator<Item = &TrackedWindow> {
-        self.windows.values().filter(|w| w.manageable)
-    }
-
-    /// How many windows are tiling candidates.
-    pub fn manageable_count(&self) -> usize {
-        self.manageable().count()
-    }
-
-    /// The monitor a window sits on, by index into [`State::monitors`].
-    pub fn monitor_index_of(&self, hwnd: Hwnd) -> Option<usize> {
-        let id = self.window(hwnd)?.info.monitor?;
-        self.monitors.iter().position(|m| m.id == id)
     }
 
     /// The configuration file in use.
     pub fn config_path(&self) -> &Path {
         &self.config_path
     }
+}
 
-    /// The JSON `mochic state` prints.
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(
-            |e| serde_json::json!({ "error": format!("state could not be serialised: {e}") }),
-        )
-    }
+/// The JSON document `mochic state` prints.
+///
+/// The shape is monitors, then their workspaces, then the containers of each
+/// workspace, then the windows of each container, with the rectangle the last
+/// layout gave them. Everything a status bar or a script needs is reachable
+/// without a second command:
+///
+/// ```json
+/// {
+///   "version": "0.1.0", "dry_run": false, "paused": false,
+///   "focused_monitor": 0, "focused_window": 852368,
+///   "monitors": [{ "index": 0, "workspaces": [{ "containers": [ ... ] }] }]
+/// }
+/// ```
+pub fn snapshot(session: &State, core: &CoreState, foreground: Option<Hwnd>) -> Value {
+    json!({
+        "version": session.version,
+        "dry_run": session.dry_run,
+        "paused": core.is_paused,
+        "config_path": session.config_path.display().to_string(),
+        "app_config_path": session.app_config_path.as_ref().map(|p| p.display().to_string()),
+        "manage_classes": session.manage_classes,
+        "focused_monitor": core.focused_monitor_idx(),
+        "focused_workspace": core.focused_indices().map(|(_, w)| w).ok(),
+        "focused_window": core.focused_window_id().map(mochi_core::WindowId::get),
+        "foreground_window": foreground.map(Hwnd::as_i64),
+        "window_count": core.all_window_ids().count(),
+        "monitors": core
+            .monitors()
+            .iter()
+            .enumerate()
+            .map(|(index, monitor)| monitor_json(core, index, monitor))
+            .collect::<Vec<_>>(),
+        "settings": session.settings,
+        "behaviour": {
+            "window_hiding_behaviour": core.window_hiding_behaviour,
+            "cross_monitor_move_behaviour": core.cross_monitor_move_behaviour,
+            "unmanaged_window_operation_behaviour": core.unmanaged_window_operation_behaviour,
+            "window_container_behaviour": core.window_container_behaviour,
+            "focus_follows_mouse": core.focus_follows_mouse,
+            "mouse_follows_focus": core.mouse_follows_focus,
+            "float_override": core.float_override,
+            "resize_delta": core.resize_delta,
+            "default_workspace_padding": core.default_workspace_padding,
+            "default_container_padding": core.default_container_padding,
+        },
+        "rules": core.rules.len(),
+        "subscribers": session.subscribers,
+    })
+}
+
+fn monitor_json(core: &CoreState, index: usize, monitor: &Monitor) -> Value {
+    json!({
+        "index": index,
+        "id": monitor.id,
+        "name": monitor.name,
+        "device": monitor.device,
+        "device_id": monitor.device_id,
+        "size": rect_json(monitor.size),
+        "work_area": rect_json(monitor.work_area),
+        "dpi": monitor.dpi,
+        "scale": monitor.scale_factor(),
+        "focused_workspace": monitor.focused_workspace_idx(),
+        "last_focused_workspace": monitor.last_focused_workspace,
+        "workspaces": monitor
+            .workspaces()
+            .iter()
+            .enumerate()
+            .map(|(idx, workspace)| workspace_json(core, index, monitor, idx, workspace))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn workspace_json(
+    core: &CoreState,
+    monitor_idx: usize,
+    monitor: &Monitor,
+    index: usize,
+    workspace: &Workspace,
+) -> Value {
+    let work_area = core
+        .work_area_for(monitor_idx, index)
+        .unwrap_or(monitor.work_area);
+    let full = workspace.full_rect(
+        work_area,
+        core.default_workspace_padding,
+        core.default_container_padding,
+    );
+    let layout = workspace.latest_layout();
+
+    json!({
+        "index": index,
+        "name": monitor.workspace_name(index),
+        "layout": workspace.effective_layout().to_string(),
+        "flip": {
+            "horizontal": workspace.layout_flip.is_flipped(mochi_core::Axis::Horizontal),
+            "vertical": workspace.layout_flip.is_flipped(mochi_core::Axis::Vertical),
+        },
+        "tile": workspace.tile,
+        "monocle": workspace.is_monocle(),
+        "maximized": workspace.is_maximized(),
+        "visible": monitor.focused_workspace_idx() == index,
+        "work_area": rect_json(work_area),
+        "workspace_padding": workspace.workspace_padding.unwrap_or(core.default_workspace_padding),
+        "container_padding": workspace.container_padding.unwrap_or(core.default_container_padding),
+        "focused_container": workspace.focused_container_idx(),
+        "focused_window": workspace.focused_window_id().map(mochi_core::WindowId::get),
+        "containers": workspace
+            .containers()
+            .iter()
+            .enumerate()
+            .map(|(idx, container)| {
+                container_json(container, idx, layout.get(idx).copied())
+            })
+            .collect::<Vec<_>>(),
+        "monocle_container": workspace
+            .monocle_container()
+            .map(|container| container_json(container, 0, Some(full))),
+        "maximized_window": workspace
+            .maximized_window()
+            .map(|window| window_json(window, Some(work_area), true)),
+        "floating_windows": workspace
+            .floating_windows()
+            .iter()
+            .map(|window| window_json(window, None, true))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn container_json(container: &Container, index: usize, rect: Option<Rect>) -> Value {
+    let focused = container.focused_window_id();
+    json!({
+        "index": index,
+        "rect": rect.map(rect_json),
+        "focused_window": focused.map(mochi_core::WindowId::get),
+        "stack": container.is_stack(),
+        "windows": container
+            .windows()
+            .iter()
+            .map(|window| window_json(window, rect, Some(window.id) == focused))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn window_json(window: &Window, rect: Option<Rect>, visible: bool) -> Value {
+    json!({
+        "hwnd": window.id.get(),
+        "title": window.title,
+        "exe": window.exe,
+        "class": window.class,
+        "path": window.path,
+        "rect": rect.map(rect_json),
+        "visible": visible,
+    })
+}
+
+fn rect_json(rect: Rect) -> Value {
+    json!({
+        "left": rect.left,
+        "top": rect.top,
+        "right": rect.right,
+        "bottom": rect.bottom,
+        "width": rect.width(),
+        "height": rect.height(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::types::style;
-    use mochi_core::Rect;
+    use mochi_core::model::Monitor as CoreMonitor;
+    use mochi_core::{Layout, Window as CoreWindow};
 
-    fn window(hwnd: i64, title: &str) -> WindowInfo {
-        WindowInfo {
-            title: title.into(),
-            class: "Chrome_WidgetWin_1".into(),
-            exe: "Code.exe".into(),
-            style: style::WS_VISIBLE | style::WS_CAPTION,
-            rect: Rect::new(0, 0, 800, 600),
-            frame: Rect::new(0, 0, 800, 600),
-            visible: true,
-            ..WindowInfo::placeholder(Hwnd(hwnd as isize))
-        }
+    fn core() -> CoreState {
+        let mut core = CoreState::new();
+        core.default_workspace_padding = 14;
+        core.default_container_padding = 10;
+        let screen = Rect::new(0, 0, 1920, 1080);
+        let mut monitor = CoreMonitor::new(0x1234, screen, Rect::new(0, 0, 1920, 1032))
+            .with_name("DISPLAY1")
+            .with_device(r"\\.\DISPLAY1", "Odyssey G80SD")
+            .with_dpi(144);
+        monitor.ensure_workspaces(9);
+        core.add_monitor(monitor);
+        core
     }
 
-    fn state() -> State {
+    fn session() -> State {
         State::new(PathBuf::from(r"C:\Users\x\mochi.json"), true)
     }
 
     #[test]
-    fn a_verdict_is_attached_to_every_window() {
-        let mut s = state();
-        let mut hidden = window(2, "Hidden");
-        hidden.visible = false;
-        s.set_windows([window(1, "Editor"), hidden]);
+    fn the_snapshot_walks_monitors_workspaces_containers_and_windows() {
+        let mut core = core();
+        core.add_window(
+            CoreWindow::new(0x111)
+                .with_title("Cargo.toml")
+                .with_exe("Code.exe")
+                .with_class("Chrome_WidgetWin_1"),
+        )
+        .unwrap();
+        core.add_window(
+            CoreWindow::new(0x222)
+                .with_title("Mochi")
+                .with_exe("firefox.exe"),
+        )
+        .unwrap();
 
-        assert_eq!(s.windows.len(), 2);
-        assert_eq!(s.manageable_count(), 1);
-        assert_eq!(s.window(Hwnd(2)).unwrap().skipped, Some("not visible"));
-        assert_eq!(s.window(Hwnd(1)).unwrap().skipped, None);
-    }
+        let json = snapshot(&session(), &core, Some(Hwnd(0x222)));
 
-    #[test]
-    fn upsert_reports_whether_the_window_is_new() {
-        let mut s = state();
-        assert!(s.upsert(window(1, "First")));
-        assert!(!s.upsert(window(1, "First renamed")));
-        assert_eq!(s.window(Hwnd(1)).unwrap().info.title, "First renamed");
-        assert!(s.forget(Hwnd(1)).is_some());
-        assert!(s.forget(Hwnd(1)).is_none());
-    }
-
-    #[test]
-    fn the_json_dump_carries_the_pieces_mochic_prints() {
-        let mut s = state();
-        s.set_windows([window(1, "Editor")]);
-        let json = s.to_json();
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(json["dry_run"], true);
         assert_eq!(json["paused"], false);
-        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
-        assert!(json["monitors"].is_array());
-        // Windows are keyed by handle and the info is flattened into the entry.
-        assert_eq!(json["windows"]["1"]["title"], "Editor");
-        assert_eq!(json["windows"]["1"]["manageable"], true);
-        assert_eq!(json["settings"]["default_layout"], "bsp");
+        assert_eq!(json["window_count"], 2);
+        assert_eq!(json["focused_monitor"], 0);
+        assert_eq!(json["focused_window"], 0x222);
+        assert_eq!(json["foreground_window"], 0x222);
+
+        let monitor = &json["monitors"][0];
+        assert_eq!(monitor["name"], "DISPLAY1");
+        assert_eq!(monitor["device"], r"\\.\DISPLAY1");
+        assert_eq!(monitor["dpi"], 144);
+        assert_eq!(monitor["work_area"]["bottom"], 1032);
+        assert_eq!(monitor["workspaces"].as_array().unwrap().len(), 9);
+
+        let workspace = &monitor["workspaces"][0];
+        assert_eq!(workspace["name"], "1");
+        assert_eq!(workspace["layout"], "BSP");
+        assert_eq!(workspace["visible"], true);
+        assert_eq!(workspace["workspace_padding"], 14);
+        assert_eq!(workspace["container_padding"], 10);
+        assert_eq!(workspace["containers"].as_array().unwrap().len(), 2);
+        assert_eq!(monitor["workspaces"][1]["visible"], false);
+
+        // The first container keeps the left half of the padded work area.
+        let first = &workspace["containers"][0];
+        assert_eq!(first["windows"][0]["hwnd"], 0x111);
+        assert_eq!(first["windows"][0]["title"], "Cargo.toml");
+        assert_eq!(first["windows"][0]["exe"], "Code.exe");
+        assert_eq!(
+            first["rect"]["left"].as_i64(),
+            core.rect_for_window(mochi_core::WindowId(0x111))
+                .map(|r| i64::from(r.left))
+        );
+        assert!(
+            first["rect"]["left"].as_i64().unwrap() >= 14,
+            "padded away from the edge"
+        );
+        assert!(first["rect"]["width"].as_i64().unwrap() > 0);
+        assert_eq!(first["stack"], false);
+    }
+
+    #[test]
+    fn monocle_and_floating_windows_show_up_in_their_own_fields() {
+        let mut core = core();
+        core.add_window(CoreWindow::new(1)).unwrap();
+        core.add_window(CoreWindow::new(2)).unwrap();
+        core.toggle_monocle().unwrap();
+
+        let json = snapshot(&session(), &core, None);
+        let workspace = &json["monitors"][0]["workspaces"][0];
+        assert_eq!(workspace["monocle"], true);
+        assert_eq!(workspace["monocle_container"]["windows"][0]["hwnd"], 2);
+        assert!(
+            workspace["monocle_container"]["rect"]["width"]
+                .as_i64()
+                .unwrap()
+                > 0
+        );
+
+        core.toggle_monocle().unwrap();
+        core.toggle_float().unwrap();
+        let json = snapshot(&session(), &core, None);
+        let workspace = &json["monitors"][0]["workspaces"][0];
+        assert_eq!(workspace["monocle"], false);
+        assert_eq!(workspace["floating_windows"][0]["hwnd"], 2);
+        assert_eq!(workspace["containers"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_behaviour_block_reports_what_the_configuration_set() {
+        let mut core = core();
+        core.window_container_behaviour = mochi_core::model::WindowContainerBehaviour::Append;
+        core.mouse_follows_focus = false;
+        let json = snapshot(&session(), &core, None);
+        assert_eq!(json["behaviour"]["window_hiding_behaviour"], "Cloak");
+        assert_eq!(json["behaviour"]["cross_monitor_move_behaviour"], "Swap");
+        assert_eq!(json["behaviour"]["window_container_behaviour"], "Append");
+        assert_eq!(json["behaviour"]["mouse_follows_focus"], false);
+        assert_eq!(json["behaviour"]["resize_delta"], 50);
+    }
+
+    #[test]
+    fn a_stack_is_reported_as_one_container_with_two_windows() {
+        let mut core = core();
+        core.window_container_behaviour = mochi_core::model::WindowContainerBehaviour::Append;
+        core.add_window(CoreWindow::new(1)).unwrap();
+        core.add_window(CoreWindow::new(2)).unwrap();
+
+        let workspace = snapshot(&session(), &core, None)["monitors"][0]["workspaces"][0].clone();
+        assert_eq!(workspace["containers"].as_array().unwrap().len(), 1);
+        assert_eq!(workspace["containers"][0]["stack"], true);
+        assert_eq!(workspace["containers"][0]["windows"][0]["visible"], false);
+        assert_eq!(workspace["containers"][0]["windows"][1]["visible"], true);
     }
 
     #[test]
     fn boolean_settings_follow_the_command_line_spelling() {
         let mut s = Settings::default();
-        Settings::set(&mut s.focus_follows_mouse, BooleanState::Enable);
-        assert!(s.focus_follows_mouse);
-        Settings::set(&mut s.focus_follows_mouse, BooleanState::Disable);
-        assert!(!s.focus_follows_mouse);
+        Settings::set(&mut s.border, BooleanState::Enable);
+        assert!(s.border);
+        Settings::set(&mut s.border, BooleanState::Disable);
+        assert!(!s.border);
+    }
+
+    #[test]
+    fn the_visual_keys_of_a_configuration_land_in_the_settings() {
+        let config = mochi_core::config::Config::from_json(
+            r#"{
+              "border": true,
+              "border_width": 6,
+              "border_offset": -1,
+              "border_style": "Rounded",
+              "transparency": true,
+              "transparency_alpha": 235,
+              "animation": { "enabled": true, "duration": 250, "fps": 60 }
+            }"#,
+        )
+        .unwrap();
+
+        let mut settings = Settings::default();
+        settings.apply(&config);
+        assert!(settings.border);
+        assert_eq!(settings.border_width, 6);
+        assert_eq!(settings.border_offset, -1);
+        assert_eq!(settings.border_style, BorderStyle::Rounded);
+        assert!(settings.transparency);
+        assert_eq!(settings.transparency_alpha, 235);
+        assert!(settings.animation);
+        assert_eq!(settings.animation_duration, 250);
+
+        // A key the file does not carry keeps whatever it had.
+        settings.animation_fps = 120;
+        settings.apply(&mochi_core::config::Config::default());
+        assert_eq!(settings.animation_fps, 120);
+        assert_eq!(settings.border_style, BorderStyle::Rounded);
+    }
+
+    #[test]
+    fn the_layout_name_follows_the_layout_rules() {
+        let mut core = core();
+        core.add_window(CoreWindow::new(1)).unwrap();
+        core.workspace_mut(0, 0)
+            .unwrap()
+            .layout_rules
+            .insert(1, Layout::Columns);
+        let json = snapshot(&session(), &core, None);
+        assert_eq!(json["monitors"][0]["workspaces"][0]["layout"], "Columns");
     }
 }
