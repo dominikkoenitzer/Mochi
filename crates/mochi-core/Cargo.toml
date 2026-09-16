@@ -1,0 +1,16 @@
+[package]
+name = "mochi-core"
+description = "Pure window-management logic for Mochi: monitors, workspaces, containers, layouts, rules. No Win32."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
