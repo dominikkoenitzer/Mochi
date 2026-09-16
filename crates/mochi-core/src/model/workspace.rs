@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Direction, Rect, nearest_in_direction};
-use crate::layout::{Flip, Layout};
+use crate::layout::{Flip, Layout, MIN_TILE_SIZE};
+
+use super::monitor::scale_padding;
 
 use super::container::Container;
 use super::ring::{CycleDirection, Ring};
@@ -347,7 +349,23 @@ impl Workspace {
     /// The work area with the workspace padding taken off.
     #[must_use]
     pub fn tiling_area(&self, work_area: Rect, default_workspace_padding: i32) -> Rect {
-        work_area.padded_clamped(self.workspace_padding.unwrap_or(default_workspace_padding))
+        self.tiling_area_scaled(work_area, default_workspace_padding, 1.0)
+    }
+
+    /// The work area with the workspace padding taken off, in the physical
+    /// pixels of a display with that scale factor.
+    ///
+    /// The padding is configured in logical pixels, so a 14 pixel padding on a
+    /// display at 150 percent scaling takes 21 physical pixels off each side.
+    #[must_use]
+    pub fn tiling_area_scaled(
+        &self,
+        work_area: Rect,
+        default_workspace_padding: i32,
+        scale: f32,
+    ) -> Rect {
+        let padding = self.workspace_padding.unwrap_or(default_workspace_padding);
+        work_area.padded_clamped(scale_padding(padding, scale))
     }
 
     /// The rectangle a monocle or maximized window fills.
@@ -358,8 +376,27 @@ impl Workspace {
         default_workspace_padding: i32,
         default_container_padding: i32,
     ) -> Rect {
-        self.tiling_area(work_area, default_workspace_padding)
-            .padded_clamped(self.container_padding.unwrap_or(default_container_padding))
+        self.full_rect_scaled(
+            work_area,
+            default_workspace_padding,
+            default_container_padding,
+            1.0,
+        )
+    }
+
+    /// The rectangle a monocle or maximized window fills, with both paddings
+    /// scaled for a display that is not at 96 DPI.
+    #[must_use]
+    pub fn full_rect_scaled(
+        &self,
+        work_area: Rect,
+        default_workspace_padding: i32,
+        default_container_padding: i32,
+        scale: f32,
+    ) -> Rect {
+        let padding = self.container_padding.unwrap_or(default_container_padding);
+        self.tiling_area_scaled(work_area, default_workspace_padding, scale)
+            .padded_clamped(scale_padding(padding, scale))
     }
 
     /// Recomputes the tiled rectangles and stores them in `latest_layout`.
@@ -372,22 +409,50 @@ impl Workspace {
         default_workspace_padding: i32,
         default_container_padding: i32,
     ) -> &[Rect] {
+        self.update_layout_scaled(
+            work_area,
+            default_workspace_padding,
+            default_container_padding,
+            1.0,
+        )
+    }
+
+    /// Recomputes the tiled rectangles for a display with that scale factor.
+    ///
+    /// Both paddings and the minimum tile size are logical pixel values, so
+    /// they are multiplied by `scale` before the layout runs. A scale of 1.0
+    /// is exactly [`Workspace::update_layout`].
+    pub fn update_layout_scaled(
+        &mut self,
+        work_area: Rect,
+        default_workspace_padding: i32,
+        default_container_padding: i32,
+        scale: f32,
+    ) -> &[Rect] {
         let len = self.containers.len();
         self.resize_dimensions.resize(len, None);
 
-        self.latest_layout = if self.tile {
-            let area = self.tiling_area(work_area, default_workspace_padding);
-            let padding = self.container_padding.unwrap_or(default_container_padding);
-            self.resolve_layout(len).calculate(
+        if self.tile {
+            let area = self.tiling_area_scaled(work_area, default_workspace_padding, scale);
+            let padding = scale_padding(
+                self.container_padding.unwrap_or(default_container_padding),
+                scale,
+            );
+            let rects = self.resolve_layout(len).calculate_with_min(
                 area,
                 len,
                 padding,
                 self.layout_flip,
                 &self.resize_dimensions,
-            )
+                scale_padding(MIN_TILE_SIZE, scale),
+            );
+            // Reusing the buffer keeps the per event path free of one free and
+            // one allocation on every retile.
+            self.latest_layout.clear();
+            self.latest_layout.extend_from_slice(&rects);
         } else {
-            Vec::new()
-        };
+            self.latest_layout.clear();
+        }
 
         &self.latest_layout
     }

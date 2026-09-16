@@ -27,8 +27,9 @@ impl State {
         };
         let workspace_padding = self.default_workspace_padding;
         let container_padding = self.default_container_padding;
+        let scale = self.padding_scale(monitor);
         if let Ok(target) = self.workspace_mut(monitor, workspace) {
-            target.update_layout(work_area, workspace_padding, container_padding);
+            target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
         }
     }
 
@@ -69,6 +70,26 @@ impl State {
             .and_then(Workspace::focused_window_id)
     }
 
+    /// Adds the windows that appeared while the manager was paused.
+    ///
+    /// They go to the focused workspace through [`State::add_window_to`], so
+    /// the ignore, float and workspace rules still get their say.
+    fn take_pending_windows(&mut self) -> Changes {
+        let mut changes = Changes::none();
+        if self.pending_windows.is_empty() {
+            return changes;
+        }
+        let Ok((monitor, workspace)) = self.focused_indices() else {
+            return changes;
+        };
+        for window in std::mem::take(&mut self.pending_windows) {
+            if let Ok(added) = self.add_window_to(monitor, workspace, window) {
+                changes.merge(added);
+            }
+        }
+        changes
+    }
+
     // -- pause --------------------------------------------------------------
 
     /// Turns the window manager off and on again without unmanaging anything.
@@ -97,6 +118,7 @@ impl State {
         if self.is_paused {
             return Ok(changes);
         }
+        changes.merge(self.take_pending_windows());
         for monitor in 0..self.monitors().len() {
             let Some(workspace) = self
                 .monitors()
@@ -534,6 +556,7 @@ impl State {
         };
         let workspace_padding = self.default_workspace_padding;
         let container_padding = self.default_container_padding;
+        let scale = self.padding_scale(monitor);
 
         let target = self.workspace_mut(monitor, workspace)?;
         if target.containers().is_empty() {
@@ -541,28 +564,60 @@ impl State {
         }
         let idx = target.focused_container_idx();
 
-        target.update_layout(work_area, workspace_padding, container_padding);
+        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
         let original = target.resize_dimension(idx);
         let before = target.latest_layout().get(idx).copied();
 
         for far_edge in [true, false] {
-            let mut next = original.unwrap_or_default();
-            match (axis, far_edge) {
-                (Axis::Horizontal, true) => next.right += delta,
-                (Axis::Horizontal, false) => next.left -= delta,
-                (Axis::Vertical, true) => next.bottom += delta,
-                (Axis::Vertical, false) => next.top -= delta,
-            }
+            let next = Self::nudged(original.unwrap_or_default(), axis, far_edge, delta);
             target.set_resize_dimension(idx, Some(next));
-            target.update_layout(work_area, workspace_padding, container_padding);
-            if target.latest_layout().get(idx).copied() != before {
-                return Ok(Changes::none().retile(monitor, workspace));
+            target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+            let after = target.latest_layout().get(idx).copied();
+            if after == before {
+                continue;
             }
+
+            // The clamps may have swallowed part of the step. Store what the
+            // boundary actually did instead of the step that was asked for,
+            // or the first press the other way would only undo the overshoot.
+            if let (Some(before), Some(after)) = (before, after) {
+                let achieved = after.extent(axis) - before.extent(axis);
+                let effective =
+                    Self::nudged(original.unwrap_or_default(), axis, far_edge, achieved);
+                if effective != next {
+                    target.set_resize_dimension(idx, Some(effective));
+                    target.update_layout_scaled(
+                        work_area,
+                        workspace_padding,
+                        container_padding,
+                        scale,
+                    );
+                }
+            }
+            return Ok(Changes::none().retile(monitor, workspace));
         }
 
         target.set_resize_dimension(idx, original);
-        target.update_layout(work_area, workspace_padding, container_padding);
+        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
         Ok(Changes::none())
+    }
+
+    /// One resize delta with `by` pixels added to the edge the command is
+    /// working on. The near edge counts the other way round, because pulling
+    /// it back is what makes the container grow.
+    fn nudged(
+        mut delta: crate::geometry::Rect,
+        axis: Axis,
+        far_edge: bool,
+        by: i32,
+    ) -> crate::geometry::Rect {
+        match (axis, far_edge) {
+            (Axis::Horizontal, true) => delta.right += by,
+            (Axis::Horizontal, false) => delta.left -= by,
+            (Axis::Vertical, true) => delta.bottom += by,
+            (Axis::Vertical, false) => delta.top -= by,
+        }
+        delta
     }
 
     // -- workspaces ---------------------------------------------------------
@@ -577,8 +632,8 @@ impl State {
         if self.is_paused {
             return Ok(Changes::none());
         }
-        Self::check_workspace_idx(idx)?;
         let monitor = self.focused_monitor_idx();
+        self.check_workspace_idx_on(monitor, idx)?;
         let before = self.visible_window_ids();
 
         let target = self.focused_monitor_mut()?;
@@ -633,8 +688,8 @@ impl State {
         if self.is_paused {
             return Ok(Changes::none());
         }
-        Self::check_workspace_idx(idx)?;
         let monitor = self.focused_monitor_idx();
+        self.check_workspace_idx_on(monitor, idx)?;
         self.focused_monitor_mut()?.ensure_workspaces(idx + 1);
         self.move_focused_container(monitor, idx, follow)
     }
@@ -824,11 +879,18 @@ impl State {
         workspace: usize,
         window: Window,
     ) -> Result<Changes> {
-        if self.is_paused {
-            return Ok(Changes::none());
-        }
         let decision = self.rules.decide(&window.info());
         if decision == RuleDecision::Ignore {
+            return Ok(Changes::none());
+        }
+        if self.is_paused {
+            // Nothing may move while the manager is paused, but a window that
+            // is forgotten here would never be tiled at all, so it waits.
+            if !self.is_managed(window.id)
+                && !self.pending_windows.iter().any(|w| w.id == window.id)
+            {
+                self.pending_windows.push(window);
+            }
             return Ok(Changes::none());
         }
         if self.is_managed(window.id) {
@@ -880,6 +942,10 @@ impl State {
     ///
     /// Returns [`Error::WindowNotFound`] when the window was not managed.
     pub fn remove_window(&mut self, id: WindowId) -> Result<Changes> {
+        if let Some(idx) = self.pending_windows.iter().position(|w| w.id == id) {
+            self.pending_windows.remove(idx);
+            return Ok(Changes::none());
+        }
         let (monitor, workspace) = self.locate_window(id).ok_or(Error::WindowNotFound(id))?;
         let before = self.visible_window_ids();
         self.workspace_mut(monitor, workspace)?.remove_window(id);
@@ -1502,6 +1568,69 @@ mod tests {
     }
 
     #[test]
+    fn a_saturated_resize_steps_back_by_exactly_one_delta() {
+        // Twenty presses run into the clamp long before the twentieth, so the
+        // stored delta is way past what the layout can do with it.
+        for axis in [Axis::Horizontal, Axis::Vertical] {
+            for sizing in [Sizing::Increase, Sizing::Decrease] {
+                let mut state = with_windows(3);
+                state.focus_window(WindowId(2)).unwrap();
+                for _ in 0..20 {
+                    state.resize_axis(axis, sizing).unwrap();
+                }
+                let saturated = state.rect_for_window(WindowId(2)).unwrap();
+                state.resize_axis(axis, sizing.opposite()).unwrap();
+                let after = state.rect_for_window(WindowId(2)).unwrap();
+                assert_eq!(
+                    (saturated.extent(axis) - after.extent(axis)).abs(),
+                    state.resize_delta,
+                    "{axis:?} {sizing:?} did not give a full step back"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_clamped_resize_stores_the_delta_it_achieved() {
+        let mut state = with_windows(2);
+        state.focus_window(WindowId(1)).unwrap();
+        for _ in 0..40 {
+            state
+                .resize_axis(Axis::Horizontal, Sizing::Increase)
+                .unwrap();
+        }
+        let stored = state.workspace(0, 0).unwrap().resize_dimension(0).unwrap();
+        let width = state.rect_for_window(WindowId(1)).unwrap().width();
+        assert_eq!(
+            stored.right,
+            width - 960,
+            "the stored delta is the one the boundary really moved"
+        );
+        assert!(stored.right < 40 * state.resize_delta);
+    }
+
+    #[test]
+    fn no_tile_is_ever_resized_below_the_minimum_tile_size() {
+        let mut state = with_windows(4);
+        for idx in 1..=4 {
+            state.focus_window(WindowId(idx)).unwrap();
+            for axis in [Axis::Horizontal, Axis::Vertical] {
+                for _ in 0..50 {
+                    state.resize_axis(axis, Sizing::Decrease).unwrap();
+                    state.resize_axis(axis, Sizing::Increase).unwrap();
+                }
+            }
+        }
+        for rect in state.workspace(0, 0).unwrap().latest_layout() {
+            assert!(
+                rect.width() >= crate::layout::MIN_TILE_SIZE
+                    && rect.height() >= crate::layout::MIN_TILE_SIZE,
+                "{rect:?} is smaller than the minimum tile"
+            );
+        }
+    }
+
+    #[test]
     fn resizing_without_a_container_is_an_error() {
         let mut state = state();
         assert_eq!(
@@ -1708,6 +1837,139 @@ mod tests {
         assert_eq!(state.workspace(0, 0).unwrap().layout, Layout::Bsp);
         assert_eq!(state.focused_indices().unwrap(), (0, 0));
         assert!(!state.is_managed(WindowId(9)));
+    }
+
+    #[test]
+    fn a_configured_workspace_past_the_creation_cap_still_works() {
+        let mut state = with_windows(1);
+        state
+            .monitors_mut()
+            .get_mut(0)
+            .unwrap()
+            .ensure_workspaces(12);
+
+        state.focus_workspace(11).unwrap();
+        assert_eq!(state.focused_indices().unwrap(), (0, 11));
+
+        state.focus_workspace(0).unwrap();
+        state.move_to_workspace(11, true).unwrap();
+        assert_eq!(state.locate_window(WindowId(1)), Some((0, 11)));
+
+        // Twelve workspaces exist, a thirteenth is still out of range, and the
+        // monitor that was left at nine workspaces keeps the old cap.
+        assert_eq!(
+            state.focus_workspace(12).unwrap_err(),
+            Error::WorkspaceIndexOutOfRange(12)
+        );
+        assert!(state.check_workspace_idx_on(0, 11).is_ok());
+        assert!(state.check_workspace_idx_on(1, 11).is_err());
+        assert!(State::check_workspace_idx(11).is_err());
+    }
+
+    #[test]
+    fn a_window_that_appears_while_paused_waits_instead_of_being_dropped() {
+        let mut state = with_windows(1);
+        state.toggle_pause().unwrap();
+
+        let changes = state.add_window(Window::new(2)).unwrap();
+        assert!(
+            changes.is_empty(),
+            "nothing moves while the manager is paused"
+        );
+        assert!(!state.is_managed(WindowId(2)));
+        assert_eq!(state.pending_windows.len(), 1);
+
+        // A second event for the same window does not queue it twice.
+        state.add_window(Window::new(2)).unwrap();
+        assert_eq!(state.pending_windows.len(), 1);
+
+        state.toggle_pause().unwrap();
+        assert!(state.pending_windows.is_empty());
+        assert!(state.is_managed(WindowId(2)));
+        assert_eq!(
+            state.rect_for_window(WindowId(2)),
+            Some(Rect::new(960, 0, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn retile_picks_up_the_windows_that_waited() {
+        let mut state = with_windows(1);
+        state.toggle_pause().unwrap();
+        state.add_window(Window::new(2)).unwrap();
+        state.add_window(Window::new(3)).unwrap();
+        assert!(state.retile().unwrap().is_empty(), "still paused");
+
+        state.is_paused = false;
+        let changes = state.retile().unwrap();
+        assert!(state.is_managed(WindowId(2)) && state.is_managed(WindowId(3)));
+        assert!(changes.show.contains(&WindowId(3)));
+        assert_eq!(state.workspace(0, 0).unwrap().containers().len(), 3);
+    }
+
+    #[test]
+    fn a_window_that_closes_again_while_paused_is_forgotten() {
+        let mut state = with_windows(1);
+        state.toggle_pause().unwrap();
+        state.add_window(Window::new(2)).unwrap();
+        assert!(state.remove_window(WindowId(2)).unwrap().is_empty());
+        assert!(state.pending_windows.is_empty());
+
+        state.toggle_pause().unwrap();
+        assert!(!state.is_managed(WindowId(2)));
+    }
+
+    #[test]
+    fn an_ignored_window_is_not_queued_while_paused() {
+        let mut state = with_windows(1);
+        state.rules.ignore_rules.push(MatchingRule::simple(
+            ApplicationIdentifier::Exe,
+            "ignored.exe",
+            MatchingStrategy::Equals,
+        ));
+        state.toggle_pause().unwrap();
+        state
+            .add_window(Window::new(2).with_exe("ignored.exe"))
+            .unwrap();
+        assert!(state.pending_windows.is_empty());
+    }
+
+    #[test]
+    fn the_paddings_scale_with_the_monitor_dpi() {
+        // The real pair: the 4K panel at 150 percent and the portrait one at
+        // 100 percent. Fourteen logical pixels are 21 physical on the 4K.
+        let mut state = State::new();
+        let main_area = Rect::new(0, 0, 3840, 2160);
+        let side_area = Rect::new(3840, 0, 4920, 1920);
+        state.add_monitor(Monitor::new(1, main_area, main_area).with_dpi(144));
+        state.add_monitor(Monitor::new(2, side_area, side_area).with_dpi(96));
+        state.default_workspace_padding = 14;
+        state.default_container_padding = 0;
+
+        assert!((state.padding_scale(0) - 1.5).abs() < f32::EPSILON);
+        assert!((state.padding_scale(1) - 1.0).abs() < f32::EPSILON);
+
+        state.add_window(Window::new(1)).unwrap();
+        assert_eq!(
+            state.rect_for_window(WindowId(1)),
+            Some(Rect::new(21, 21, 3819, 2139)),
+            "14 logical pixels are 21 physical ones at 150 percent"
+        );
+
+        state.focus_monitor(1).unwrap();
+        state.add_window(Window::new(2)).unwrap();
+        assert_eq!(
+            state.rect_for_window(WindowId(2)),
+            Some(Rect::new(3854, 14, 4906, 1906)),
+            "the portrait panel is at 100 percent, so the padding is literal"
+        );
+
+        state.scale_padding_with_dpi = false;
+        state.retile().unwrap();
+        assert_eq!(
+            state.rect_for_window(WindowId(1)),
+            Some(Rect::new(14, 14, 3826, 2146))
+        );
     }
 
     #[test]
