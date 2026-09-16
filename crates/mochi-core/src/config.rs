@@ -1059,4 +1059,52 @@ mod tests {
             assert!(properties.contains_key(key), "the schema is missing {key}");
         }
     }
+
+    #[test]
+    fn the_json_schema_is_structurally_a_schema_for_every_field_of_the_config() {
+        let parsed: serde_json::Value = serde_json::from_str(&json_schema()).unwrap();
+        assert!(
+            parsed
+                .get("$schema")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "an editor needs the dialect to validate against"
+        );
+        assert_eq!(
+            parsed.get("type").and_then(serde_json::Value::as_str),
+            Some("object")
+        );
+        let properties = parsed
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("the schema has properties");
+
+        // The field list comes from the serialised default, so a field added
+        // to Config is checked here without anybody remembering to add it.
+        let default = serde_json::to_value(Config::default()).unwrap();
+        let fields = default
+            .as_object()
+            .expect("a config serialises to an object");
+        assert!(fields.len() > 10, "the default lost its fields");
+        for key in fields.keys() {
+            assert!(
+                properties.contains_key(key),
+                "the schema is missing the field {key}"
+            );
+        }
+
+        // And every key the real config file uses has to be in there too.
+        let real: serde_json::Value = serde_json::from_str(REAL_CONFIG).unwrap();
+        for key in real
+            .as_object()
+            .expect("the fixture is an object")
+            .keys()
+            .filter(|key| key.as_str() != "$schema")
+        {
+            assert!(
+                properties.contains_key(key),
+                "the schema is missing the configured key {key}"
+            );
+        }
+    }
 }
