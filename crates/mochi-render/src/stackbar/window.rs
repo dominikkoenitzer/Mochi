@@ -36,8 +36,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
+use crate::color::ColourExt;
 use crate::stackbar::layout::TabLayout;
-use crate::stackbar::{StackbarConfig, StackbarSpec, StackbarTab};
+use crate::stackbar::{StackbarSpec, StackbarStyle, StackbarTab};
 use crate::win::{module_handle, stack_above, wide};
 use crate::{RenderError, Result, WindowHandle};
 
@@ -56,7 +57,7 @@ pub(crate) type ClickCallback = Arc<dyn Fn(WindowHandle) + Send + Sync>;
 /// Everything the window procedure needs. Behind a `RefCell` so that a message
 /// arriving during an update cannot alias it.
 struct Inner {
-    config: StackbarConfig,
+    style: StackbarStyle,
     tabs: Vec<StackbarTab>,
     layout: TabLayout,
     renderer: Option<ID2D1HwndRenderTarget>,
@@ -94,7 +95,7 @@ impl StackbarWindow {
     pub(crate) fn new(
         factory: &ID2D1Factory,
         dwrite: &IDWriteFactory,
-        config: StackbarConfig,
+        style: StackbarStyle,
         on_click: ClickCallback,
     ) -> Result<Self> {
         let class = ensure_class()?;
@@ -102,7 +103,7 @@ impl StackbarWindow {
 
         let state = Box::new(StackbarState {
             inner: RefCell::new(Inner {
-                config,
+                style,
                 tabs: Vec::new(),
                 layout: TabLayout::new(Rect::default(), 0, 0, 0),
                 renderer: None,
@@ -148,8 +149,8 @@ impl StackbarWindow {
     /// # Errors
     ///
     /// When the window cannot be moved.
-    pub(crate) fn update(&mut self, spec: &StackbarSpec, config: &StackbarConfig) -> Result<()> {
-        let layout = TabLayout::new(spec.rect, spec.tabs.len(), config.height, config.tab_width);
+    pub(crate) fn update(&mut self, spec: &StackbarSpec, style: &StackbarStyle) -> Result<()> {
+        let layout = TabLayout::new(spec.rect, spec.tabs.len(), style.height, style.tab_width);
         if layout.is_empty() {
             self.hide();
             return Ok(());
@@ -161,12 +162,12 @@ impl StackbarWindow {
                 // update will catch up.
                 return Ok(());
             };
-            if inner.config.font_family != config.font_family
-                || inner.config.font_size != config.font_size
+            if inner.style.font_family != style.font_family
+                || inner.style.font_size != style.font_size
             {
                 inner.format = None;
             }
-            inner.config = config.clone();
+            inner.style = style.clone();
             inner.tabs = spec.tabs.clone();
             inner.layout = layout;
         }
@@ -336,7 +337,7 @@ fn draw(state: &StackbarState, hwnd: HWND) -> Result<()> {
     let (Some(target), Some(format)) = (inner.renderer.clone(), inner.format.clone()) else {
         return Ok(());
     };
-    let config = inner.config.clone();
+    let style = inner.style.clone();
     let tabs = inner.tabs.clone();
     drop(inner);
 
@@ -345,21 +346,21 @@ fn draw(state: &StackbarState, hwnd: HWND) -> Result<()> {
     // which is also what reports a lost target.
     let result = unsafe {
         target.BeginDraw();
-        target.Clear(Some(&config.unfocused_background.to_d2d()));
+        target.Clear(Some(&style.unfocused_background.to_d2d()));
 
         for (index, tab) in tabs.iter().enumerate() {
             let Some((left, right)) = layout.tab_bounds(index) else {
                 break;
             };
             let background = if tab.focused {
-                config.focused_background
+                style.focused_background
             } else {
-                config.unfocused_background
+                style.unfocused_background
             };
             let text_colour = if tab.focused {
-                config.focused_text
+                style.focused_text
             } else {
-                config.unfocused_text
+                style.unfocused_text
             };
 
             let bounds = D2D_RECT_F {
@@ -463,9 +464,9 @@ fn ensure_format(inner: &mut Inner, dwrite: &IDWriteFactory) -> Result<()> {
         return Ok(());
     }
 
-    let family = wide(inner.config.font_family.as_deref().unwrap_or("Segoe UI"));
+    let family = wide(inner.style.font_family.as_deref().unwrap_or("Segoe UI"));
     let locale = wide("en-us");
-    let size = (inner.config.font_size.max(1.0)) * POINTS_TO_DIP;
+    let size = (inner.style.font_size.max(1.0)) * POINTS_TO_DIP;
 
     // SAFETY: both wide strings outlive the call and DirectWrite copies what it
     // needs out of them.

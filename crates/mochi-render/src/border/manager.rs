@@ -1,14 +1,15 @@
 //! The border thread and the cheap handle the daemon holds.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Factory,
 };
 
+use crate::animation::FrameUpdate;
 use crate::border::window::BorderWindow;
-use crate::border::{BorderConfig, BorderSpec};
+use crate::border::{BorderChanges, BorderConfig, BorderDiff, BorderSpec};
 use crate::win::{WorkerHandle, spawn_worker};
 use crate::{Result, WindowHandle};
 
@@ -22,6 +23,8 @@ const MAX_IDLE: usize = 8;
 enum BorderMessage {
     /// Replace everything on screen with this set.
     Set(Vec<BorderSpec>),
+    /// Do exactly this much and leave every other border alone.
+    Apply(Box<BorderChanges>),
     /// Take every border off the screen.
     Clear,
     /// New configuration; everything repaints.
@@ -35,6 +38,9 @@ enum BorderMessage {
 #[derive(Clone)]
 pub struct BorderManager {
     worker: Arc<WorkerHandle<BorderMessage>>,
+    /// What the thread was last told, so that an unchanged pass sends nothing.
+    /// Shared by every clone, because they all drive the same windows.
+    diff: Arc<Mutex<BorderDiff>>,
 }
 
 impl BorderManager {
@@ -52,18 +58,65 @@ impl BorderManager {
         )?;
         Ok(Self {
             worker: Arc::new(worker),
+            diff: Arc::new(Mutex::new(BorderDiff::new())),
         })
+    }
+
+    /// Declares the borders for one layout pass, and sends only what changed.
+    ///
+    /// `focused` is the one container that has the focus, `others` is every
+    /// other border that should be on screen; anything named by neither is
+    /// taken down. A border whose rectangle and kind are the same as last time
+    /// is not touched at all, one that only moved is moved, and one whose kind
+    /// changed is repainted. When nothing changed nothing is sent.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::RenderError::ThreadGone`] when the border thread has stopped.
+    pub fn update(&self, focused: Option<BorderSpec>, others: Vec<BorderSpec>) -> Result<()> {
+        let mut specs = others;
+        // Last wins, so a window named by both lists ends up focused.
+        specs.extend(focused);
+
+        let changes = self.with_diff(|diff| diff.diff(specs));
+        if changes.is_empty() {
+            return Ok(());
+        }
+        self.worker.send(BorderMessage::Apply(Box::new(changes)))
+    }
+
+    /// Moves the borders of the windows in one animation frame.
+    ///
+    /// Call this from the [`crate::Animator`] apply callback with the frame it
+    /// hands out: the border of every window that has one follows it, keeping
+    /// the kind the last [`BorderManager::update`] gave it, and nothing is
+    /// added, repainted or taken down. A frame that moved no window with a
+    /// border sends nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::RenderError::ThreadGone`] when the border thread has stopped.
+    pub fn follow_frame(&self, frame: &[FrameUpdate]) -> Result<()> {
+        let changes = self.with_diff(|diff| diff.follow(frame));
+        if changes.is_empty() {
+            return Ok(());
+        }
+        self.worker.send(BorderMessage::Apply(Box::new(changes)))
     }
 
     /// Declares the complete set of borders that should be on screen.
     ///
-    /// Anything not in the list is taken down. Send this after every layout
-    /// pass; working out the difference is the border thread's job.
+    /// Anything not in the list is taken down. This is the unconditional form
+    /// of [`BorderManager::update`]: every border in the list is handed to its
+    /// window whether or not it changed. Prefer `update` in the per pass path.
     ///
     /// # Errors
     ///
     /// [`crate::RenderError::ThreadGone`] when the border thread has stopped.
     pub fn set_borders(&self, specs: Vec<BorderSpec>) -> Result<()> {
+        self.with_diff(|diff| {
+            let _ = diff.diff(specs.clone());
+        });
         self.worker.send(BorderMessage::Set(specs))
     }
 
@@ -73,6 +126,7 @@ impl BorderManager {
     ///
     /// [`crate::RenderError::ThreadGone`] when the border thread has stopped.
     pub fn clear(&self) -> Result<()> {
+        self.with_diff(BorderDiff::invalidate);
         self.worker.send(BorderMessage::Clear)
     }
 
@@ -82,6 +136,9 @@ impl BorderManager {
     ///
     /// [`crate::RenderError::ThreadGone`] when the border thread has stopped.
     pub fn set_config(&self, config: BorderConfig) -> Result<()> {
+        // A new configuration changes every colour and every measurement, so
+        // the next pass has to hand every border to its window again.
+        self.with_diff(BorderDiff::invalidate);
         self.worker.send(BorderMessage::Config(config))
     }
 
@@ -91,7 +148,14 @@ impl BorderManager {
     /// explicitly on shutdown so that the frames are gone before the windows
     /// they belong to are restored.
     pub fn stop(&self) {
+        self.with_diff(BorderDiff::invalidate);
         self.worker.stop();
+    }
+
+    /// Runs `body` against the shared diff state.
+    fn with_diff<T>(&self, body: impl FnOnce(&mut BorderDiff) -> T) -> T {
+        let mut diff = self.diff.lock().unwrap_or_else(PoisonError::into_inner);
+        body(&mut diff)
     }
 }
 
@@ -130,38 +194,63 @@ impl Borders {
     fn handle(&mut self, message: BorderMessage) {
         match message {
             BorderMessage::Set(specs) => self.set(specs),
+            BorderMessage::Apply(changes) => self.apply(&changes),
             BorderMessage::Clear => self.clear(),
             BorderMessage::Config(config) => self.reconfigure(config),
         }
     }
 
+    /// Replaces everything on screen with `specs`.
     fn set(&mut self, specs: Vec<BorderSpec>) {
         if !self.config.enabled {
             self.clear();
             return;
         }
 
-        let mut next: HashMap<isize, BorderWindow> = HashMap::with_capacity(specs.len());
-        for spec in specs {
-            let key = spec.target.0;
-            let Some(mut window) = self.take_window(key) else {
-                continue;
-            };
-
-            if let Err(error) = window.track(spec.target.hwnd(), spec.rect, spec.kind) {
-                tracing::warn!(target = %WindowHandle(key), %error, "could not draw a border");
-            }
-            if let Some(duplicate) = next.insert(key, window) {
-                // Two specs for the same window: keep one, recycle the other.
-                self.recycle(duplicate);
-            }
+        let wanted: std::collections::HashSet<isize> =
+            specs.iter().map(|spec| spec.target.0).collect();
+        let stale: Vec<isize> = self
+            .active
+            .keys()
+            .copied()
+            .filter(|key| !wanted.contains(key))
+            .collect();
+        for key in stale {
+            self.take_down(key);
         }
-
-        let leftovers: Vec<BorderWindow> = self.active.drain().map(|(_, window)| window).collect();
-        for window in leftovers {
-            self.recycle(window);
+        for spec in &specs {
+            self.track(spec);
         }
-        self.active = next;
+    }
+
+    /// Does exactly what the diff asked for and nothing else.
+    fn apply(&mut self, changes: &BorderChanges) {
+        if !self.config.enabled {
+            self.clear();
+            return;
+        }
+        // Removals first, so a window that has just been freed can be reused by
+        // a border that is being added in the same pass.
+        for handle in &changes.removed {
+            self.take_down(handle.0);
+        }
+        for spec in changes.specs() {
+            self.track(spec);
+        }
+    }
+
+    /// Points one border window at its target, creating it if it has to.
+    fn track(&mut self, spec: &BorderSpec) {
+        let key = spec.target.0;
+        let Some(mut window) = self.take_window(key) else {
+            return;
+        };
+        if let Err(error) = window.track(spec.target.hwnd(), spec.rect, spec.kind) {
+            tracing::warn!(target = %WindowHandle(key), %error, "could not draw a border");
+        }
+        if let Some(duplicate) = self.active.insert(key, window) {
+            self.recycle(duplicate);
+        }
     }
 
     /// The window for `key`: the one already tracking it, a spare, or a new one.
@@ -178,6 +267,13 @@ impl Borders {
                 tracing::warn!(%error, "could not create a border window");
                 None
             }
+        }
+    }
+
+    /// Takes one border off the screen.
+    fn take_down(&mut self, key: isize) {
+        if let Some(window) = self.active.remove(&key) {
+            self.recycle(window);
         }
     }
 

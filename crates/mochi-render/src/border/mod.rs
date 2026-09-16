@@ -1,37 +1,55 @@
 //! Borders: one layered frame window per managed container.
 //!
 //! The daemon does not drive individual windows. It sends the whole desired end
-//! state to [`BorderManager::set_borders`] after every layout pass, and the
-//! border thread works out which frames to create, move, recolour or hide.
+//! state to [`BorderManager::update`] after every layout pass, and the manager
+//! works out which frames to create, move, recolour or take down. Everything it
+//! does not mention is left exactly as it is, which is what makes a per frame
+//! call cheap enough to make on every animation frame.
+//!
+//! The look comes straight from the config file: [`BorderStyle`] and
+//! [`BorderColours`] are `mochi-core`'s own types, and the extension traits
+//! here answer the two questions a painter has that a config file cannot.
 //!
 //! ```no_run
 //! use mochi_render::{BorderConfig, BorderKind, BorderManager, BorderSpec, Rect, WindowHandle};
 //!
 //! # fn main() -> mochi_render::Result<()> {
 //! let borders = BorderManager::new(BorderConfig::default())?;
-//! borders.set_borders(vec![BorderSpec {
-//!     target: WindowHandle(0x1234),
-//!     rect: Rect::new(100, 100, 900, 700),
-//!     kind: BorderKind::Single,
-//! }])?;
+//! borders.update(
+//!     Some(BorderSpec::new(
+//!         WindowHandle(0x1234),
+//!         Rect::new(100, 100, 900, 700),
+//!         BorderKind::Single,
+//!     )),
+//!     vec![],
+//! )?;
 //! # Ok(())
 //! # }
 //! ```
 
+use mochi_core::config::{BorderColours, BorderStyle, Colour, Config};
 use serde::{Deserialize, Serialize};
 
-use crate::color::Color;
 use crate::{Rect, WindowHandle};
 
+mod diff;
 #[cfg(windows)]
 mod manager;
 #[cfg(windows)]
 mod window;
 
+pub use diff::{BorderChanges, BorderDiff};
 #[cfg(windows)]
 pub use manager::BorderManager;
 #[cfg(windows)]
 pub use window::BorderWindow;
+
+/// The accent the rice uses for anything focused, for a config that names no
+/// colour of its own.
+pub const DEFAULT_FOCUSED: Colour = Colour::new(0xff, 0xbb, 0xdf);
+
+/// Catppuccin Mocha Surface0, the colour of everything unfocused.
+pub const DEFAULT_UNFOCUSED: Colour = Colour::new(0x31, 0x32, 0x44);
 
 /// What a container is, which decides which colour its border gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -49,22 +67,15 @@ pub enum BorderKind {
     Unfocused,
 }
 
-/// Which shape the frame takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum BorderStyle {
-    /// Follow the operating system: rounded on Windows 11, square before that.
-    #[default]
-    System,
-    /// Always rounded, with the radius Windows 11 uses, scaled for the monitor.
-    Rounded,
-    /// Always square.
-    Square,
-}
-
-impl BorderStyle {
+/// The shape question a painter has to ask the configured style.
+pub trait BorderStyleExt {
     /// Resolves [`BorderStyle::System`] against the running Windows version.
     #[must_use]
-    pub fn is_rounded(self) -> bool {
+    fn is_rounded(&self) -> bool;
+}
+
+impl BorderStyleExt for BorderStyle {
+    fn is_rounded(&self) -> bool {
         match self {
             BorderStyle::Rounded => true,
             BorderStyle::Square => false,
@@ -76,51 +87,23 @@ impl BorderStyle {
     }
 }
 
-/// One colour per container kind.
-///
-/// The field names match the `border_colours` block of the config file, so an
-/// existing config migrates with a rename of the surrounding keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BorderColours {
-    /// A focused container with one window.
-    pub single: Color,
-    /// A focused container with a stack of windows.
-    pub stack: Color,
-    /// The focused container in monocle mode.
-    pub monocle: Color,
-    /// A focused floating window.
-    pub floating: Color,
-    /// Everything that is not focused.
-    pub unfocused: Color,
-}
-
-impl BorderColours {
-    /// The colour for one kind of container.
+/// The colour question a painter has to ask the configured colours.
+pub trait BorderColoursExt {
+    /// The colour for one kind of container, falling back to
+    /// [`DEFAULT_FOCUSED`] and [`DEFAULT_UNFOCUSED`] for anything the config
+    /// file leaves out.
     #[must_use]
-    pub const fn for_kind(&self, kind: BorderKind) -> Color {
-        match kind {
-            BorderKind::Single => self.single,
-            BorderKind::Stack => self.stack,
-            BorderKind::Monocle => self.monocle,
-            BorderKind::Floating => self.floating,
-            BorderKind::Unfocused => self.unfocused,
-        }
-    }
+    fn resolve(&self, kind: BorderKind) -> Colour;
 }
 
-impl Default for BorderColours {
-    /// Catppuccin Mocha with the pink accent: one accent colour for everything
-    /// focused, Surface0 for everything else.
-    fn default() -> Self {
-        const ACCENT: Color = Color::rgb(0xff, 0xbb, 0xdf);
-        const SURFACE0: Color = Color::rgb(0x31, 0x32, 0x44);
-        Self {
-            single: ACCENT,
-            stack: ACCENT,
-            monocle: ACCENT,
-            floating: ACCENT,
-            unfocused: SURFACE0,
+impl BorderColoursExt for BorderColours {
+    fn resolve(&self, kind: BorderKind) -> Colour {
+        match kind {
+            BorderKind::Single => self.single.unwrap_or(DEFAULT_FOCUSED),
+            BorderKind::Stack => self.stack.unwrap_or(DEFAULT_FOCUSED),
+            BorderKind::Monocle => self.monocle.unwrap_or(DEFAULT_FOCUSED),
+            BorderKind::Floating => self.floating.unwrap_or(DEFAULT_FOCUSED),
+            BorderKind::Unfocused => self.unfocused.unwrap_or(DEFAULT_UNFOCUSED),
         }
     }
 }
@@ -144,7 +127,7 @@ pub struct BorderConfig {
     pub offset: i32,
     /// Square, rounded, or whatever the OS does.
     pub style: BorderStyle,
-    /// One colour per container kind.
+    /// One colour per container kind, resolved through [`BorderColoursExt`].
     pub colours: BorderColours,
 }
 
@@ -156,6 +139,21 @@ impl Default for BorderConfig {
             offset: -1,
             style: BorderStyle::Rounded,
             colours: BorderColours::default(),
+        }
+    }
+}
+
+impl From<&Config> for BorderConfig {
+    /// Reads the five `border*` keys of the config file. A file that does not
+    /// mention borders does not get any.
+    fn from(config: &Config) -> Self {
+        let fallback = Self::default();
+        Self {
+            enabled: config.border.unwrap_or(false),
+            width: config.border_width.unwrap_or(fallback.width),
+            offset: config.border_offset.unwrap_or(fallback.offset),
+            style: config.border_style.unwrap_or_default(),
+            colours: config.border_colours.unwrap_or_default(),
         }
     }
 }
@@ -192,8 +190,14 @@ mod tests {
         assert_eq!(config.width, 6);
         assert_eq!(config.offset, -1);
         assert_eq!(config.style, BorderStyle::Rounded);
-        assert_eq!(config.colours.single.to_hex(), "#ffbbdf");
-        assert_eq!(config.colours.unfocused.to_hex(), "#313244");
+        assert_eq!(
+            config.colours.resolve(BorderKind::Single).to_hex(),
+            "#ffbbdf"
+        );
+        assert_eq!(
+            config.colours.resolve(BorderKind::Unfocused).to_hex(),
+            "#313244"
+        );
     }
 
     #[test]
@@ -205,13 +209,20 @@ mod tests {
             BorderKind::Monocle,
             BorderKind::Floating,
         ] {
-            assert_eq!(colours.for_kind(kind), colours.single);
+            assert_eq!(colours.resolve(kind), DEFAULT_FOCUSED);
         }
         assert_eq!(
-            colours.for_kind(BorderKind::Unfocused),
-            colours.unfocused,
+            colours.resolve(BorderKind::Unfocused),
+            DEFAULT_UNFOCUSED,
             "the unfocused colour has to be the odd one out"
         );
+    }
+
+    #[test]
+    fn a_configured_colour_wins_over_the_default() {
+        let colours: BorderColours = serde_json::from_str(r##"{"unfocused":"#000000"}"##).unwrap();
+        assert_eq!(colours.resolve(BorderKind::Unfocused), Colour::new(0, 0, 0));
+        assert_eq!(colours.resolve(BorderKind::Single), DEFAULT_FOCUSED);
     }
 
     #[test]
@@ -220,8 +231,10 @@ mod tests {
             serde_json::from_str(r##"{"width":8,"colours":{"unfocused":"#000000"}}"##).unwrap();
         assert_eq!(config.width, 8);
         assert_eq!(config.offset, -1, "untouched keys keep their default");
-        assert_eq!(config.colours.unfocused, Color::rgb(0, 0, 0));
-        assert_eq!(config.colours.single.to_hex(), "#ffbbdf");
+        assert_eq!(
+            config.colours.resolve(BorderKind::Unfocused),
+            Colour::new(0, 0, 0)
+        );
     }
 
     #[test]
@@ -238,5 +251,25 @@ mod tests {
         let text = serde_json::to_string(&config).unwrap();
         let back: BorderConfig = serde_json::from_str(&text).unwrap();
         assert_eq!(config, back);
+    }
+
+    #[test]
+    fn the_config_file_drives_the_border() {
+        let config = Config::from_json(
+            r##"{"border":true,"border_width":6,"border_offset":-1,"border_style":"Rounded",
+                 "border_colours":{"single":"#ffbbdf","unfocused":"#313244"}}"##,
+        )
+        .unwrap();
+        let borders = BorderConfig::from(&config);
+        assert!(borders.enabled);
+        assert_eq!(borders.width, 6);
+        assert_eq!(borders.offset, -1);
+        assert!(borders.style.is_rounded());
+        assert_eq!(borders.colours.resolve(BorderKind::Single), DEFAULT_FOCUSED);
+
+        assert!(
+            !BorderConfig::from(&Config::default()).enabled,
+            "a config that says nothing gets no borders"
+        );
     }
 }

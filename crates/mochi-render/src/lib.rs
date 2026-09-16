@@ -12,14 +12,84 @@
 //! - [`transparency`] fades unfocused windows with `WS_EX_LAYERED`.
 //! - [`animation`] interpolates rectangles on a timer thread and hands whole
 //!   frames back to the daemon, which applies them with `DeferWindowPos`.
-//! - [`easing`] holds the easing curves, [`geometry`] the frame maths,
-//!   [`color`] the colour type.
+//! - [`geometry`] holds the frame maths, [`color`] the Direct2D conversions.
+//!
+//! The types the config file names are `mochi-core`'s own: [`Rect`],
+//! [`AnimationStyle`], [`AnimationConfig`], [`BorderStyle`], [`BorderColours`],
+//! [`Colour`] and [`StackbarConfig`]. This crate adds the render specific ones
+//! on top and, where a painter needs something a config file cannot say, a
+//! small extension trait: [`AnimationConfigExt`], [`BorderStyleExt`],
+//! [`BorderColoursExt`], [`StackbarModeExt`] and [`ColourExt`].
 //!
 //! # Threads
 //!
 //! Each visual owns one thread with its own message loop. The daemon only ever
 //! sends the desired end state ("these containers should have borders now") and
 //! never waits for a reply, so a stuck compositor cannot stall tiling.
+//!
+//! # How the daemon drives the three managers
+//!
+//! One pass, in order:
+//!
+//! 1. **Retile.** The layout produces a target rectangle per window.
+//! 2. **Animate.** Every window that moved gets an [`animation::AnimationJob`].
+//!    The apply callback runs once per frame with the whole frame in it.
+//! 3. **Borders follow.** The callback hands that same frame to
+//!    [`BorderManager::follow_frame`], which moves the border of every window
+//!    that has one and touches nothing else. The end state goes to
+//!    [`BorderManager::update`] once per pass, which is what decides who has a
+//!    border and which colour it is.
+//! 4. **Transparency.** [`TransparencyManager::update`] takes the whole
+//!    unfocused set, fades what is new in it and puts back what left it.
+//!
+//! Each of the three keeps its own last state, so a pass that changed nothing
+//! makes no Win32 calls at all.
+//!
+//! ```no_run
+//! use mochi_render::{
+//!     AnimationConfig, AnimationConfigExt, Animator, BorderConfig, BorderKind, BorderManager,
+//!     BorderSpec, FrameUpdate, Rect, TransparencyManager, WindowHandle,
+//! };
+//!
+//! # fn main() -> mochi_render::Result<()> {
+//! let borders = BorderManager::new(BorderConfig::default())?;
+//! let mut translucent = TransparencyManager::new(235);
+//!
+//! // 1. Retile: the layout says where the two windows go.
+//! let focused = WindowHandle(0x1234);
+//! let other = WindowHandle(0x5678);
+//! let was = Rect::new(0, 0, 800, 600);
+//! let now = Rect::new(100, 100, 900, 700);
+//!
+//! // 2. Animate, and 3. let the borders follow every frame.
+//! let following = borders.clone();
+//! let animator = Animator::new(move |frame: &[FrameUpdate]| {
+//!     for update in frame {
+//!         // one DeferWindowPos batch for the windows themselves
+//!         let _ = (update.handle, update.rect, update.finished);
+//!     }
+//!     // and one diffed batch for their borders
+//!     let _ = following.follow_frame(frame);
+//! })?;
+//!
+//! // The end state first, so every border knows its colour before it moves.
+//! borders.update(
+//!     Some(BorderSpec::new(focused, now, BorderKind::Single)),
+//!     vec![BorderSpec::new(
+//!         other,
+//!         Rect::new(900, 100, 1700, 700),
+//!         BorderKind::Unfocused,
+//!     )],
+//! )?;
+//!
+//! let animation = AnimationConfig::default();
+//! animator.animate(vec![animation.job(focused, was, now)])?;
+//!
+//! // 4. Everything that is not focused fades.
+//! translucent.update(&[other])?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # Safety
 //!
@@ -33,7 +103,6 @@
 pub mod animation;
 pub mod border;
 pub mod color;
-pub mod easing;
 pub mod geometry;
 pub mod stackbar;
 
@@ -43,17 +112,29 @@ pub mod transparency;
 #[cfg(windows)]
 mod win;
 
-pub use animation::{AnimationConfig, AnimationJob, Animator, FrameUpdate};
-pub use border::{BorderColours, BorderConfig, BorderKind, BorderSpec, BorderStyle};
-pub use color::Color;
-pub use easing::Easing;
+pub use animation::{
+    AnimationConfigExt, AnimationJob, AnimationStyleExt, Animator, FrameUpdate, Timeline,
+};
+pub use border::{
+    BorderChanges, BorderColoursExt, BorderConfig, BorderDiff, BorderKind, BorderSpec,
+    BorderStyleExt,
+};
+pub use color::ColourExt;
+pub use stackbar::{StackbarModeExt, StackbarSpec, StackbarStyle, StackbarTab, TabLayout};
+
 pub use mochi_core::Rect;
-pub use stackbar::{StackbarConfig, StackbarLabel, StackbarMode, StackbarSpec, StackbarTab};
+pub use mochi_core::animation::AnimationStyle;
+pub use mochi_core::config::{
+    AnimationConfig, BorderColours, BorderStyle, Colour, StackbarConfig, StackbarLabel,
+    StackbarMode, StackbarTabs,
+};
 
 #[cfg(windows)]
 pub use border::BorderManager;
 #[cfg(windows)]
 pub use stackbar::StackbarManager;
+#[cfg(windows)]
+pub use transparency::{TransparencyManager, Win32Alpha, WindowAlpha};
 
 /// A window handle, stored as the raw `HWND` value.
 ///
@@ -127,14 +208,6 @@ pub enum RenderError {
     /// A worker thread could not be started.
     #[error("could not start the {0} thread: {1}")]
     ThreadStart(&'static str, String),
-
-    /// A colour string was not a colour.
-    #[error("invalid colour {0:?}, expected #rgb, #rrggbb or #rrggbbaa")]
-    Color(String),
-
-    /// An easing name did not match any curve.
-    #[error("unknown easing curve {0:?}")]
-    Easing(String),
 }
 
 /// The crate result type.

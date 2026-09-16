@@ -11,7 +11,9 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 
 use crate::stackbar::window::{ClickCallback, StackbarWindow};
-use crate::stackbar::{StackbarConfig, StackbarSpec};
+use mochi_core::config::{StackbarConfig, StackbarMode};
+
+use crate::stackbar::{StackbarModeExt, StackbarSpec, StackbarStyle};
 use crate::win::{WorkerHandle, spawn_worker};
 use crate::{Result, WindowHandle};
 
@@ -105,7 +107,7 @@ impl std::fmt::Debug for StackbarManager {
 struct Stackbars {
     factory: ID2D1Factory,
     dwrite: IDWriteFactory,
-    config: StackbarConfig,
+    style: StackbarStyle,
     on_click: ClickCallback,
     active: HashMap<u64, StackbarWindow>,
     idle: Vec<StackbarWindow>,
@@ -124,7 +126,7 @@ impl Stackbars {
         Ok(Self {
             factory,
             dwrite,
-            config,
+            style: StackbarStyle::from(&config),
             on_click,
             active: HashMap::new(),
             idle: Vec::new(),
@@ -142,13 +144,13 @@ impl Stackbars {
     fn set(&mut self, specs: Vec<StackbarSpec>) {
         let mut next: HashMap<u64, StackbarWindow> = HashMap::new();
         for spec in specs {
-            if !self.config.mode.shows(spec.tabs.len()) {
+            if !self.style.mode.shows(spec.tabs.len()) {
                 continue;
             }
             let Some(mut bar) = self.take_window(spec.id) else {
                 continue;
             };
-            if let Err(error) = bar.update(&spec, &self.config) {
+            if let Err(error) = bar.update(&spec, &self.style) {
                 tracing::warn!(container = spec.id, %error, "could not draw a stackbar");
             }
             if let Some(duplicate) = next.insert(spec.id, bar) {
@@ -173,7 +175,7 @@ impl Stackbars {
         match StackbarWindow::new(
             &self.factory,
             &self.dwrite,
-            self.config.clone(),
+            self.style.clone(),
             Arc::clone(&self.on_click),
         ) {
             Ok(bar) => Some(bar),
@@ -192,10 +194,10 @@ impl Stackbars {
     }
 
     fn reconfigure(&mut self, config: StackbarConfig) {
-        self.config = config;
+        self.style = StackbarStyle::from(&config);
         // The bars pick the new configuration up on the next set; a mode of
         // Never means there should be none at all.
-        if self.config.mode == crate::stackbar::StackbarMode::Never {
+        if self.style.mode == StackbarMode::Never {
             self.clear();
         }
     }
@@ -216,7 +218,7 @@ mod tests {
     use mochi_core::Rect;
 
     use super::*;
-    use crate::stackbar::{StackbarMode, StackbarTab};
+    use crate::stackbar::StackbarTab;
 
     /// Puts a real bar on the screen for a moment. Ignored by default because
     /// it needs a desktop and draws on it:
@@ -229,7 +231,7 @@ mod tests {
 
         let manager = StackbarManager::new(
             StackbarConfig {
-                mode: StackbarMode::Always,
+                mode: Some(StackbarMode::Always),
                 ..Default::default()
             },
             move |_| {
