@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 /// of every window manager that follows the usual manageability rules.
 pub const WS_EX_TOOLWINDOW_BIT: u32 = 0x0000_0080;
 
+/// `WS_EX_LAYERED`, the bit a window carries once something has given it a
+/// transparency. Without it there is no alpha to read.
+pub const WS_EX_LAYERED_BIT: u32 = 0x0008_0000;
+
 /// Everything the testbed reports about one test window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestWindowInfo {
@@ -37,6 +41,19 @@ pub struct TestWindowInfo {
     pub visible: bool,
     /// `IsIconic`.
     pub minimized: bool,
+    /// `DWMWA_CLOAKED`: the window is hidden by DWM rather than by `ShowWindow`.
+    /// This is how a tiling manager hides a workspace, so a test asserting
+    /// hide and show reads this rather than `visible`.
+    pub cloaked: bool,
+    /// `GetForegroundWindow() == hwnd`.
+    pub foreground: bool,
+    /// The layered alpha, 0 transparent and 255 opaque, or `None` when nothing
+    /// has made the window layered.
+    pub alpha: Option<u8>,
+    /// `GetWindow(GW_OWNER)`: the owner of an owned popup, `None` for an
+    /// ordinary top level window. The usual manageability rules skip a window
+    /// that has an owner.
+    pub owner: Option<i64>,
 }
 
 impl TestWindowInfo {
@@ -51,6 +68,13 @@ impl TestWindowInfo {
     #[must_use]
     pub const fn is_tool_window(&self) -> bool {
         self.ex_style & WS_EX_TOOLWINDOW_BIT != 0
+    }
+
+    /// True when the window carries `WS_EX_LAYERED`, which is what makes an
+    /// alpha readable in the first place.
+    #[must_use]
+    pub const fn is_layered(&self) -> bool {
+        self.ex_style & WS_EX_LAYERED_BIT != 0
     }
 
     /// The invisible border as left, top, right and bottom insets: how far the
@@ -118,6 +142,10 @@ mod tests {
             ex_style: WS_EX_TOOLWINDOW_BIT,
             visible: true,
             minimized: false,
+            cloaked: false,
+            foreground: false,
+            alpha: None,
+            owner: None,
         }
     }
 
@@ -132,6 +160,40 @@ mod tests {
         let mut plain = info();
         plain.ex_style = 0;
         assert!(!plain.is_tool_window());
+    }
+
+    #[test]
+    fn the_layered_bit_and_the_alpha_travel_together() {
+        let plain = info();
+        assert!(!plain.is_layered());
+        assert_eq!(plain.alpha, None);
+
+        let mut transparent = info();
+        transparent.ex_style |= WS_EX_LAYERED_BIT;
+        transparent.alpha = Some(128);
+        assert!(transparent.is_layered());
+    }
+
+    #[test]
+    fn the_states_a_tiling_test_asserts_on_survive_json() {
+        let mut window = info();
+        window.cloaked = true;
+        window.foreground = true;
+        window.alpha = Some(200);
+        window.owner = Some(0x4321);
+        let json = serde_json::to_string(&window).unwrap();
+        for key in [
+            r#""cloaked":true"#,
+            r#""foreground":true"#,
+            r#""alpha":200"#,
+            r#""owner":17185"#,
+        ] {
+            assert!(json.contains(key), "{key} missing from {json}");
+        }
+        assert_eq!(
+            serde_json::from_str::<TestWindowInfo>(&json).unwrap(),
+            window
+        );
     }
 
     #[test]

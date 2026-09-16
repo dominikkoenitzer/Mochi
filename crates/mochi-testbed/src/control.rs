@@ -63,15 +63,75 @@ pub enum Request {
     List,
     /// Add more windows to the running host.
     Spawn {
-        /// How many.
-        count: u32,
-        /// Which monitor, in `EnumDisplayMonitors` order.
-        monitor: usize,
-        /// Title prefix for the new windows.
-        title_prefix: String,
+        /// Everything the new batch should look like.
+        #[serde(flatten)]
+        options: SpawnRequest,
     },
     /// Close every window and let the host process exit.
     CloseAll,
+}
+
+/// The spawn options as they travel over the pipe.
+///
+/// A mirror of [`crate::SpawnOptions`] rather than the type itself: everything
+/// here has to survive JSON, and every field added later defaults, so an older
+/// client still talks to a newer host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnRequest {
+    /// How many windows.
+    pub count: u32,
+    /// Which monitor, in `EnumDisplayMonitors` order.
+    pub monitor: usize,
+    /// Title prefix for the new windows.
+    pub title_prefix: String,
+    /// Exact top left corner, or `None` to stagger the batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<(i32, i32)>,
+    /// Exact size in physical pixels, or `None` for the DPI scaled default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<(i32, i32)>,
+    /// Minimum size the windows defend on `WM_GETMINMAXINFO`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_size: Option<(i32, i32)>,
+    /// Create owned popups.
+    #[serde(default)]
+    pub owned: bool,
+    /// Create the windows without a title.
+    #[serde(default)]
+    pub no_title: bool,
+}
+
+impl From<&crate::SpawnOptions> for SpawnRequest {
+    fn from(options: &crate::SpawnOptions) -> Self {
+        Self {
+            count: options.count,
+            monitor: options.monitor,
+            title_prefix: options.title_prefix.clone(),
+            position: options.position,
+            size: options.size,
+            min_size: options.min_size,
+            owned: options.owned,
+            no_title: options.no_title,
+        }
+    }
+}
+
+impl SpawnRequest {
+    /// The options a host spawns from. A host always emits events.
+    #[must_use]
+    pub fn into_options(self) -> crate::SpawnOptions {
+        crate::SpawnOptions {
+            count: self.count,
+            monitor: self.monitor,
+            title_prefix: self.title_prefix,
+            emit_events: true,
+            size: self.size,
+            position: self.position,
+            min_size: self.min_size,
+            owned: self.owned,
+            no_title: self.no_title,
+        }
+    }
 }
 
 /// What the host answers. Always one line of JSON.
@@ -392,16 +452,26 @@ mod tests {
             r#"{"cmd":"close_all"}"#
         );
         let spawn = Request::Spawn {
-            count: 2,
-            monitor: 1,
-            title_prefix: "MochiTest".into(),
+            options: SpawnRequest {
+                count: 2,
+                monitor: 1,
+                title_prefix: "MochiTest".into(),
+                ..SpawnRequest::default()
+            },
         };
         let json = serde_json::to_string(&spawn).unwrap();
-        assert_eq!(
-            json,
-            r#"{"cmd":"spawn","count":2,"monitor":1,"title_prefix":"MochiTest"}"#
+        assert!(
+            json.starts_with(r#"{"cmd":"spawn","count":2,"monitor":1"#),
+            "{json}"
         );
         assert_eq!(serde_json::from_str::<Request>(&json).unwrap(), spawn);
+
+        // A client that knows none of the placement fields still parses.
+        let older = r#"{"cmd":"spawn","count":1,"monitor":0,"title_prefix":"MochiTest"}"#;
+        assert!(matches!(
+            serde_json::from_str::<Request>(older).unwrap(),
+            Request::Spawn { .. }
+        ));
     }
 
     #[test]

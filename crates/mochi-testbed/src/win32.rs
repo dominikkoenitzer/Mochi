@@ -11,8 +11,11 @@
 
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_CLOAK, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
+    DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, InvalidateRect, MONITOR_DEFAULTTONULL,
     MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
@@ -24,22 +27,55 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClassNameW,
-    GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, MONITORINFOF_PRIMARY,
-    PostMessageW, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WM_CLOSE,
+    BringWindowToTop, EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClassNameW,
+    GetForegroundWindow, GetLayeredWindowAttributes, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA,
+    MONITORINFOF_PRIMARY, PostMessageW, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, WM_CLOSE,
 };
 use windows::core::PCWSTR;
 
 use crate::TEST_WINDOW_CLASS;
 use crate::error::{Error, Result};
 use crate::geometry::Rect;
-use crate::info::{MonitorInfo, TestWindowInfo};
+use crate::info::{MonitorInfo, TestWindowInfo, WS_EX_LAYERED_BIT};
 use crate::wide::{from_wide, to_wide};
 
-/// How often the `wait_*` helpers look again. Roughly one frame at 60 Hz.
-const POLL: std::time::Duration = std::time::Duration::from_millis(15);
+/// How often the `wait_*` helpers look again.
+///
+/// Ten milliseconds: fast enough that a test measuring how long a retile took
+/// is not reading the poll interval instead, slow enough that a wait costs
+/// nothing while a layout settles.
+pub const POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// A monotonic deadline. `Instant` never goes backwards, so a wait cannot be
+/// extended or cut short by the wall clock being adjusted under it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadline {
+    start: std::time::Instant,
+    timeout: std::time::Duration,
+}
+
+impl Deadline {
+    /// Starts a deadline `timeout` from now.
+    pub(crate) fn new(timeout: std::time::Duration) -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            timeout,
+        }
+    }
+
+    /// True once the timeout has passed.
+    pub(crate) fn passed(&self) -> bool {
+        self.start.elapsed() >= self.timeout
+    }
+
+    /// How long the caller has been waiting.
+    pub(crate) fn elapsed(&self) -> std::time::Duration {
+        self.start.elapsed()
+    }
+}
 
 /// Turns a handle number back into an `HWND`.
 pub(crate) const fn as_hwnd(hwnd: i64) -> HWND {
@@ -202,6 +238,7 @@ fn info_for(hwnd: HWND, monitors: &[MonitorInfo]) -> Result<TestWindowInfo> {
         .map(|m| m.index);
     let mut pid = 0;
     let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
 
     Ok(TestWindowInfo {
         hwnd: as_i64(hwnd),
@@ -213,10 +250,127 @@ fn info_for(hwnd: HWND, monitors: &[MonitorInfo]) -> Result<TestWindowInfo> {
         frame: frame_bounds_raw(hwnd).unwrap_or(rect),
         monitor,
         style: unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32,
-        ex_style: unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32,
+        ex_style,
         visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
         minimized: unsafe { IsIconic(hwnd) }.as_bool(),
+        cloaked: cloaked_raw(hwnd),
+        foreground: unsafe { GetForegroundWindow() } == hwnd,
+        alpha: alpha_raw(hwnd, ex_style),
+        owner: owner_raw(hwnd),
     })
+}
+
+/// `DWMWA_CLOAKED`: true when DWM is hiding the window, which is how a tiling
+/// manager hides a workspace without touching the window's own visibility.
+#[must_use]
+pub fn cloaked(hwnd: i64) -> bool {
+    cloaked_raw(as_hwnd(hwnd))
+}
+
+fn cloaked_raw(hwnd: HWND) -> bool {
+    let mut value: u32 = 0;
+    let ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            std::ptr::from_mut(&mut value).cast(),
+            size_of::<u32>() as u32,
+        )
+    };
+    ok.is_ok() && value != 0
+}
+
+/// Cloaks or uncloaks a window through DWM, the way a manager hides one.
+///
+/// # Errors
+/// When DWM refuses the attribute, which means the window is gone.
+pub fn set_cloaked(hwnd: i64, cloaked: bool) -> Result<()> {
+    let value: u32 = u32::from(cloaked);
+    unsafe {
+        DwmSetWindowAttribute(
+            as_hwnd(hwnd),
+            DWMWA_CLOAK,
+            std::ptr::from_ref(&value).cast(),
+            size_of::<u32>() as u32,
+        )
+    }
+    .map_err(|e| Error::win32("DwmSetWindowAttribute", &e))
+}
+
+/// The layered alpha of a window, or `None` when nothing made it layered.
+#[must_use]
+pub fn window_alpha(hwnd: i64) -> Option<u8> {
+    let target = as_hwnd(hwnd);
+    let ex_style = unsafe { GetWindowLongPtrW(target, GWL_EXSTYLE) } as u32;
+    alpha_raw(target, ex_style)
+}
+
+fn alpha_raw(hwnd: HWND, ex_style: u32) -> Option<u8> {
+    if ex_style & WS_EX_LAYERED_BIT == 0 {
+        return None;
+    }
+    let mut alpha: u8 = 0;
+    let mut flags = LWA_ALPHA;
+    let ok = unsafe {
+        GetLayeredWindowAttributes(hwnd, None, Some(&mut alpha), Some(&mut flags)).is_ok()
+    };
+    // A layered window whose alpha was never set reports LWA_COLORKEY only.
+    (ok && flags.0 & LWA_ALPHA.0 != 0).then_some(alpha)
+}
+
+/// Gives a window a transparency, or takes it away again, the way the visuals
+/// module of a window manager does.
+///
+/// # Errors
+/// When the window is gone or refuses the layered attribute.
+pub fn set_window_alpha(hwnd: i64, alpha: Option<u8>) -> Result<()> {
+    let target = as_hwnd(hwnd);
+    if !window_exists(hwnd) {
+        return Err(Error::not_found(format!("hwnd 0x{hwnd:x}")));
+    }
+    let ex_style = unsafe { GetWindowLongPtrW(target, GWL_EXSTYLE) } as u32;
+    match alpha {
+        Some(value) => {
+            if ex_style & WS_EX_LAYERED_BIT == 0 {
+                unsafe {
+                    SetWindowLongPtrW(target, GWL_EXSTYLE, (ex_style | WS_EX_LAYERED_BIT) as isize)
+                };
+            }
+            unsafe { SetLayeredWindowAttributes(target, COLORREF(0), value, LWA_ALPHA) }
+                .map_err(|e| Error::win32("SetLayeredWindowAttributes", &e))
+        }
+        None => {
+            if ex_style & WS_EX_LAYERED_BIT != 0 {
+                unsafe {
+                    SetWindowLongPtrW(
+                        target,
+                        GWL_EXSTYLE,
+                        (ex_style & !WS_EX_LAYERED_BIT) as isize,
+                    )
+                };
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The owner of an owned popup, `None` for an ordinary top level window.
+#[must_use]
+pub fn window_owner(hwnd: i64) -> Option<i64> {
+    owner_raw(as_hwnd(hwnd))
+}
+
+fn owner_raw(hwnd: HWND) -> Option<i64> {
+    match unsafe { GetWindow(hwnd, GW_OWNER) } {
+        Ok(owner) if !owner.is_invalid() => Some(as_i64(owner)),
+        _ => None,
+    }
+}
+
+/// The window in the foreground right now, as a handle number.
+#[must_use]
+pub fn foreground_window() -> i64 {
+    as_i64(unsafe { GetForegroundWindow() })
 }
 
 unsafe fn class_name(hwnd: HWND) -> String {
@@ -459,7 +613,7 @@ fn wait_for(
     timeout: std::time::Duration,
     what: &str,
 ) -> Result<Rect> {
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = Deadline::new(timeout);
     let mut last = None;
     loop {
         if !window_exists(hwnd) {
@@ -473,11 +627,54 @@ fn wait_for(
             }
             last = Some(rect);
         }
-        if std::time::Instant::now() >= deadline {
+        if deadline.passed() {
             return Err(Error::timeout(format!(
                 "the {what} of hwnd 0x{hwnd:x} after {:?}, last seen {}",
-                timeout,
+                deadline.elapsed(),
                 last.map_or_else(|| "nothing".to_string(), |r| r.to_string())
+            )));
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// Waits until a freshly created window is visible and its frame has stopped
+/// moving: two identical, non-empty readings of the extended frame bounds a
+/// poll apart.
+///
+/// This is what `spawn` waits on. Without it a test can read the rect DWM had
+/// while the window was still being shown, and a layout assertion then fails
+/// against a window that was never there.
+///
+/// # Errors
+/// [`Error::Timeout`] when the window never settled, [`Error::NotFound`] when
+/// it died while waiting.
+pub fn wait_until_settled(hwnd: i64, timeout: std::time::Duration) -> Result<Rect> {
+    let deadline = Deadline::new(timeout);
+    let mut previous: Option<Rect> = None;
+    loop {
+        if !window_exists(hwnd) {
+            return Err(Error::not_found(format!(
+                "hwnd 0x{hwnd:x} died before it settled"
+            )));
+        }
+
+        let visible = unsafe { IsWindowVisible(as_hwnd(hwnd)) }.as_bool();
+        let frame = frame_bounds(hwnd).ok().filter(|r| !r.is_empty());
+        if visible && let Some(frame) = frame {
+            if previous == Some(frame) {
+                return Ok(frame);
+            }
+            previous = Some(frame);
+        } else {
+            previous = None;
+        }
+
+        if deadline.passed() {
+            return Err(Error::timeout(format!(
+                "hwnd 0x{hwnd:x} to be visible with a stable frame after {:?}, last seen {}",
+                deadline.elapsed(),
+                previous.map_or_else(|| "nothing".to_string(), |r| r.to_string())
             )));
         }
         std::thread::sleep(POLL);
@@ -489,7 +686,7 @@ fn wait_for(
 /// # Errors
 /// [`Error::Timeout`] with the handles that are still alive.
 pub fn wait_until_gone(hwnds: &[i64], timeout: std::time::Duration) -> Result<()> {
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = Deadline::new(timeout);
     loop {
         let alive: Vec<String> = hwnds
             .iter()
@@ -499,7 +696,7 @@ pub fn wait_until_gone(hwnds: &[i64], timeout: std::time::Duration) -> Result<()
         if alive.is_empty() {
             return Ok(());
         }
-        if std::time::Instant::now() >= deadline {
+        if deadline.passed() {
             return Err(Error::timeout(format!(
                 "{} test window(s) to close: {}",
                 alive.len(),
