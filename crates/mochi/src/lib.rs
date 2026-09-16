@@ -8,6 +8,8 @@
 //! * [`events`] the producers: WinEvent hooks, a hidden message window, the mouse,
 //! * [`ipc`] the named pipe server and the notification fan-out,
 //! * [`state`] what the daemon knows,
+//! * [`visuals`] borders, transparency and animation, translated from the
+//!   daemon's types into `mochi-render`'s and driven from the settings,
 //! * [`wm`] the single-threaded loop that owns it,
 //! * [`safety`] the panic hook and the restore hook point,
 //! * [`config`] path resolution and the file watcher,
@@ -28,4 +30,5 @@ pub mod recover;
 pub mod safety;
 pub mod single_instance;
 pub mod state;
+pub mod visuals;
 pub mod wm;
