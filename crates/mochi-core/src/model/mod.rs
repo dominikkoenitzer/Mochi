@@ -19,7 +19,7 @@ mod workspace;
 
 pub use changes::{Changes, WorkspaceRef};
 pub use container::Container;
-pub use monitor::{DEFAULT_DPI, Monitor};
+pub use monitor::{DEFAULT_DPI, Monitor, scale_padding};
 pub use ring::{CycleDirection, Ring};
 pub use state::{
     FocusFollowsMouseImplementation, HidingBehaviour, MoveBehaviour, OperationBehaviour, State,

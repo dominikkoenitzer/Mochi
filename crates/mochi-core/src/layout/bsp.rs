@@ -6,10 +6,19 @@
 
 use crate::geometry::{Axis, Rect};
 
-use super::split::{boundary_delta, divide, slices_to_rects};
+use super::split::{boundary_delta, rect_from_slice, split_two};
 
 /// The rectangle for each of `len` containers inside `area`.
-pub(crate) fn calculate(area: Rect, len: usize, resize: &[Option<Rect>]) -> Vec<Rect> {
+///
+/// `min_tile` is the smallest a tile may get. Every cut keeps that much for
+/// the container it splits off, and one more for each later cut along the same
+/// axis, so the minimum holds all the way down the tree.
+pub(crate) fn calculate(
+    area: Rect,
+    len: usize,
+    resize: &[Option<Rect>],
+    min_tile: i32,
+) -> Vec<Rect> {
     let mut rects = Vec::with_capacity(len);
     let mut remaining = area;
     let mut axis = Axis::Horizontal;
@@ -21,15 +30,16 @@ pub(crate) fn calculate(area: Rect, len: usize, resize: &[Option<Rect>]) -> Vec<
         }
 
         let delta = boundary_delta(resize, idx, idx + 1, axis);
-        let slices = divide(
-            remaining.start(axis),
-            remaining.end(axis),
-            2,
-            std::slice::from_ref(&delta),
-        );
-        let cells = slices_to_rects(remaining, axis, &slices);
-        rects.push(cells[0]);
-        remaining = cells[1];
+        // What is left over is cut along this axis again every second step, so
+        // it has to keep room for one tile per later cut plus the last one.
+        let later_tiles = (len - idx - 2) / 2 + 1;
+        let min_rest = (i64::from(min_tile) * later_tiles as i64).min(i64::from(i32::MAX)) as i32;
+        let start = remaining.start(axis);
+        let end = remaining.end(axis);
+        let at = split_two(start, end, delta, min_tile, min_rest);
+
+        rects.push(rect_from_slice(remaining, axis, start, at));
+        remaining = rect_from_slice(remaining, axis, at, end);
         axis = axis.other();
     }
 

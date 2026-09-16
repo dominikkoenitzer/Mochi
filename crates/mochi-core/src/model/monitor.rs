@@ -11,6 +11,20 @@ use super::workspace::Workspace;
 /// The DPI of a display that has not been probed yet.
 pub const DEFAULT_DPI: u32 = 96;
 
+/// A logical pixel length in physical pixels on a display with that scale
+/// factor, rounded to the nearest pixel.
+///
+/// Paddings and the minimum tile size are configured in logical pixels, the
+/// way the rest of Windows talks about sizes, but the layout works in physical
+/// pixels.
+#[must_use]
+pub fn scale_padding(logical: i32, scale: f32) -> i32 {
+    if scale == 1.0 {
+        return logical;
+    }
+    (logical as f32 * scale).round() as i32
+}
+
 /// One display, with its own ring of workspaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -105,6 +119,12 @@ impl Monitor {
             return 1.0;
         }
         self.dpi as f32 / DEFAULT_DPI as f32
+    }
+
+    /// A logical pixel length in the physical pixels of this display.
+    #[must_use]
+    pub fn scaled_padding(&self, logical: i32) -> i32 {
+        scale_padding(logical, self.scale_factor())
     }
 
     /// `true` when the display is taller than it is wide.
