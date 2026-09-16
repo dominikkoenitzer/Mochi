@@ -109,6 +109,28 @@ A window that is cloaked at startup and would otherwise be managed is uncloaked
 first: a daemon killed with `taskkill /F` never runs its restore hook, and its
 windows have to come back on the next start.
 
+## The end-to-end tests
+
+`tests/e2e_testbed.rs` starts the real daemon against real windows spawned by
+`mochi-testbed`. It needs an interactive desktop, so it is opt-in and skips
+with a message everywhere else: without `MOCHI_E2E=1`, or on a session that
+enumerates no monitor, or when the `mochi` binary was not built.
+
+```
+set MOCHI_E2E=1
+set MOCHI_E2E_CONFIG=%TEMP%\mochi-e2e\mochi.json   # optional, one is written if absent
+cargo test -p mochi --test e2e_testbed -- --test-threads 1 --nocapture
+```
+
+`--test-threads 1` is not optional: there is one daemon, one named pipe and one
+desktop. For the same reason nothing else may be spawning `MochiTestWindow`
+windows at the same time; another testbed run on the same machine is adopted by
+the daemon under test and every count assertion drifts.
+
+Each test writes `RUST_LOG=debug` to `%TEMP%\mochi-e2e\mochi-*.log` and names
+that file in its failure message. Every step is reported on its own line, so one
+run tells you about all of them rather than stopping at the first surprise.
+
 ## Protocol
 
 See [`docs/ipc.md`](../../docs/ipc.md).

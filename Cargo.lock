@@ -279,6 +279,7 @@ dependencies = [
  "embed-manifest",
  "mochi-client",
  "mochi-core",
+ "mochi-testbed",
  "notify",
  "serde",
  "serde_json",
