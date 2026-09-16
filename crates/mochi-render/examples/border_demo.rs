@@ -13,8 +13,8 @@
 use std::time::Duration;
 
 use mochi_render::{
-    AnimationConfig, Animator, BorderConfig, BorderKind, BorderManager, BorderSpec, FrameUpdate,
-    Rect, WindowHandle,
+    AnimationConfig, AnimationConfigExt, AnimationStyle, Animator, BorderConfig, BorderKind,
+    BorderManager, BorderSpec, FrameUpdate, Rect, WindowHandle,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH};
@@ -70,10 +70,14 @@ fn main() -> mochi_render::Result<()> {
 
     let borders = BorderManager::new(BorderConfig::default())?;
     let still = BorderSpec::new(right.handle(), right_rect, BorderKind::Unfocused);
-    borders.set_borders(vec![
-        BorderSpec::new(left.handle(), left_rect, BorderKind::Single),
-        still,
-    ])?;
+    borders.update(
+        Some(BorderSpec::new(
+            left.handle(),
+            left_rect,
+            BorderKind::Single,
+        )),
+        vec![still],
+    )?;
 
     // Give the first frame a moment, then animate the left window and let its
     // border ride along, exactly the way the daemon will drive it.
@@ -82,27 +86,26 @@ fn main() -> mochi_render::Result<()> {
     let moving = borders.clone();
     let animator = Animator::new(move |frame: &[FrameUpdate]| {
         // One callback per frame: the daemon would push this through a single
-        // DeferWindowPos batch.
-        let mut specs = vec![still];
+        // DeferWindowPos batch, and the borders follow the very same slice.
         for update in frame {
             move_window(update.handle.hwnd(), update.rect);
-            specs.push(BorderSpec::new(
-                update.handle,
-                update.rect,
-                BorderKind::Single,
-            ));
         }
-        if let Err(error) = moving.set_borders(specs) {
+        if let Err(error) = moving.follow_frame(frame) {
             eprintln!("border update failed: {error}");
         }
     })?;
 
-    let animation = AnimationConfig::default();
+    let animation = AnimationConfig {
+        enabled: Some(true),
+        duration: Some(250),
+        style: Some(AnimationStyle::EaseOutQuad),
+        fps: Some(60),
+    };
     println!(
-        "animating {} ms, {:?}, {} fps",
-        animation.duration_ms,
-        animation.style,
-        animation.fps()
+        "animating {} ms, {}, {} fps",
+        animation.duration_ms(),
+        animation.style(),
+        animation.frame_rate()
     );
     animator.animate(vec![animation.job(left.handle(), left_rect, moved_rect)])?;
 
