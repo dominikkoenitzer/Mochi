@@ -169,10 +169,14 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_block_resolves_to_the_rice() {
+    fn an_empty_block_draws_nothing() {
         let style = StackbarStyle::from(&StackbarConfig::default());
         assert_eq!(style, StackbarStyle::default());
-        assert_eq!(style.mode, StackbarMode::OnStack, "bars on stacks only");
+        assert_eq!(
+            style.mode,
+            StackbarMode::Never,
+            "nothing is drawn above a window unless the config asks"
+        );
         assert_eq!(style.focused_background.to_hex(), "#ffbbdf");
         assert_eq!(style.unfocused_background.to_hex(), "#313244");
         assert_eq!(style.height, 40);

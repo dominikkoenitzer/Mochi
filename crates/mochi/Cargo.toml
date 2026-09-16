@@ -17,6 +17,7 @@ mouse-hook = []
 [dependencies]
 mochi-core = { workspace = true }
 mochi-client = { workspace = true }
+mochi-render = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

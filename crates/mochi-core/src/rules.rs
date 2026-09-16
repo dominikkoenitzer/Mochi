@@ -352,6 +352,12 @@ impl RuleSets {
         matches_any(&self.ignore_rules, window)
     }
 
+    /// `true` when the window should stay opaque instead of being faded.
+    #[must_use]
+    pub fn should_stay_opaque(&self, window: &WindowInfo<'_>) -> bool {
+        matches_any(&self.transparency_ignore_rules, window)
+    }
+
     /// `true` when a manage rule forces the window to be managed.
     #[must_use]
     pub fn should_manage(&self, window: &WindowInfo<'_>) -> bool {
