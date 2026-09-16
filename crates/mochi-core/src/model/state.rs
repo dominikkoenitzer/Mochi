@@ -325,6 +325,25 @@ impl State {
         workspace.latest_layout().get(container).copied()
     }
 
+    /// The container under a point on a monitor, from the last layout update.
+    ///
+    /// The hit test runs against the focused workspace of that monitor, which
+    /// is the only one on screen, and against the rectangles the layout last
+    /// produced rather than where the windows happen to sit right now: a
+    /// window being dragged is under the cursor, not in its tile, and the drop
+    /// has to land on the tile it is dropped over.
+    ///
+    /// Returns `None` when the monitor does not exist, has no focused
+    /// workspace, or nothing is tiled under the point.
+    #[must_use]
+    pub fn container_at_point(&self, monitor: usize, x: i32, y: i32) -> Option<usize> {
+        let workspace = self.monitors.get(monitor)?.focused_workspace()?;
+        workspace
+            .latest_layout()
+            .iter()
+            .position(|rect| rect.contains(x, y))
+    }
+
     // -- helpers used by the operations -------------------------------------
 
     /// Checks that a workspace index is one we are willing to create.

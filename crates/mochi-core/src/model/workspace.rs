@@ -622,6 +622,47 @@ impl Workspace {
         idx
     }
 
+    /// Appends everything another workspace holds to this one.
+    ///
+    /// Containers keep their order and their stacks, floating windows stay
+    /// floating, and a monocle or maximized window arrives as a plain
+    /// container: those modes belong to the workspace the window is leaving,
+    /// not to the window. The focus stays where it already was here, so
+    /// taking in the windows of a display that was unplugged does not steal
+    /// it.
+    ///
+    /// This is how [`crate::State::reconcile_monitors`] rescues the windows
+    /// of a monitor that is gone.
+    pub fn absorb(&mut self, other: Workspace) {
+        let restore = self.containers.focused_idx();
+        let had_containers = !self.containers.is_empty();
+
+        let mut incoming: Vec<Container> = other.containers.into_vec();
+        if let Some(container) = other.monocle_container {
+            incoming.push(container);
+        }
+        if let Some(window) = other.maximized_window
+            && !incoming.iter().any(|c| c.contains(window.id))
+        {
+            // A maximized window that was alone is not in any container.
+            incoming.push(Container::from_window(window));
+        }
+
+        for container in incoming {
+            let at = self.containers.len();
+            self.insert_container(at, container);
+        }
+        for window in other.floating_windows.into_vec() {
+            self.floating_windows.push(window);
+        }
+
+        if had_containers {
+            self.containers.focus(restore);
+        } else {
+            self.containers.focus(0);
+        }
+    }
+
     // -- modes --------------------------------------------------------------
 
     /// Turns monocle mode on for the focused container, or off again.
