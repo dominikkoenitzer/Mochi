@@ -85,6 +85,11 @@ pub mod ex_style {
 /// or invisible helpers rather than as application windows.
 pub const MIN_MANAGEABLE_DIMENSION: i32 = 40;
 
+/// The class every UWP window has. The application itself lives in a child
+/// window; this is the frame Windows wraps around it, and the one a window
+/// manager sees.
+pub const FRAME_WINDOW_CLASS: &str = "ApplicationFrameWindow";
+
 /// Window classes that belong to the shell and must never be touched.
 pub const SHELL_CLASSES: &[&str] = &[
     "Shell_TrayWnd",
