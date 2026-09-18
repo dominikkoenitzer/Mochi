@@ -207,10 +207,17 @@ impl State {
         let (monitor, workspace) = self.focused_indices()?;
         let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
-        let id = target
+        let Some(id) = target
             .focused_container_mut()
-            .and_then(|c| c.cycle_focus(direction));
-        let mut changes = self.focus_changes(id);
+            .and_then(|c| c.cycle_focus(direction))
+        else {
+            return Ok(Changes::none());
+        };
+        // The window the container now shows has been sitting wherever the
+        // layout last left it, which for a freshly stacked window is its old
+        // tile. Without the retile it comes forward in the wrong place.
+        let mut changes = self.retiled(monitor, workspace);
+        changes.merge(self.focus_changes(Some(id)));
         self.visibility_delta(&before, &mut changes);
         Ok(changes)
     }
@@ -1430,6 +1437,13 @@ mod tests {
         assert_eq!(focused(&state), Some(WindowId(2)));
         assert!(changes.show.contains(&WindowId(2)));
         assert!(changes.hide.contains(&WindowId(3)));
+        assert!(
+            changes
+                .retiled
+                .iter()
+                .any(|target| target.monitor == 0 && target.workspace == 0),
+            "the window coming forward is still on the tile it had before the stack"
+        );
     }
 
     #[test]
