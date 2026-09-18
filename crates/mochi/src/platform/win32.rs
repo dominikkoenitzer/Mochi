@@ -24,9 +24,9 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BeginDeferWindowPos, BringWindowToTop, DeferWindowPos, EndDeferWindowPos, EnumWindows, GA_ROOT,
-    GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW, GetCursorPos,
-    GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    BeginDeferWindowPos, BringWindowToTop, DeferWindowPos, EndDeferWindowPos, EnumChildWindows,
+    EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
+    GetCursorPos, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
     GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic,
     IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, PostMessageW, SET_WINDOW_POS_FLAGS, SW_HIDE,
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
@@ -42,6 +42,13 @@ use super::{CloakUnsupported, Platform, ShowState, WindowPlacement, ZOrder};
 
 /// `MONITORINFOF_PRIMARY`, missing from the `windows` crate metadata.
 const MONITORINFOF_PRIMARY: u32 = 1;
+
+/// The process that hosts every UWP window.
+///
+/// Reading the executable off the window itself makes Calculator, Settings and
+/// the Store the same program, so an `exe` rule can neither pick one out nor
+/// leave the others alone. [`hosted_process`] looks past it.
+const FRAME_HOST: &str = "ApplicationFrameHost.exe";
 
 /// Longest window title Mochi reads. Longer titles are truncated, not rejected.
 const TITLE_BUFFER: usize = 512;
@@ -300,10 +307,71 @@ fn dwm_frame(h: HWND) -> Rect {
     if ok.is_ok() { rect(r) } else { Rect::default() }
 }
 
-fn read_window(h: HWND) -> WindowInfo {
+/// What [`hosted_child`] carries through `EnumChildWindows`.
+struct HostedSearch {
+    /// The frame host's own process, which every uninteresting child shares.
+    host: u32,
+    /// The first child process that is not the host's.
+    found: u32,
+}
+
+/// The process of the application inside a UWP frame host window.
+///
+/// The application owns a child window in its own process, so the first child
+/// whose process is not the host's is the application itself. `None` when the
+/// window has no such child, which is what a frame host with nothing in it
+/// looks like while the app is still starting.
+fn hosted_process(h: HWND, host: u32) -> Option<u32> {
+    let mut search = HostedSearch { host, found: 0 };
+    // SAFETY: the callback only reads the HostedSearch this pointer came from,
+    // and the enumeration finishes before this function returns.
+    let _ = unsafe {
+        EnumChildWindows(
+            Some(h),
+            Some(hosted_child),
+            LPARAM(std::ptr::from_mut(&mut search) as isize),
+        )
+    };
+    (search.found != 0).then_some(search.found)
+}
+
+unsafe extern "system" fn hosted_child(child: HWND, lparam: LPARAM) -> windows::core::BOOL {
+    // SAFETY: lparam is the HostedSearch that hosted_process just handed over.
+    let search = unsafe { &mut *(lparam.0 as *mut HostedSearch) };
     let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(h, Some(&raw mut pid)) };
-    let path = process_path(pid);
+    unsafe { GetWindowThreadProcessId(child, Some(&raw mut pid)) };
+    if pid != 0 && pid != search.host {
+        search.found = pid;
+        return false.into();
+    }
+    true.into()
+}
+
+/// The process a window should be reported as, looking past the UWP host.
+///
+/// `hosted` is only consulted for a frame host window, and only replaces it
+/// when it answers with a path: a UWP window whose application cannot be read
+/// is still better described by the host than by nothing at all.
+fn resolve_process(
+    pid: u32,
+    path: String,
+    hosted: impl FnOnce() -> Option<(u32, String)>,
+) -> (u32, String) {
+    if file_name(&path).eq_ignore_ascii_case(FRAME_HOST)
+        && let Some((app_pid, app_path)) = hosted()
+        && !app_path.is_empty()
+    {
+        return (app_pid, app_path);
+    }
+    (pid, path)
+}
+
+fn read_window(h: HWND) -> WindowInfo {
+    let mut host_pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&raw mut host_pid)) };
+    let (pid, path) = resolve_process(host_pid, process_path(host_pid), || {
+        hosted_process(h, host_pid).map(|app| (app, process_path(app)))
+    });
 
     let mut r = RECT::default();
     let window_rect = if unsafe { GetWindowRect(h, &raw mut r) }.is_ok() {
@@ -648,6 +716,50 @@ impl Platform for Win32Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn an_ordinary_window_is_its_own_process() {
+        let asked = Cell::new(false);
+        let (pid, path) =
+            resolve_process(42, r"C:\Program Files\Editor\Code.exe".to_owned(), || {
+                asked.set(true);
+                None
+            });
+        assert_eq!(pid, 42);
+        assert_eq!(path, r"C:\Program Files\Editor\Code.exe");
+        assert!(
+            !asked.get(),
+            "only a frame host window is worth a child walk"
+        );
+    }
+
+    #[test]
+    fn a_uwp_window_is_the_application_inside_the_host() {
+        let host = format!(r"C:\Windows\System32\{FRAME_HOST}");
+        let (pid, path) = resolve_process(42, host, || {
+            Some((
+                77,
+                r"C:\Program Files\WindowsApps\CalculatorApp.exe".to_owned(),
+            ))
+        });
+        assert_eq!(pid, 77);
+        assert_eq!(file_name(&path), "CalculatorApp.exe");
+    }
+
+    #[test]
+    fn a_host_with_nothing_in_it_stays_the_host() {
+        let host = format!(r"C:\Windows\System32\{FRAME_HOST}");
+        let (pid, path) = resolve_process(42, host.clone(), || None);
+        assert_eq!(pid, 42);
+        assert_eq!(path, host);
+
+        // A child whose process cannot be opened reads as an empty path, and
+        // that is worse than naming the host.
+        let (pid, path) = resolve_process(42, host.clone(), || Some((77, String::new())));
+        assert_eq!(pid, 42);
+        assert_eq!(path, host);
+    }
 
     #[test]
     fn border_compensation_grows_the_target_by_the_invisible_frame() {
