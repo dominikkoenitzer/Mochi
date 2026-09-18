@@ -37,7 +37,7 @@ mochic schema > mochi.schema.json
 | `transparency_ignore_rules` | rule array | `[]` | Windows that stay opaque. They still get a border. |
 | `border_colours` | object | none | Border colour per window kind, see below. |
 | `animation` | object | none | Move and resize animation, see below. |
-| `stackbar` | object | none | Tab bar for stacked containers, see below. Planned, parsed and ignored for now. |
+| `stackbar` | object | none | Tab bar for stacked containers, see below. Parsed so a copied config keeps validating; nothing is ever drawn above a window. |
 | `ignore_rules` | rule array | `[]` | Windows Mochi never touches. |
 | `manage_rules` | rule array | `[]` | Windows Mochi manages even though the usual checks say no. |
 | `floating_applications` | rule array | `[]` | Windows that are managed but never tiled. |
@@ -124,6 +124,11 @@ Strategies: `Legacy`, `Equals`, `DoesNotEqual`, `StartsWith`, `DoesNotStartWith`
 `EndsWith`, `DoesNotEndWith`, `Contains`, `DoesNotContain`, `Regex`.
 `Legacy` treats the id as a regular expression when it contains regex
 characters and as an exact comparison otherwise. Prefer an explicit strategy.
+
+A UWP window is hosted by `ApplicationFrameHost.exe`, which would make every
+UWP app the same program. Mochi reports the process the application itself runs
+in instead, so `Calculator` matches `CalculatorApp.exe` and a rule for one UWP
+app leaves the others alone.
 
 An element of a rule array may also be an array of rule objects. Then every
 object in it has to match, which is how `applications.json` expresses

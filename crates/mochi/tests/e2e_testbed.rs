@@ -15,14 +15,14 @@
 
 #![cfg(windows)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command as OsCommand, Stdio};
 use std::time::{Duration, Instant};
 
 use mochi_client::{
     Axis, Command, CycleDirection, Direction, Layout, Response, Sizing, send, send_to,
 };
-use mochi_testbed::{Rect, TestWindowInfo, TestWindows, layout_assert};
+use mochi_testbed::{Rect, SpawnOptions, TestWindowInfo, TestWindows, layout_assert};
 use serde_json::Value;
 
 /// The longest any single step waits for the desktop to settle.
@@ -939,6 +939,678 @@ fn a_hard_killed_daemon_gives_its_windows_back_on_the_next_start() {
 
     drop(windows);
     steps.finish(&format!("{log} and {second_log}"));
+}
+
+// ---------------------------------------------------------------------------
+// test three: a visual command reaches the desktop, not just `mochic state`
+// ---------------------------------------------------------------------------
+
+/// The alpha the renderer falls back to when the file names no
+/// `transparency_alpha`, which the scratch config does not.
+const DEFAULT_ALPHA: u8 = 200;
+
+#[test]
+fn a_visual_command_changes_the_desktop_before_the_next_reload() {
+    skip_unless_allowed!("a_visual_command_changes_the_desktop_before_the_next_reload");
+
+    let mut daemon = Daemon::start("visuals");
+    let log = daemon.log();
+    let windows = TestWindows::spawn(2, 0).expect("could not spawn the test windows");
+
+    let mut steps = Steps::default();
+
+    steps.step("the daemon adopts both windows", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} windows", managed_count()))?;
+        wait_for_tiling(&windows, 2).map(|_| ())
+    });
+
+    steps.step("nothing is faded while transparency is off", || {
+        check(
+            infos(&windows).iter().all(|w| w.alpha.is_none()),
+            "a window was already layered before the command",
+        )
+    });
+
+    steps.step("transparency fades the unfocused window at once", || {
+        command(&Command::ToggleTransparency)?;
+        let faded = wait_some(STEP, || {
+            let all = infos(&windows);
+            let faded: Vec<_> = all.iter().filter(|w| w.alpha.is_some()).collect();
+            (faded.len() == 1).then(|| (faded[0].hwnd, faded[0].alpha, faded[0].foreground))
+        })
+        .ok_or_else(|| {
+            format!(
+                "no single window faded: {:?}",
+                infos(&windows)
+                    .iter()
+                    .map(|w| (w.hwnd_hex(), w.alpha, w.foreground))
+                    .collect::<Vec<_>>()
+            )
+        })?;
+        let (hwnd, alpha, foreground) = faded;
+        check(
+            alpha == Some(DEFAULT_ALPHA),
+            format!("{hwnd:#x} faded to {alpha:?} instead of {DEFAULT_ALPHA}"),
+        )?;
+        check(!foreground, format!("{hwnd:#x} is the focused window"))
+    });
+
+    steps.step("turning it off puts the alpha back", || {
+        command(&Command::ToggleTransparency)?;
+        wait_for(STEP, || infos(&windows).iter().all(|w| w.alpha.is_none())).map_err(|_| {
+            format!(
+                "a window stayed faded: {:?}",
+                infos(&windows)
+                    .iter()
+                    .map(|w| (w.hwnd_hex(), w.alpha))
+                    .collect::<Vec<_>>()
+            )
+        })
+    });
+
+    steps.step("border, colour and animation commands are accepted", || {
+        command(&Command::Border {
+            state: mochi_client::BooleanState::Enable,
+        })?;
+        command(&Command::BorderWidth { width: 6 })?;
+        command(&Command::BorderColour {
+            kind: mochi_client::WindowKind::Single,
+            r: 0xff,
+            g: 0xbb,
+            b: 0xdf,
+        })?;
+        command(&Command::Animation {
+            state: mochi_client::BooleanState::Enable,
+        })?;
+        command(&Command::AnimationDuration { duration: 120 })?;
+        let state = state().ok_or("no state after the visual commands")?;
+        let settings = &state["settings"];
+        check(
+            settings["border"] == true
+                && settings["border_width"] == 6
+                && settings["animation"] == true
+                && settings["animation_duration"] == 120,
+            format!("state still reports {settings}"),
+        )?;
+        check(
+            settings["border_colours"]["single"] == "#ffbbdf",
+            format!("the colour did not land: {}", settings["border_colours"]),
+        )
+    });
+
+    steps.step("the border manager started on a real desktop", || {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        check(
+            !text.contains("could not start the border manager"),
+            "the daemon logged a border manager failure".to_owned(),
+        )
+    });
+
+    steps.step("stop clears every visual it applied", || {
+        daemon.stop();
+        wait_for(Duration::from_secs(5), || {
+            infos(&windows)
+                .iter()
+                .all(|w| w.alpha.is_none() && w.visible && !w.cloaked)
+        })
+        .map_err(|_| {
+            format!(
+                "after stop: {:?}",
+                infos(&windows)
+                    .iter()
+                    .map(|w| (w.hwnd_hex(), w.alpha, w.visible, w.cloaked))
+                    .collect::<Vec<_>>()
+            )
+        })
+    });
+
+    drop(windows);
+    steps.finish(&log);
+}
+
+// ---------------------------------------------------------------------------
+// test four: stacking, which has no bar to show for it and needs the state
+// document and the window rectangles instead
+// ---------------------------------------------------------------------------
+
+/// The containers of the focused workspace, as the state document has them.
+fn containers() -> Vec<Value> {
+    let Some(state) = state() else {
+        return Vec::new();
+    };
+    let monitor = state["focused_monitor"].as_u64().unwrap_or(0) as usize;
+    let workspace = state["monitors"][monitor]["focused_workspace"]
+        .as_u64()
+        .unwrap_or(0) as usize;
+    state["monitors"][monitor]["workspaces"][workspace]["containers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The window the first container is showing.
+fn stacked_focus() -> Option<i64> {
+    containers().first()?["focused_window"].as_i64()
+}
+
+#[test]
+fn a_stack_shows_one_window_at_a_time_and_cycling_swaps_them() {
+    skip_unless_allowed!("a_stack_shows_one_window_at_a_time_and_cycling_swaps_them");
+
+    let mut daemon = Daemon::start("stack");
+    let log = daemon.log();
+    let windows = TestWindows::spawn(2, 0).expect("could not spawn the test windows");
+
+    let mut steps = Steps::default();
+
+    steps.step("the daemon tiles both windows side by side", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} windows", managed_count()))?;
+        let frames = wait_for_tiling(&windows, 2)?;
+        layout_assert::check_no_overlap(&frames).map_err(|v| v.to_string())
+    });
+
+    steps.step("stack merges them into one container", || {
+        // A stack in a direction with no container there is a silent no-op,
+        // so the focus goes to the left tile first and the merge runs into the
+        // one that is certainly to its right.
+        command(&Command::Focus {
+            direction: Direction::Left,
+        })?;
+        command(&Command::Stack {
+            direction: Direction::Right,
+        })?;
+        if containers().len() != 1 {
+            command(&Command::Stack {
+                direction: Direction::Left,
+            })?;
+        }
+        wait_for(STEP, || containers().len() == 1)
+            .map_err(|_| format!("{} containers after stacking", containers().len()))?;
+        let container = containers().remove(0);
+        check(
+            container["stack"] == true,
+            "the container does not call itself a stack".to_owned(),
+        )?;
+        check(
+            container["windows"].as_array().map_or(0, Vec::len) == 2,
+            format!("the stack holds {}", container["windows"]),
+        )
+    });
+
+    steps.step("the shown window covers the whole tile", || {
+        let shown = stacked_focus().ok_or("the stack shows nothing")?;
+        let area = area().ok_or("no state to read the work area from")?;
+        let frame =
+            wait_some(STEP, || frame_of(&windows, shown)).ok_or("the shown window has no frame")?;
+        check(
+            close_enough(frame, area.tiled, area.seam + 4),
+            format!(
+                "the shown window is {frame}, the tiled area is {}",
+                area.tiled
+            ),
+        )
+    });
+
+    steps.step("cycling the stack brings the other window forward", || {
+        let before = stacked_focus().ok_or("the stack shows nothing")?;
+        command(&Command::CycleStack {
+            direction: CycleDirection::Next,
+        })?;
+        let after = wait_some(STEP, || stacked_focus().filter(|&shown| shown != before))
+            .ok_or_else(|| format!("the stack still shows {before:#x}"))?;
+
+        let area = area().ok_or("no state")?;
+        let frame =
+            wait_some(STEP, || frame_of(&windows, after)).ok_or("the new window has no frame")?;
+        check(
+            close_enough(frame, area.tiled, area.seam + 4),
+            format!("the window brought forward sits at {frame}, not on the tile"),
+        )
+    });
+
+    steps.step("unstack gives both windows their own tile back", || {
+        command(&Command::Unstack)?;
+        wait_for(STEP, || containers().len() == 2)
+            .map_err(|_| format!("{} containers after unstacking", containers().len()))?;
+        let frames = wait_for_tiling(&windows, 2)?;
+        layout_assert::check_no_overlap(&frames).map_err(|v| v.to_string())
+    });
+
+    steps.step("stop leaves both windows visible", || {
+        daemon.stop();
+        wait_for(Duration::from_secs(5), || {
+            infos(&windows).iter().all(|w| w.visible && !w.cloaked)
+        })
+        .map_err(|_| "a window stayed hidden after stop".to_owned())
+    });
+
+    drop(windows);
+    steps.finish(&log);
+}
+
+// ---------------------------------------------------------------------------
+// test five: an application that refuses to shrink
+// ---------------------------------------------------------------------------
+
+/// The minimum size the stubborn window defends, wider than half of any screen
+/// this runs on, so its tile can never satisfy it.
+const MIN_SIZE: (i32, i32) = (1600, 900);
+
+/// Every test window on the desktop, whichever batch spawned it.
+fn all_infos() -> Vec<TestWindowInfo> {
+    mochi_testbed::list_windows().unwrap_or_default()
+}
+
+#[test]
+fn a_window_that_defends_a_minimum_size_does_not_make_the_daemon_thrash() {
+    skip_unless_allowed!("a_window_that_defends_a_minimum_size_does_not_make_the_daemon_thrash");
+
+    let mut daemon = Daemon::start("min-size");
+    let log = daemon.log();
+    let plain = TestWindows::spawn(1, 0).expect("could not spawn the plain window");
+    let stubborn = TestWindows::spawn_with(&SpawnOptions {
+        min_size: Some(MIN_SIZE),
+        title_prefix: "MochiTestFirm".to_owned(),
+        ..SpawnOptions::new(1, 0)
+    })
+    .expect("could not spawn the stubborn window");
+    let firm = stubborn.handles()[0];
+
+    let mut steps = Steps::default();
+
+    steps.step("the daemon adopts both windows", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} windows", managed_count()))
+    });
+
+    steps.step("the window keeps the size it refuses to go below", || {
+        let info = wait_some(Duration::from_secs(5), || {
+            all_infos().into_iter().find(|w| w.hwnd == firm)
+        })
+        .ok_or("the stubborn window vanished")?;
+        check(
+            info.rect.width() >= MIN_SIZE.0 && info.rect.height() >= MIN_SIZE.1,
+            format!(
+                "{} is {}x{}, under the minimum it defends",
+                info.hwnd_hex(),
+                info.rect.width(),
+                info.rect.height()
+            ),
+        )
+    });
+
+    steps.step("the layout settles instead of oscillating", || {
+        wait_until_still(&plain);
+        let first: Vec<_> = all_infos().iter().map(|w| (w.hwnd, w.frame)).collect();
+        // Long enough that a daemon fighting the window over its size would
+        // have moved something again; this is the whole point of the step.
+        std::thread::sleep(Duration::from_millis(800));
+        let second: Vec<_> = all_infos().iter().map(|w| (w.hwnd, w.frame)).collect();
+        check(
+            first == second,
+            format!("the layout is still moving: {first:?} then {second:?}"),
+        )
+    });
+
+    steps.step("the daemon did not retile in a loop", || {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        let retiles = text.matches("retiling").count();
+        check(
+            retiles < 50,
+            format!("{retiles} retiles for two windows reads like a fight"),
+        )
+    });
+
+    steps.step("the plain window is still usable", || {
+        let area = area().ok_or("no state to read the work area from")?;
+        let info = all_infos()
+            .into_iter()
+            .find(|w| w.hwnd == plain.handles()[0])
+            .ok_or("the plain window vanished")?;
+        check(
+            info.frame.width() > 0 && info.frame.height() > 0,
+            format!("{} was squeezed to nothing", info.hwnd_hex()),
+        )?;
+        check(
+            area.work_area.contains(&info.frame),
+            format!("{} sits outside the work area", info.hwnd_hex()),
+        )
+    });
+
+    steps.step("both windows are still in the model", || {
+        check(
+            managed_count() == 2,
+            format!("state shows {} windows", managed_count()),
+        )
+    });
+
+    steps.step("stop leaves both windows visible", || {
+        daemon.stop();
+        wait_for(Duration::from_secs(5), || {
+            all_infos().iter().all(|w| w.visible && !w.cloaked)
+        })
+        .map_err(|_| "a window stayed hidden after stop".to_owned())
+    });
+
+    drop(stubborn);
+    drop(plain);
+    steps.finish(&log);
+}
+
+// ---------------------------------------------------------------------------
+// test six: the game mode script, which is the one part of Mochi that is not
+// Rust and had never been run
+// ---------------------------------------------------------------------------
+
+/// The directory `cargo` put the binaries in, which is also where `mochic` is.
+fn bin_dir() -> Option<PathBuf> {
+    daemon_binary()?.parent().map(Path::to_path_buf)
+}
+
+/// `scripts/game-mode.ps1` in the repository this test was built from.
+fn game_mode_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("scripts")
+        .join("game-mode.ps1")
+}
+
+/// A PATH with Windows and the freshly built binaries on it and nothing else.
+///
+/// The script stops and restarts `whkd` when it can find one. The user's own
+/// hotkey daemon is running while this test runs, so the child process gets a
+/// PATH that cannot reach any `whkd.exe` and the script takes its documented
+/// "only the tiling pause is toggled" path.
+fn sealed_path(bin: &Path) -> String {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+    format!(r"{root}\System32;{root};{}", bin.display())
+}
+
+/// Runs the script once and returns everything it printed.
+fn run_game_mode(bin: &Path, full: &Path, minimal: &Path) -> Result<String, String> {
+    let output = OsCommand::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(game_mode_script())
+        .arg("-MochiBin")
+        .arg(bin)
+        .arg("-ConfigHome")
+        .arg(full)
+        .arg("-GameModeConfigHome")
+        .arg(minimal)
+        .env("Path", sealed_path(bin))
+        .output()
+        .map_err(|e| format!("could not run the script: {e}"))?;
+
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() {
+        Ok(text)
+    } else {
+        Err(format!("the script exited with {}: {text}", output.status))
+    }
+}
+
+/// Whether the daemon says tiling is paused.
+fn paused() -> Option<bool> {
+    state()?["paused"].as_bool()
+}
+
+#[test]
+fn game_mode_pauses_and_resumes_tiling() {
+    skip_unless_allowed!("game_mode_pauses_and_resumes_tiling");
+    let Some(bin) = bin_dir() else {
+        eprintln!("skipping game_mode_pauses_and_resumes_tiling: no binary directory");
+        return;
+    };
+    if !bin.join("mochic.exe").exists() {
+        eprintln!("skipping game_mode_pauses_and_resumes_tiling: mochic is not built");
+        eprintln!("  build it first: cargo build --workspace");
+        return;
+    }
+
+    let scratch = temp_dir().join("game-mode");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let full = scratch.join("full");
+    let minimal = scratch.join("minimal");
+    std::fs::create_dir_all(&full).expect("could not make the scratch config directory");
+
+    let mut daemon = Daemon::start("game-mode");
+    let log = daemon.log();
+    let windows = TestWindows::spawn(2, 0).expect("could not spawn the test windows");
+
+    let mut steps = Steps::default();
+
+    steps.step("the daemon starts unpaused", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} windows", managed_count()))?;
+        check(paused() == Some(false), "the daemon came up paused")
+    });
+
+    steps.step("the script turns game mode on", || {
+        let text = run_game_mode(&bin, &full, &minimal)?;
+        check(
+            text.contains("game mode: ON"),
+            format!("the script said: {text}"),
+        )?;
+        check(
+            text.contains("whkd.exe not found"),
+            "the script found a whkd and this test must never let it".to_owned(),
+        )?;
+        check(
+            paused() == Some(true),
+            "tiling is not paused after game mode on".to_owned(),
+        )
+    });
+
+    steps.step(
+        "it wrote a minimal hotkey config with only the toggle",
+        || {
+            let file = minimal.join("whkdrc");
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| format!("{} is not readable: {e}", file.display()))?;
+            check(
+                text.contains("alt + shift + g"),
+                format!("no toggle binding in {}", file.display()),
+            )?;
+            check(
+                text.lines().filter(|l| l.contains(" : ")).count() == 1,
+                format!("more than the toggle survived game mode:\n{text}"),
+            )
+        },
+    );
+
+    steps.step("a paused daemon leaves the windows alone", || {
+        let before: Vec<_> = infos(&windows).iter().map(|w| (w.hwnd, w.frame)).collect();
+        command(&Command::Retile)?;
+        std::thread::sleep(Duration::from_millis(300));
+        let after: Vec<_> = infos(&windows).iter().map(|w| (w.hwnd, w.frame)).collect();
+        check(before == after, "a paused daemon moved a window".to_owned())
+    });
+
+    steps.step("the same key turns game mode off again", || {
+        let text = run_game_mode(&bin, &full, &minimal)?;
+        check(
+            text.contains("game mode: OFF"),
+            format!("the script said: {text}"),
+        )?;
+        check(
+            paused() == Some(false),
+            "tiling is still paused after game mode off".to_owned(),
+        )
+    });
+
+    steps.step("tiling works again", || {
+        wait_for_tiling(&windows, 2).map(|_| ())
+    });
+
+    steps.step("stop leaves both windows visible", || {
+        daemon.stop();
+        wait_for(Duration::from_secs(5), || {
+            infos(&windows).iter().all(|w| w.visible && !w.cloaked)
+        })
+        .map_err(|_| "a window stayed hidden after stop".to_owned())
+    });
+
+    drop(windows);
+    let _ = std::fs::remove_dir_all(&scratch);
+    steps.finish(&log);
+}
+
+// ---------------------------------------------------------------------------
+// test seven: a long session, because the worst failure mode is a window that
+// is gone and cannot be brought back
+// ---------------------------------------------------------------------------
+
+/// How many times the command sequence below is repeated.
+const ROUNDS: usize = 4;
+
+/// Every command a hotkey can send, in a fixed order, balanced so the
+/// workspace ends in the same shape it started in: every toggle is undone,
+/// every workspace switch comes back, every stack is unstacked.
+fn round_trip() -> Vec<Command> {
+    vec![
+        Command::Focus {
+            direction: Direction::Right,
+        },
+        Command::Focus {
+            direction: Direction::Down,
+        },
+        Command::Move {
+            direction: Direction::Left,
+        },
+        Command::Move {
+            direction: Direction::Right,
+        },
+        Command::ResizeAxis {
+            axis: Axis::Horizontal,
+            sizing: Sizing::Increase,
+        },
+        Command::ResizeAxis {
+            axis: Axis::Horizontal,
+            sizing: Sizing::Decrease,
+        },
+        Command::CycleLayout {
+            direction: CycleDirection::Next,
+        },
+        Command::CycleLayout {
+            direction: CycleDirection::Previous,
+        },
+        Command::FlipLayout {
+            axis: Axis::Horizontal,
+        },
+        Command::FlipLayout {
+            axis: Axis::Horizontal,
+        },
+        Command::ToggleFloat,
+        Command::ToggleFloat,
+        Command::ToggleMonocle,
+        Command::ToggleMonocle,
+        Command::Stack {
+            direction: Direction::Right,
+        },
+        Command::CycleStack {
+            direction: CycleDirection::Next,
+        },
+        Command::Unstack,
+        Command::FocusWorkspace { index: 1 },
+        Command::FocusWorkspace { index: 0 },
+        Command::TogglePause,
+        Command::TogglePause,
+        Command::Promote,
+        Command::Retile,
+    ]
+}
+
+#[test]
+fn a_long_session_of_every_command_never_loses_a_window() {
+    skip_unless_allowed!("a_long_session_of_every_command_never_loses_a_window");
+
+    let mut daemon = Daemon::start("long-session");
+    let log = daemon.log();
+    let windows = TestWindows::spawn(6, 0).expect("could not spawn the test windows");
+
+    let mut steps = Steps::default();
+
+    steps.step("the daemon adopts all six windows", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 6)
+            .map_err(|_| format!("state shows {} windows", managed_count()))?;
+        wait_for_tiling(&windows, 6).map(|_| ())
+    });
+
+    for round in 1..=ROUNDS {
+        steps.step(&format!("round {round} of every command"), || {
+            for cmd in round_trip() {
+                let name = cmd.name().to_owned();
+                command(&cmd).map_err(|e| format!("{name}: {e}"))?;
+            }
+            wait_for(STEP, || managed_count() == 6).map_err(|_| {
+                format!(
+                    "state shows {} windows after round {round}",
+                    managed_count()
+                )
+            })
+        });
+    }
+
+    steps.step("every window is still tiled and nothing overlaps", || {
+        wait_until_still(&windows);
+        let frames = wait_for_tiling(&windows, 6)?;
+        let area = area().ok_or("no state to read the work area from")?;
+        layout_assert::check_no_overlap(&frames).map_err(|v| v.to_string())?;
+        layout_assert::check_all_within(&frames, area.work_area).map_err(|v| v.to_string())
+    });
+
+    steps.step("no window is off screen and none is cloaked", || {
+        let hidden: Vec<_> = infos(&windows)
+            .into_iter()
+            .filter(|w| off_screen(w) || w.cloaked || !w.visible)
+            .map(|w| w.hwnd_hex())
+            .collect();
+        check(hidden.is_empty(), format!("still hidden: {hidden:?}"))
+    });
+
+    steps.step("the daemon logged no errors", || {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        let errors: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("ERROR"))
+            .take(5)
+            .collect();
+        check(errors.is_empty(), format!("{errors:#?}"))
+    });
+
+    steps.step("stop gives every window back", || {
+        daemon.stop();
+        wait_for(Duration::from_secs(5), || {
+            infos(&windows)
+                .iter()
+                .all(|w| w.visible && !w.cloaked && !w.minimized && w.alpha.is_none())
+        })
+        .map_err(|_| {
+            format!(
+                "after stop: {:?}",
+                infos(&windows)
+                    .iter()
+                    .map(|w| (w.hwnd_hex(), w.visible, w.cloaked, w.minimized, w.alpha))
+                    .collect::<Vec<_>>()
+            )
+        })
+    });
+
+    drop(windows);
+    steps.finish(&log);
 }
 
 // ---------------------------------------------------------------------------

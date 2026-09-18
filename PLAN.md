@@ -38,9 +38,12 @@ No code is taken from any existing window manager.
    run with `--manage-class MochiTestWindow` is still a manual step.
 4. Control. IPC and CLI for everything whkdrc uses: focus, move, resize axis,
    workspaces, monitors, float, maximize, monocle, minimize, close, cycle and flip
-   layout, retile, pause, reload, stop. Done. Missing: `stack`, `unstack` and
-   `cycle-stack` are wired but have no stackbar, so a stacked container is only
-   visible in `mochic state`.
+   layout, retile, pause, reload, stop. Done. `stack`, `unstack` and
+   `cycle-stack` have no stackbar by design, so the proof that they work is a
+   testbed run: the stack shows one window on the container's tile, cycling
+   brings the other one forward onto that same tile, unstack gives both their
+   own again. A stack in a direction with no container there is a silent no-op,
+   like every other movement command.
 5. Polish. Borders, transparency and animations are wired: `mochi/src/visuals.rs`
    owns an optional `mochi-render` `BorderManager`, `TransparencyManager` and
    `Animator`, translates the daemon's `Hwnd`/`Rect` into the render crate's own
@@ -52,11 +55,21 @@ No code is taken from any existing window manager.
    user's own rice settings (pink `#ffbbdf` focused border, dark `#313244`
    unfocused, 235 alpha, 250 ms EaseOutQuad). No stackbar by default and none is
    built by this module: Mochi draws borders and nothing else, on purpose.
-   Missing: cross monitor move behaviour, game mode; individual `border`/
-   `transparency`/`animation-*` CLI commands still only update `mochic state`
-   and take effect on the next config reload rather than immediately.
-   Later: stackbar (opt-in, off by default), event subscriptions for bars, own
-   hotkey daemon, releases.
+   The `border*`, `transparency` and `animation-*` commands apply the moment
+   they land: each one writes the live configuration, hands it back to the
+   managers and redraws the workspace, proven end to end by a testbed window
+   fading from one `toggle-transparency` with no reload in between.
+   Cross monitor moves, an unplugged screen and a screen that comes back are
+   covered against a simulated second monitor at a different DPI, including the
+   rule that a window is never lost with the screen it was on; they have still
+   not run against real hardware, since the portrait screen was detached.
+   Game mode is covered too: the script pauses tiling, writes a minimal hotkey
+   config holding nothing but the toggle, and resumes. The whkd restart inside
+   it is the one step no test takes, because the user's own hotkey daemon is
+   running while the tests are.
+   Later: a hotkey daemon of Mochi's own, so whkd is no longer needed, and
+   releases. Never: a stackbar, or any other strip drawn above a window.
+   Subscriptions already exist for anything that wants to follow the state.
 
 ## Layouts to support
 
@@ -64,7 +77,16 @@ BSP, Columns, Rows, VerticalStack, HorizontalStack, UltrawideVerticalStack, Grid
 
 ## Known limits
 
-- Elevated windows cannot be managed from a non admin process.
+- Elevated windows cannot be managed from a non admin process. One that refuses
+  to move no longer takes the rest of the layout with it: the batch falls back
+  to one window at a time and reports only the windows it could not place.
 - Mixed DPI (4K main plus 1080p portrait) is the primary test bed.
-- Electron, UWP and game windows each have quirks; ignore rules and a cloak check
+- UWP windows belong to `ApplicationFrameHost.exe`, which would make every UWP
+  app the same program to an `exe` rule. `read_window` walks the host's children
+  for the process the application actually runs in, so Calculator reports
+  `CalculatorApp.exe`.
+- An application that defends a minimum size gets the tile it cannot fill; it
+  overflows its neighbour rather than shrinking, and the daemon leaves it there
+  instead of fighting it.
+- Electron and game windows each have quirks; ignore rules and a cloak check
   handle most of them.

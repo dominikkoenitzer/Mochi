@@ -16,8 +16,21 @@ managers that came before it, but shares no code with any of them.
 
 ## Status
 
-Milestones 1 and 2 of 5 are done, see [PLAN.md](PLAN.md): the daemon observes
-monitors, windows and events and answers over IPC, but nothing manages windows yet.
+All five milestones are done, see [PLAN.md](PLAN.md). Mochi tiles real windows,
+and the proof is a test suite that drives throwaway windows on a real desktop
+rather than only a model in memory: run it with `MOCHI_E2E=1`.
+
+What works: BSP, columns, rows, the two stacks, ultrawide and grid layouts;
+focus, move and resize by direction; workspaces and monitors, including a screen
+that is unplugged and comes back; float, monocle, maximize and minimize; stack,
+unstack and cycle-stack; ignore, float and workspace rules; borders,
+transparency and animated moves; pause, reload, and a game mode that gives a
+game every key. Every visual setting has a command, and a command takes effect
+the moment it lands rather than on the next reload.
+
+Mochi draws borders and nothing else. There is no bar, no tab strip and none is
+planned. A hotkey daemon of its own is the one piece still missing; whkd does
+that job for now.
 
 ## Build
 

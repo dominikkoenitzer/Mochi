@@ -196,5 +196,7 @@ A `rect` is always the rectangle the last layout gave the container, in physical
 pixels, describing the perceived frame: the daemon compensates for the invisible
 resize border itself, so these are the numbers a screenshot shows.
 
-The visual commands (`border*`, `animation*`, `toggle-transparency`) are
-accepted, stored and reported in `settings`, but nothing draws them yet.
+The visual commands (`border*`, `animation*`, `toggle-transparency`) change the
+live configuration, reach the border, transparency and animation managers and
+redraw the workspace before the response comes back. `settings` reports the
+result, so a command and the document never disagree.
