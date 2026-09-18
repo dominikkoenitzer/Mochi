@@ -13,11 +13,12 @@
 //! [`Changes`] it hands back, and apply them to real windows in one private
 //! `apply_changes` step. Nothing else in the daemon writes to a window.
 //!
-//! # What is still only stored
+//! # Visuals
 //!
-//! Borders, transparency and animations are parsed, kept in
-//! [`crate::state::Settings`] and reported by `mochic state`, but nothing draws
-//! them yet; that is milestone 5.
+//! Borders, transparency and animations are drawn by [`crate::visuals`]. The
+//! configuration they were built from is kept in `visual_config`, so a
+//! `mochic border-width` can change one key and push it into the managers
+//! straight away instead of waiting for the next reload.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
@@ -27,6 +28,7 @@ use anyhow::Result;
 use mochi_client::{
     BooleanState, Command, Notification, NotificationEvent, QueryTarget, Response, WindowRef,
 };
+use mochi_core::config::{AnimationConfig, Colour, Config};
 use mochi_core::model::{HidingBehaviour, Monitor, Window, WindowId};
 use mochi_core::rules::{
     ApplicationIdentifier, MatchingRule, MatchingStrategy, RuleDecision, WindowInfo as RuleInfo,
@@ -36,11 +38,12 @@ use mochi_core::{Changes, Rect, State as CoreState};
 use crate::config;
 use crate::events::{Event, EventReceiver, EventSender, MonitorEventKind, WindowEventKind};
 use crate::ipc::Subscribers;
+use crate::platform::types::FRAME_WINDOW_CLASS;
 use crate::platform::types::Unmanageable;
 use crate::platform::{
     CloakUnsupported, Hwnd, MonitorInfo, Platform, ShowState, WindowInfo, is_manageable_with,
 };
-use crate::state::{Settings, State, snapshot};
+use crate::state::{State, snapshot};
 
 /// Whether the loop keeps going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +241,10 @@ pub struct WindowManager {
     dragging: Option<Hwnd>,
     /// The foreground window, as far as Mochi knows.
     foreground: Option<Hwnd>,
+    /// The configuration the visuals were built from. Every tiling key ends
+    /// up in the model, but these have no home except here, and a command
+    /// that changes one has to hand the whole set back to the managers.
+    visual_config: Config,
     /// Borders, transparency and animation. Optional in every part; a
     /// setting that is off means the matching manager does not exist.
     visuals: crate::visuals::Visuals,
@@ -291,6 +298,7 @@ impl WindowManager {
             minimized: HashSet::new(),
             dragging: None,
             foreground: None,
+            visual_config: Config::default(),
             visuals,
         };
 
@@ -386,7 +394,8 @@ impl WindowManager {
             tracing::warn!(error = %broken, "a rule was dropped");
         }
         self.session.settings.apply(&loaded.config);
-        self.visuals.set_settings(&loaded.config);
+        self.visual_config = loaded.config.clone();
+        self.visuals.set_settings(&self.visual_config);
         self.session.app_config_path.clone_from(&loaded.app_path);
 
         self.workspace_rules = loaded
@@ -450,6 +459,20 @@ impl WindowManager {
         if is_manageable_with(&info, allow_tool) != Err(Unmanageable::Cloaked) {
             return Some(info);
         }
+        // Windows cloaks a suspended UWP app itself, so a cloaked frame window
+        // is no evidence that a previous session hid it. Uncloaking it would
+        // drag every app the user closed back onto the desktop on every start.
+        // The UWP windows Mochi really did hide come back through the off
+        // screen record, which knows instead of guessing.
+        if info.class.eq_ignore_ascii_case(FRAME_WINDOW_CLASS) {
+            tracing::debug!(
+                hwnd = %info.hwnd,
+                title = %info.title,
+                "leaving a cloaked UWP window alone, Windows suspends them like this"
+            );
+            return Some(info);
+        }
+
         // Would it be a window Mochi manages once it is visible again?
         let mut probe = info.clone();
         probe.cloaked = false;
@@ -1400,50 +1423,61 @@ impl WindowManager {
                 Err(e) => Response::error(e),
             },
 
-            // --- visuals: stored, nothing draws them yet -----------------------
+            // --- visuals -----------------------------------------------
             Command::ToggleTransparency => {
-                self.session.settings.transparency = !self.session.settings.transparency;
-                self.stored("transparency")
+                let on = !self.session.settings.transparency;
+                self.visual_config.transparency = Some(on);
+                self.apply_visuals("transparency")
             }
             Command::Border { state } => {
-                Settings::set(&mut self.session.settings.border, state);
-                self.stored("border")
+                self.visual_config.border = Some(state.is_enabled());
+                self.apply_visuals("border")
             }
             Command::BorderWidth { width } => {
-                self.session.settings.border_width = width;
-                self.stored("border-width")
+                self.visual_config.border_width = Some(width);
+                self.apply_visuals("border-width")
             }
             Command::BorderOffset { offset } => {
-                self.session.settings.border_offset = offset;
-                self.stored("border-offset")
+                self.visual_config.border_offset = Some(offset);
+                self.apply_visuals("border-offset")
             }
             Command::BorderStyle { style } => {
-                self.session.settings.border_style = style;
-                self.stored("border-style")
+                self.visual_config.border_style = Some(border_style_of(style));
+                self.apply_visuals("border-style")
             }
             Command::BorderColour { kind, r, g, b } => {
-                tracing::info!(%kind, r, g, b, "border colour stored, nothing draws it yet");
-                Response::Ok
+                let colour = Colour::new(r, g, b);
+                let colours = self.visual_config.border_colours.get_or_insert_default();
+                match kind {
+                    wire::WindowKind::Single => colours.single = Some(colour),
+                    wire::WindowKind::Stack => colours.stack = Some(colour),
+                    wire::WindowKind::Monocle => colours.monocle = Some(colour),
+                    wire::WindowKind::Floating => colours.floating = Some(colour),
+                    wire::WindowKind::Unfocused => colours.unfocused = Some(colour),
+                }
+                self.apply_visuals("border-colour")
             }
             Command::Animation { state } => {
-                Settings::set(&mut self.session.settings.animation, state);
-                self.stored("animation")
+                self.animation_settings().enabled = Some(state.is_enabled());
+                self.apply_visuals("animation")
             }
             Command::AnimationDuration { duration } => {
-                self.session.settings.animation_duration = duration;
-                self.stored("animation-duration")
+                self.animation_settings().duration = Some(duration);
+                self.apply_visuals("animation-duration")
             }
             Command::AnimationFps { fps } => {
-                self.session.settings.animation_fps = fps;
-                self.stored("animation-fps")
+                self.animation_settings().fps = Some(fps);
+                self.apply_visuals("animation-fps")
             }
             Command::AnimationStyle { style } => {
+                self.animation_settings().style = Some(animation_style_of(style));
+                // The wire spelling is what `mochic state` prints, and the file
+                // only carries the curves it names itself.
                 self.session.settings.animation_style = style;
-                self.stored("animation-style")
+                self.apply_visuals("animation-style")
             }
         };
 
-        let _ = std::marker::PhantomData::<wire::Layout>;
         (response, Flow::Continue)
     }
 
@@ -1610,8 +1644,32 @@ impl WindowManager {
         }
     }
 
-    fn stored(&self, what: &str) -> Response {
-        tracing::info!(setting = what, "stored, nothing draws it yet");
+    /// The animation block of the live configuration, created on demand so a
+    /// lone `mochic animation-fps` works against a file that never mentions
+    /// animation.
+    fn animation_settings(&mut self) -> &mut AnimationConfig {
+        self.visual_config.animation.get_or_insert_default()
+    }
+
+    /// Hands the visual settings to the managers and redraws the workspace
+    /// that is on screen.
+    ///
+    /// Every `mochic border`, `mochic transparency` and `mochic animation`
+    /// call ends here. They used to write a field and leave the drawing to the
+    /// next configuration reload, which made a new colour or duration look
+    /// like it had been swallowed.
+    fn apply_visuals(&mut self, what: &str) -> Response {
+        self.session.settings.apply(&self.visual_config);
+        self.visuals.set_settings(&self.visual_config);
+        // Paused means Mochi has taken its visuals off the desktop on purpose.
+        // The settings are kept and the retile that unpauses draws them.
+        if !self.core.is_paused
+            && let Ok((monitor, workspace)) = self.core.focused_indices()
+        {
+            let targets = self.visuals_targets(monitor, workspace);
+            self.visuals.update(&targets);
+        }
+        tracing::info!(setting = what, "applied");
         Response::Ok
     }
 
@@ -1828,6 +1886,33 @@ fn strategy_of(strategy: mochi_client::MatchingStrategy) -> MatchingStrategy {
     }
 }
 
+fn border_style_of(style: mochi_client::BorderStyle) -> mochi_core::config::BorderStyle {
+    match style {
+        mochi_client::BorderStyle::System => mochi_core::config::BorderStyle::System,
+        mochi_client::BorderStyle::Rounded => mochi_core::config::BorderStyle::Rounded,
+        mochi_client::BorderStyle::Square => mochi_core::config::BorderStyle::Square,
+    }
+}
+
+fn animation_style_of(
+    style: mochi_client::AnimationStyle,
+) -> mochi_core::animation::AnimationStyle {
+    use mochi_client::AnimationStyle as Wire;
+    use mochi_core::animation::AnimationStyle as Curve;
+    match style {
+        Wire::Linear => Curve::Linear,
+        Wire::EaseInSine => Curve::EaseInSine,
+        Wire::EaseOutSine => Curve::EaseOutSine,
+        Wire::EaseInOutSine => Curve::EaseInOutSine,
+        Wire::EaseInQuad => Curve::EaseInQuad,
+        Wire::EaseOutQuad => Curve::EaseOutQuad,
+        Wire::EaseInOutQuad => Curve::EaseInOutQuad,
+        Wire::EaseInCubic => Curve::EaseInCubic,
+        Wire::EaseOutCubic => Curve::EaseOutCubic,
+        Wire::EaseInOutCubic => Curve::EaseInOutCubic,
+    }
+}
+
 /// Flips a boolean setting from a command line `enable`/`disable`.
 pub fn boolean(state: BooleanState) -> bool {
     state.is_enabled()
@@ -1839,43 +1924,100 @@ mod tests {
     use crate::platform::ShowState;
     use crate::platform::WindowPlacement;
     use crate::platform::types::{MonitorId, style};
+    use crate::state::Settings;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// The 4K main screen, the one every single monitor test runs on.
+    fn main_screen() -> MonitorInfo {
+        MonitorInfo {
+            id: MonitorId(1),
+            device_name: r"\\.\DISPLAY1".into(),
+            device_description: "Fake".into(),
+            size: Rect::new(0, 0, 3840, 2160),
+            work_area: Rect::new(0, 0, 3840, 2112),
+            dpi: 144,
+            primary: true,
+        }
+    }
+
+    /// The portrait screen to its right, at a different DPI on purpose: a
+    /// cross monitor move that forgets to rescale lands in the wrong place.
+    fn portrait_screen() -> MonitorInfo {
+        MonitorInfo {
+            id: MonitorId(2),
+            device_name: r"\\.\DISPLAY2".into(),
+            device_description: "Fake portrait".into(),
+            size: Rect::new(3840, 0, 4920, 1920),
+            work_area: Rect::new(3840, 0, 4920, 1920),
+            dpi: 96,
+            primary: false,
+        }
+    }
+
     /// A platform with no desktop behind it, so the loop can be tested anywhere.
     struct FakePlatform {
-        monitors: Vec<MonitorInfo>,
+        monitors: Mutex<Vec<MonitorInfo>>,
         windows: Mutex<Vec<WindowInfo>>,
         moves: AtomicUsize,
         cloaks: Mutex<Vec<(Hwnd, bool)>>,
         shows: Mutex<Vec<(Hwnd, ShowState)>>,
         focused: Mutex<Vec<Hwnd>>,
         placements: Mutex<Vec<(Hwnd, Rect)>>,
+        history: Mutex<Vec<(Hwnd, Rect)>>,
+        /// Windows that refuse to be positioned, which is what an elevated
+        /// window looks like to a process that is not elevated.
+        refuses: Mutex<Vec<Hwnd>>,
     }
 
     impl FakePlatform {
         fn new(windows: Vec<WindowInfo>) -> Self {
+            Self::with_monitors(windows, vec![main_screen()])
+        }
+
+        fn with_monitors(windows: Vec<WindowInfo>, monitors: Vec<MonitorInfo>) -> Self {
             Self {
-                monitors: vec![MonitorInfo {
-                    id: MonitorId(1),
-                    device_name: r"\\.\DISPLAY1".into(),
-                    device_description: "Fake".into(),
-                    size: Rect::new(0, 0, 3840, 2160),
-                    work_area: Rect::new(0, 0, 3840, 2112),
-                    dpi: 144,
-                    primary: true,
-                }],
+                monitors: Mutex::new(monitors),
                 windows: Mutex::new(windows),
                 moves: AtomicUsize::new(0),
                 cloaks: Mutex::new(Vec::new()),
                 shows: Mutex::new(Vec::new()),
                 focused: Mutex::new(Vec::new()),
                 placements: Mutex::new(Vec::new()),
+                history: Mutex::new(Vec::new()),
+                refuses: Mutex::new(Vec::new()),
             }
         }
 
         fn last_placements(&self) -> Vec<(Hwnd, Rect)> {
             self.placements.lock().unwrap().clone()
+        }
+
+        /// Plugs a screen in or pulls it out. The daemon only notices on the
+        /// next monitor event, exactly like a real display change.
+        fn set_monitors(&self, monitors: Vec<MonitorInfo>) {
+            *self.monitors.lock().unwrap() = monitors;
+        }
+
+        /// Makes one window unpositionable from now on.
+        fn refuse(&self, hwnd: Hwnd) {
+            self.refuses.lock().unwrap().push(hwnd);
+        }
+
+        /// Forgets every move made so far.
+        fn clear_history(&self) {
+            self.history.lock().unwrap().clear();
+        }
+
+        /// The last rectangle one window was moved to, in any batch.
+        fn rect_of(&self, hwnd: Hwnd) -> Option<Rect> {
+            self.history
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(h, _)| *h == hwnd)
+                .map(|&(_, rect)| rect)
         }
     }
 
@@ -1884,7 +2026,7 @@ mod tests {
             "fake"
         }
         fn monitors(&self) -> Result<Vec<MonitorInfo>> {
-            Ok(self.monitors.clone())
+            Ok(self.monitors.lock().unwrap().clone())
         }
         fn windows(&self) -> Result<Vec<WindowInfo>> {
             Ok(self.windows.lock().unwrap().clone())
@@ -1908,10 +2050,26 @@ mod tests {
             Ok((0, 0))
         }
         fn set_positions(&self, placements: &[WindowPlacement]) -> Result<()> {
-            self.moves.fetch_add(placements.len(), Ordering::SeqCst);
-            *self.placements.lock().unwrap() =
-                placements.iter().map(|p| (p.hwnd, p.rect)).collect();
-            Ok(())
+            // The real platform falls back to one window at a time when a
+            // batch is refused, so the windows it can move still move and only
+            // the rest is reported. This mirrors that.
+            let refused = self.refuses.lock().unwrap().clone();
+            let (allowed, denied): (Vec<_>, Vec<_>) = placements
+                .iter()
+                .map(|p| (p.hwnd, p.rect))
+                .partition(|(hwnd, _)| !refused.contains(hwnd));
+            self.moves.fetch_add(allowed.len(), Ordering::SeqCst);
+            *self.placements.lock().unwrap() = allowed.clone();
+            self.history.lock().unwrap().extend(allowed);
+            if denied.is_empty() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "{} of {} windows could not be positioned",
+                    denied.len(),
+                    placements.len()
+                ))
+            }
         }
         fn set_cloaked(&self, hwnd: Hwnd, cloaked: bool) -> Result<()> {
             self.cloaks.lock().unwrap().push((hwnd, cloaked));
@@ -1954,7 +2112,15 @@ mod tests {
     }
 
     fn manager(windows: Vec<WindowInfo>) -> (WindowManager, Arc<FakePlatform>) {
-        let platform = Arc::new(FakePlatform::new(windows));
+        manager_on(windows, vec![main_screen()])
+    }
+
+    /// A manager over a chosen set of screens.
+    fn manager_on(
+        windows: Vec<WindowInfo>,
+        monitors: Vec<MonitorInfo>,
+    ) -> (WindowManager, Arc<FakePlatform>) {
+        let platform = Arc::new(FakePlatform::with_monitors(windows, monitors));
         let (tx, rx) = std::sync::mpsc::channel();
         let mut session = State::new(PathBuf::from(r"C:\nowhere\mochi.json"), true);
         session.settings = Settings::default();
@@ -2381,5 +2547,269 @@ mod tests {
     fn boolean_is_the_command_line_spelling() {
         assert!(boolean(BooleanState::Enable));
         assert!(!boolean(BooleanState::Disable));
+    }
+
+    /// A window that is cloaked when the daemon starts.
+    fn cloaked_window(hwnd: isize, title: &str, class: &str) -> WindowInfo {
+        WindowInfo {
+            class: class.into(),
+            cloaked: true,
+            ..window(hwnd, title)
+        }
+    }
+
+    #[test]
+    fn a_cloaked_window_a_dead_session_left_behind_is_given_back() {
+        let (_wm, platform) = manager(vec![cloaked_window(1, "Editor", "Chrome_WidgetWin_1")]);
+        assert!(
+            platform.cloaks.lock().unwrap().contains(&(Hwnd(1), false)),
+            "a cloaked ordinary window is the signature of a killed session"
+        );
+    }
+
+    #[test]
+    fn a_suspended_uwp_window_is_left_cloaked() {
+        let (_wm, platform) = manager(vec![cloaked_window(1, "Settings", FRAME_WINDOW_CLASS)]);
+        assert!(
+            platform.cloaks.lock().unwrap().is_empty(),
+            "Windows cloaks suspended UWP apps itself, uncloaking them puts closed apps back on screen"
+        );
+    }
+
+    #[test]
+    fn a_window_that_cannot_be_moved_does_not_stop_the_others() {
+        let (mut wm, platform) = manager(vec![
+            window(1, "One"),
+            window(2, "Elevated"),
+            window(3, "Three"),
+        ]);
+        platform.refuse(Hwnd(2));
+        platform.clear_history();
+
+        wm.handle_command(Command::Retile);
+
+        assert_eq!(
+            wm.state().all_window_ids().count(),
+            3,
+            "a window Mochi cannot move is still a window it manages"
+        );
+        assert!(
+            platform.rect_of(Hwnd(1)).is_some() && platform.rect_of(Hwnd(3)).is_some(),
+            "the windows that can move still moved"
+        );
+        assert!(
+            platform.rect_of(Hwnd(2)).is_none(),
+            "the refused window was reported, not moved"
+        );
+    }
+
+    #[test]
+    fn a_window_moved_to_the_other_screen_is_placed_on_it() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        assert_eq!(wm.state().monitors().len(), 2);
+        let moved = wm
+            .state()
+            .focused_window_id()
+            .map(handle)
+            .expect("nothing is focused");
+
+        assert_eq!(
+            wm.handle_command(Command::MoveToMonitor { index: 1 }).0,
+            Response::Ok
+        );
+
+        assert_eq!(wm.state().workspace(1, 0).unwrap().containers().len(), 1);
+        assert_eq!(wm.state().workspace(0, 0).unwrap().containers().len(), 1);
+        assert_eq!(wm.state().focused_monitor_idx(), 1, "the focus follows");
+        let rect = platform
+            .rect_of(moved)
+            .expect("the window was never placed");
+        assert!(
+            portrait_screen().work_area.contains_rect(&rect),
+            "{rect:?} is not inside the portrait screen"
+        );
+    }
+
+    #[test]
+    fn focus_and_cycle_walk_the_monitor_ring() {
+        let (mut wm, _) = manager_on(
+            vec![window(1, "One")],
+            vec![main_screen(), portrait_screen()],
+        );
+        assert_eq!(wm.state().focused_monitor_idx(), 0);
+
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        assert_eq!(wm.state().focused_monitor_idx(), 1);
+
+        wm.handle_command(Command::CycleMonitor {
+            direction: mochi_client::CycleDirection::Next,
+        });
+        assert_eq!(wm.state().focused_monitor_idx(), 0, "the ring wraps");
+    }
+
+    #[test]
+    fn a_screen_that_is_unplugged_hands_its_windows_back_and_retiles_them() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        let moved = wm
+            .state()
+            .focused_window_id()
+            .map(handle)
+            .expect("nothing is focused");
+        wm.handle_command(Command::MoveToMonitor { index: 1 });
+
+        platform.set_monitors(vec![main_screen()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+
+        assert_eq!(wm.state().monitors().len(), 1);
+        assert_eq!(
+            wm.state().all_window_ids().count(),
+            2,
+            "a window may never disappear with the screen it was on"
+        );
+        assert_eq!(wm.state().workspace(0, 0).unwrap().containers().len(), 2);
+        let rect = platform
+            .rect_of(moved)
+            .expect("the window was never replaced");
+        assert!(
+            main_screen().work_area.contains_rect(&rect),
+            "{rect:?} is off the only screen that is left"
+        );
+    }
+
+    #[test]
+    fn a_screen_that_comes_back_can_be_moved_to_again() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        platform.set_monitors(vec![main_screen()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        assert_eq!(wm.state().monitors().len(), 1);
+
+        platform.set_monitors(vec![main_screen(), portrait_screen()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        assert_eq!(wm.state().monitors().len(), 2);
+        assert_eq!(
+            wm.state().all_window_ids().count(),
+            2,
+            "the windows stay where the unplug left them"
+        );
+
+        let moved = wm
+            .state()
+            .focused_window_id()
+            .map(handle)
+            .expect("nothing is focused");
+        assert_eq!(
+            wm.handle_command(Command::MoveToMonitor { index: 1 }).0,
+            Response::Ok
+        );
+        let rect = platform
+            .rect_of(moved)
+            .expect("the window was never placed");
+        assert!(
+            portrait_screen().work_area.contains_rect(&rect),
+            "{rect:?} is not inside the screen that came back"
+        );
+    }
+
+    #[test]
+    fn a_visual_command_lands_in_the_configuration_the_managers_read() {
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        for command in [
+            Command::BorderWidth { width: 12 },
+            Command::BorderOffset { offset: -3 },
+            Command::BorderStyle {
+                style: mochi_client::BorderStyle::Rounded,
+            },
+            Command::BorderColour {
+                kind: mochi_client::WindowKind::Single,
+                r: 255,
+                g: 187,
+                b: 223,
+            },
+        ] {
+            assert_eq!(wm.handle_command(command).0, Response::Ok);
+        }
+
+        assert_eq!(wm.visual_config.border_width, Some(12));
+        assert_eq!(wm.visual_config.border_offset, Some(-3));
+        assert_eq!(
+            wm.visual_config.border_style,
+            Some(mochi_core::config::BorderStyle::Rounded)
+        );
+        assert_eq!(
+            wm.visual_config.border_colours.and_then(|c| c.single),
+            Some(Colour::new(255, 187, 223)),
+            "a colour used to be logged and thrown away"
+        );
+    }
+
+    #[test]
+    fn mochic_state_reports_a_visual_change_without_a_reload() {
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        wm.handle_command(Command::BorderWidth { width: 9 });
+        wm.handle_command(Command::BorderColour {
+            kind: mochi_client::WindowKind::Unfocused,
+            r: 49,
+            g: 50,
+            b: 68,
+        });
+        wm.handle_command(Command::AnimationStyle {
+            style: mochi_client::AnimationStyle::EaseOutQuad,
+        });
+
+        let settings = &wm.session().settings;
+        assert_eq!(settings.border_width, 9);
+        assert_eq!(
+            settings.border_colours.unfocused,
+            Some(Colour::new(49, 50, 68))
+        );
+        assert_eq!(
+            settings.animation_style,
+            mochi_client::AnimationStyle::EaseOutQuad
+        );
+    }
+
+    #[test]
+    fn turning_animation_on_starts_the_animator_with_the_settings_given() {
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        assert!(!wm.visuals.is_animating());
+
+        wm.handle_command(Command::AnimationDuration { duration: 80 });
+        wm.handle_command(Command::AnimationFps { fps: 30 });
+        wm.handle_command(Command::Animation {
+            state: BooleanState::Enable,
+        });
+
+        assert!(
+            wm.visuals.is_animating(),
+            "the animator runs as soon as the command lands, not after a reload"
+        );
+        assert_eq!(wm.visuals.animation().duration, Some(80));
+        assert_eq!(wm.visuals.animation().fps, Some(30));
+
+        wm.handle_command(Command::Animation {
+            state: BooleanState::Disable,
+        });
+        assert!(!wm.visuals.is_animating());
+    }
+
+    #[test]
+    fn toggling_transparency_twice_ends_where_it_started() {
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        wm.handle_command(Command::ToggleTransparency);
+        assert!(wm.session().settings.transparency);
+        assert_eq!(wm.visual_config.transparency, Some(true));
+
+        wm.handle_command(Command::ToggleTransparency);
+        assert!(!wm.session().settings.transparency);
+        assert_eq!(wm.visual_config.transparency, Some(false));
     }
 }
