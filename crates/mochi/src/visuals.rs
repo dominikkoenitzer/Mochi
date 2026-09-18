@@ -300,6 +300,18 @@ impl Visuals {
         }
     }
 
+    /// The animation settings the animator is running with.
+    #[must_use]
+    pub const fn animation(&self) -> &AnimationConfig {
+        &self.animation
+    }
+
+    /// Whether moves are animated right now.
+    #[must_use]
+    pub const fn is_animating(&self) -> bool {
+        self.animator.is_some()
+    }
+
     /// Clears every visual and stops every worker thread. Call once, on
     /// daemon shutdown.
     pub fn stop(&mut self) {

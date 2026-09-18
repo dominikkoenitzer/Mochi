@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use mochi_client::{AnimationStyle, BooleanState, BorderStyle};
+use mochi_core::config::BorderColours;
 use mochi_core::model::{Container, Monitor, Window, Workspace};
 use mochi_core::{Rect, State as CoreState};
 use serde::Serialize;
@@ -39,6 +40,9 @@ pub struct Settings {
     pub border_offset: i32,
     /// Border corner shape.
     pub border_style: BorderStyle,
+    /// The border colour of each kind of window. A colour the file and the
+    /// commands never set stays `None` and the renderer draws its own.
+    pub border_colours: BorderColours,
     /// Play move and resize animations.
     pub animation: bool,
     /// Animation length in milliseconds.
@@ -58,6 +62,7 @@ impl Default for Settings {
             border_width: 6,
             border_offset: -1,
             border_style: BorderStyle::System,
+            border_colours: BorderColours::default(),
             animation: false,
             animation_duration: 250,
             animation_fps: 60,
@@ -93,6 +98,9 @@ impl Settings {
                 mochi_core::config::BorderStyle::Square => BorderStyle::Square,
             };
         }
+        if let Some(colours) = config.border_colours {
+            self.border_colours = colours;
+        }
         if let Some(value) = config.transparency {
             self.transparency = value;
         }
@@ -126,7 +134,7 @@ pub struct State {
     pub app_config_path: Option<PathBuf>,
     /// Window classes forced into management by `--manage-class`.
     pub manage_classes: Vec<String>,
-    /// Runtime settings nothing draws yet.
+    /// Border, transparency and animation settings as the managers have them.
     pub settings: Settings,
     /// Registered subscriber pipe names.
     pub subscribers: Vec<String>,
