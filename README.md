@@ -16,9 +16,12 @@ managers that came before it, but shares no code with any of them.
 
 ## Status
 
-All five milestones are done, see [PLAN.md](PLAN.md). Mochi tiles real windows,
-and the proof is a test suite that drives throwaway windows on a real desktop
-rather than only a model in memory: run it with `MOCHI_E2E=1`.
+Milestones 1 to 4 are done, milestone 5 is not, see [PLAN.md](PLAN.md). Borders,
+transparency and animations are in and working; what polish still owes is real
+hardware for the cross monitor and unplugged screen paths, which so far have only
+run against a simulated second monitor, and the whkd restart in game mode. Mochi
+tiles real windows, and the proof is a test suite that drives throwaway windows
+on a real desktop rather than only a model in memory: run it with `MOCHI_E2E=1`.
 
 What works: BSP, columns, rows, the two stacks, ultrawide and grid layouts;
 focus, move and resize by direction; workspaces and monitors, including a screen
