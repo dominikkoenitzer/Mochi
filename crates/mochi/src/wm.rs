@@ -1162,6 +1162,17 @@ impl WindowManager {
     }
 
     fn rebuild_monitors(&mut self, infos: &[MonitorInfo]) {
+        // An empty enumeration is not the same as "there are no monitors": a mode
+        // switch, a driver restart or a disconnected session can make every handle
+        // fail to read, and the platform reports that as Ok(vec![]). Rebuilding on
+        // it would drain the ring with nothing to rehome onto, so every managed
+        // window would leave the model while still cloaked or hidden. Keep what we
+        // have and wait for the next event.
+        if infos.is_empty() {
+            tracing::warn!("ignoring an empty monitor enumeration");
+            return;
+        }
+
         let focused_device = self
             .core
             .focused_monitor()
@@ -2679,6 +2690,30 @@ mod tests {
         assert!(
             main_screen().work_area.contains_rect(&rect),
             "{rect:?} is off the only screen that is left"
+        );
+    }
+
+    #[test]
+    fn an_empty_enumeration_does_not_lose_the_windows() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+
+        // A mode switch can make every handle fail to read, which the platform
+        // reports as an empty list rather than an error.
+        platform.set_monitors(vec![]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+
+        assert_eq!(
+            wm.state().monitors().len(),
+            2,
+            "the monitor ring was torn down on an empty enumeration"
+        );
+        assert_eq!(
+            wm.state().all_window_ids().count(),
+            2,
+            "the managed windows left the model and could never be shown again"
         );
     }
 
