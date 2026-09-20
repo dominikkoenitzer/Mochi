@@ -66,10 +66,10 @@ mod window;
 #[cfg(windows)]
 pub use win32::{
     POLL, cloaked, close_window, ensure_per_monitor_v2, focus_window, foreground_window,
-    frame_bounds, list_windows, minimize_window, monitor_at, monitors, move_window, rename_window,
-    resize_window, restore_window, set_cloaked, set_rect, set_window_alpha, wait_for_frame,
-    wait_for_rect, wait_until_gone, wait_until_settled, window_alpha, window_exists, window_info,
-    window_owner, window_rect,
+    frame_bounds, in_menu_mode, list_windows, minimize_window, monitor_at, monitors, move_window,
+    rename_window, resize_window, restore_window, set_cloaked, set_rect, set_window_alpha,
+    wait_for_frame, wait_for_rect, wait_until_gone, wait_until_settled, window_alpha,
+    window_exists, window_info, window_owner, window_rect,
 };
 #[cfg(windows)]
 pub use window::{SpawnOptions, TestWindow, TestWindows};

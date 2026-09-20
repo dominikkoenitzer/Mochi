@@ -99,6 +99,9 @@ pub struct SpawnRequest {
     /// Create the windows without a title.
     #[serde(default)]
     pub no_title: bool,
+    /// Give the windows a real menu bar, so that Alt has something to open.
+    #[serde(default)]
+    pub menu_bar: bool,
 }
 
 impl From<&crate::SpawnOptions> for SpawnRequest {
@@ -112,6 +115,7 @@ impl From<&crate::SpawnOptions> for SpawnRequest {
             min_size: options.min_size,
             owned: options.owned,
             no_title: options.no_title,
+            menu_bar: options.menu_bar,
         }
     }
 }
@@ -130,6 +134,7 @@ impl SpawnRequest {
             min_size: self.min_size,
             owned: self.owned,
             no_title: self.no_title,
+            menu_bar: self.menu_bar,
         }
     }
 }

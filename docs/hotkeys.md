@@ -13,7 +13,7 @@ pressed.
 
 Mochi looks for it in this order and takes the first hit:
 
-1. `--hotkeys <path>` on the daemon,
+1. `--hotkeys <path>`, on `mochi` or on `mochic start`,
 2. `$MOCHI_HOTKEYS`,
 3. `%USERPROFILE%\.config\mochi\hotkeys`,
 4. `%USERPROFILE%\.config\mochi\whkdrc`, for a desktop that came from a
@@ -61,6 +61,14 @@ alt + [1,2,3]           : focus-workspace [0,1,2]
 alt + shift + [1,2,3]   : move-to-workspace [0,1,2]
 ```
 
+The trigger decides. Without a group on the left, the right-hand side is taken
+exactly as written, brackets and all, because a command line is allowed to
+contain them:
+
+```
+alt + b                 : [console]::beep(440,200)
+```
+
 ### Key names
 
 Letters and digits by themselves; `f1` to `f24`; the arrows as `left`, `right`,
@@ -77,6 +85,12 @@ The press is swallowed only when it matches a binding exactly, and its release
 is swallowed with it so no application sees half a keystroke. Everything else,
 including a chord that merely starts with the right modifiers, goes to the
 desktop untouched.
+
+An Alt binding does not leave the application in a menu. A window that sees Alt
+go down and come back up with nothing in between opens its menu bar, and
+swallowing the key would have created exactly that gap, so one harmless Ctrl
+goes through in its place. It is tagged as Mochi's own, so it cannot come back
+round as a binding.
 
 AltGr is not Ctrl+Alt. On a Swiss, German or any other layout where AltGr
 reports itself as right Alt plus left Ctrl, that pair counts as neither, so a
