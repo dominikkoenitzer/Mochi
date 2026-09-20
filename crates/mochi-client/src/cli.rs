@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    AnimationStyle, Axis, BooleanState, BorderStyle, Command, CycleDirection, Direction, Layout,
-    MatchingStrategy, QueryTarget, RuleIdentifier, Sizing, WindowKind,
+    AnimationStyle, Axis, BooleanState, BorderStyle, Command, ContainerBehaviour, CycleDirection,
+    Direction, HidingBehaviour, Layout, MatchingStrategy, MoveBehaviour, OperationBehaviour,
+    QueryTarget, RuleIdentifier, Sizing, WindowKind,
 };
 
 /// The whole `mochic` command line: a subcommand and its arguments.
@@ -180,6 +181,11 @@ pub enum Cmd {
     Unstack,
     /// Collapse the whole workspace into one stack
     StackAll,
+    /// Focus one window of the focused stack by its position
+    FocusStackWindow {
+        /// Zero-based index into the stack
+        index: usize,
+    },
     /// Give every stacked window its own container again
     UnstackAll,
     /// Step through the windows of the focused stack
@@ -298,6 +304,32 @@ pub enum Cmd {
         /// enable or disable
         #[arg(value_enum)]
         state: BooleanState,
+    },
+    /// Decide whether a new window stacks onto the focused container
+    WindowContainerBehaviour {
+        /// create or append
+        #[arg(value_enum)]
+        behaviour: ContainerBehaviour,
+    },
+    /// Switch between creating a container and appending to the focused one
+    ToggleWindowContainerBehaviour,
+    /// Decide what moving a container past a monitor edge does
+    CrossMonitorMoveBehaviour {
+        /// swap, insert or no-op
+        #[arg(value_enum)]
+        behaviour: MoveBehaviour,
+    },
+    /// Decide how a window on an inactive workspace is taken off screen
+    WindowHidingBehaviour {
+        /// hide, minimize or cloak
+        #[arg(value_enum)]
+        behaviour: HidingBehaviour,
+    },
+    /// Decide what a command aimed at an unmanaged window does
+    UnmanagedWindowOperationBehaviour {
+        /// op or no-op
+        #[arg(value_enum)]
+        behaviour: OperationBehaviour,
     },
     /// Warp the mouse to a newly focused window
     MouseFollowsFocus {
@@ -491,6 +523,7 @@ impl Cmd {
             },
             Cmd::Unstack => Command::Unstack,
             Cmd::StackAll => Command::StackAll,
+            Cmd::FocusStackWindow { index } => Command::FocusStackWindow { index: *index },
             Cmd::UnstackAll => Command::UnstackAll,
             Cmd::CycleStack { direction } => Command::CycleStack {
                 direction: *direction,
@@ -543,6 +576,21 @@ impl Cmd {
             },
             Cmd::FocusFollowsMouse { state } => Command::FocusFollowsMouse { state: *state },
             Cmd::MouseFollowsFocus { state } => Command::MouseFollowsFocus { state: *state },
+            Cmd::WindowContainerBehaviour { behaviour } => Command::WindowContainerBehaviour {
+                behaviour: *behaviour,
+            },
+            Cmd::ToggleWindowContainerBehaviour => Command::ToggleWindowContainerBehaviour,
+            Cmd::CrossMonitorMoveBehaviour { behaviour } => Command::CrossMonitorMoveBehaviour {
+                behaviour: *behaviour,
+            },
+            Cmd::WindowHidingBehaviour { behaviour } => Command::WindowHidingBehaviour {
+                behaviour: *behaviour,
+            },
+            Cmd::UnmanagedWindowOperationBehaviour { behaviour } => {
+                Command::UnmanagedWindowOperationBehaviour {
+                    behaviour: *behaviour,
+                }
+            }
             Cmd::SetHotkeys { state } => Command::SetHotkeys { state: *state },
             Cmd::ToggleTransparency => Command::ToggleTransparency,
             Cmd::Border { state } => Command::Border { state: *state },

@@ -146,6 +146,7 @@ with a search and replace.
 | `stack` | `direction` |
 | `unstack` | |
 | `stack-all`, `unstack-all` | |
+| `focus-stack-window` | `index` |
 | `cycle-focus`, `cycle-move`, `cycle-stack`, `cycle-layout`, `cycle-workspace`, `cycle-monitor` | `direction`: `next` `previous` |
 | `change-layout` | `layout`: `bsp` `columns` `rows` `vertical-stack` `horizontal-stack` `ultrawide-vertical-stack` `grid` |
 | `flip-layout` | `axis` |
@@ -156,6 +157,11 @@ with a search and replace.
 | `workspace-padding`, `container-padding` | `monitor`, `workspace`, `size` |
 | `focus-monitor`, `move-to-monitor`, `send-to-monitor` | `index` |
 | `focus-follows-mouse`, `mouse-follows-focus`, `border`, `animation` | `state`: `enable` `disable` |
+| `window-container-behaviour` | `behaviour`: `create` `append` |
+| `toggle-window-container-behaviour` | |
+| `cross-monitor-move-behaviour` | `behaviour`: `swap` `insert` `no-op` |
+| `window-hiding-behaviour` | `behaviour`: `hide` `minimize` `cloak` |
+| `unmanaged-window-operation-behaviour` | `behaviour`: `op` `no-op` |
 | `toggle-transparency` | |
 | `border-width` | `width` |
 | `border-offset` | `offset` |
