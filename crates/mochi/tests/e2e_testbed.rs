@@ -287,6 +287,36 @@ fn visible_frames(windows: &TestWindows) -> Vec<Rect> {
         .collect()
 }
 
+/// A visible test window that has another one beside it in `direction`.
+///
+/// "Beside" is the same question the daemon answers: the two tiles overlap on
+/// the other axis, and one starts past the other along this one. Reading it off
+/// the real frames keeps the test honest about whatever the layout actually
+/// produced, on any screen.
+fn window_with_a_neighbour(windows: &TestWindows, direction: Direction) -> Option<i64> {
+    let tiles: Vec<(i64, Rect)> = infos(windows)
+        .into_iter()
+        .filter(|w| w.visible && !w.cloaked && !w.minimized)
+        .map(|w| (w.hwnd, w.frame))
+        .collect();
+
+    tiles
+        .iter()
+        .find(|(_, from)| {
+            tiles.iter().any(|(_, to)| {
+                let overlaps_vertically = from.top < to.bottom && to.top < from.bottom;
+                let overlaps_horizontally = from.left < to.right && to.left < from.right;
+                match direction {
+                    Direction::Left => overlaps_vertically && to.right <= from.left,
+                    Direction::Right => overlaps_vertically && from.right <= to.left,
+                    Direction::Up => overlaps_horizontally && to.bottom <= from.top,
+                    Direction::Down => overlaps_horizontally && from.bottom <= to.top,
+                }
+            })
+        })
+        .map(|(hwnd, _)| *hwnd)
+}
+
 /// The frame of one handle.
 fn frame_of(windows: &TestWindows, hwnd: i64) -> Option<Rect> {
     infos(windows)
@@ -494,6 +524,16 @@ fn the_daemon_tiles_and_drives_four_real_windows() {
     });
 
     // --- focus -----------------------------------------------------------
+    //
+    // Which window to start from is not a free choice. A four container BSP
+    // puts one tile against the top of the screen and one against the left, so
+    // "focus up" and "focus left" have nowhere to go from those, and which tile
+    // holds the focus after four windows are adopted depends on what the
+    // desktop made foreground. Asserting that focus always moves from wherever
+    // it happens to be is asserting something that is not true, and it failed
+    // on a machine whose starting focus differed from this one's. Each
+    // direction starts from a window that demonstrably has a neighbour that
+    // way, picked from the frames as they actually are.
     for direction in [
         Direction::Left,
         Direction::Right,
@@ -501,6 +541,13 @@ fn the_daemon_tiles_and_drives_four_real_windows() {
         Direction::Down,
     ] {
         steps.step(&format!("focus {direction}"), || {
+            let start = window_with_a_neighbour(&windows, direction).ok_or_else(|| {
+                format!("no tile has a neighbour to the {direction}, so the layout is wrong")
+            })?;
+            mochi_testbed::focus_window(start).map_err(|e| e.to_string())?;
+            wait_for(STEP, || focused_window() == Some(start))
+                .map_err(|_| format!("{start:#x} never took the focus to start from"))?;
+
             let before = focused_window();
             command(&Command::Focus { direction })?;
             let after = wait_some(STEP, || {
