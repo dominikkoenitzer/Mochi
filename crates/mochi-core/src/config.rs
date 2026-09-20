@@ -491,6 +491,29 @@ impl Config {
     /// Returns [`Error::Json`] when the text is not valid JSON or a value has
     /// the wrong type. Unknown keys are not an error.
     pub fn from_json(json: &str) -> Result<Self> {
+        // The shape is checked before the fields, because serde will otherwise
+        // accept a JSON array here. A struct deserialises from a sequence by
+        // taking its fields positionally, and this struct's `#[serde(default)]`
+        // turns "too few elements" into "use the default for the rest" — so
+        // `[]` parses as the default configuration and the desktop reverts with
+        // nothing reported, while `["x"]` quietly sets the first field.
+        //
+        // Parsed twice on purpose: the second parse is the one whose error
+        // carries the line and column that `mochic check` prints.
+        let shape: serde_json::Value = serde_json::from_str(json)?;
+        if !shape.is_object() {
+            return Err(Error::Json(format!(
+                "a configuration file has to be a JSON object, this one is {}",
+                match shape {
+                    serde_json::Value::Array(_) => "a list",
+                    serde_json::Value::String(_) => "a string",
+                    serde_json::Value::Number(_) => "a number",
+                    serde_json::Value::Bool(_) => "a boolean",
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Object(_) => unreachable!(),
+                }
+            )));
+        }
         Ok(serde_json::from_str(json)?)
     }
 
@@ -1044,6 +1067,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.border, Some(true));
+    }
+
+    #[test]
+    fn a_configuration_file_has_to_be_an_object() {
+        // A JSON array parses as a struct whose fields are taken positionally,
+        // and the container's `#[serde(default)]` turns "too few elements" into
+        // "use the defaults". So an array quietly means "the default
+        // configuration", and the whole desktop reverts with nothing reported.
+        assert!(
+            Config::from_json("[]").is_err(),
+            "an array was accepted as a configuration"
+        );
+        // Worse than the empty case: the elements land in declaration order, so
+        // this one silently sets real keys the user never named.
+        assert!(Config::from_json(r#"["somewhere/applications.json"]"#).is_err());
+        // The shapes that are genuinely a configuration still parse.
+        assert!(Config::from_json("{}").is_ok());
     }
 
     #[test]

@@ -524,6 +524,24 @@ impl WindowManager {
         }
     }
 
+    /// Whether a change to `path` is a change to the hotkey file.
+    ///
+    /// Not equality with the path in hand. The watcher reports the name it was
+    /// started on for the rest of the session, while `reload_hotkeys` moves
+    /// `hotkey_path` to the other accepted name the moment the file is renamed
+    /// to it. Comparing the two means that after exactly one rename every
+    /// later save of the hotkey file is mistaken for a change to `mochi.json`,
+    /// which reloads the configuration: the bindings never get re-read, and
+    /// the reload throws away the rules and layouts a command had set.
+    fn is_the_hotkey_file(&self, path: &std::path::Path) -> bool {
+        if self.hotkey_path.as_deref() == Some(path) {
+            return true;
+        }
+        // Only when the path was found rather than named; `--hotkeys` means
+        // that file, and nothing else counts as the hotkey file.
+        self.hotkey_candidates.iter().any(|name| name == path)
+    }
+
     /// The hotkey file this daemon watches, if it binds keys at all.
     pub fn hotkey_path(&self) -> Option<&std::path::Path> {
         self.hotkey_path.as_deref()
@@ -1297,7 +1315,7 @@ impl WindowManager {
                 Flow::Continue
             }
             Event::ConfigChanged(path) => {
-                if self.hotkey_path.as_deref() == Some(path.as_path()) {
+                if self.is_the_hotkey_file(&path) {
                     tracing::info!(path = %path.display(), "the hotkey file changed on disk");
                     self.reload_hotkeys();
                 } else {
@@ -1765,12 +1783,48 @@ impl WindowManager {
                 "rehoming windows from a monitor that went away"
             );
         }
+        // The change set matters here. A window that lands on a workspace
+        // nobody is looking at has to be taken off screen, and this is the only
+        // thing that will do it: the retile that follows a display change only
+        // ever shows windows, it never hides one. Dropping these changes left
+        // the window on screen, untiled, over the surviving monitor's layout,
+        // while the model recorded it as hidden.
+        let mut rehomed = Changes::none();
         for (workspace, window) in orphans {
+            let id = window.id;
             if let Some(first) = self.core.monitors_mut().get_mut(0) {
                 first.ensure_workspaces(workspace + 1);
             }
-            let _ = self.core.add_window_to(0, workspace, window);
+            match self.core.add_window_to(0, workspace, window) {
+                Ok(changes) => rehomed.merge(changes),
+                Err(e) => tracing::error!(%id, error = %e, "could not rehome a window"),
+            }
+            // A rule can refuse the window outright, and then nothing holds it
+            // any more. If Mochi had it off screen, this is the last moment
+            // anything knows to give it back.
+            if self.core.window(id).is_none() {
+                let hwnd = handle(id);
+                let behaviour = match self.hidden.lock() {
+                    Ok(mut hidden) => hidden.show(hwnd),
+                    Err(_) => None,
+                };
+                if let Some(behaviour) = behaviour {
+                    tracing::warn!(%id, "a rehomed window was refused, giving it back");
+                    let result = match behaviour {
+                        HidingBehaviour::Cloak => self.platform.set_cloaked(hwnd, false),
+                        HidingBehaviour::Minimize => self.platform.show(hwnd, ShowState::Restore),
+                        HidingBehaviour::Hide => {
+                            self.platform.show(hwnd, ShowState::ShowNoActivate)
+                        }
+                    };
+                    if let Err(e) = result {
+                        tracing::error!(%id, error = %e, "could not give it back");
+                    }
+                }
+            }
         }
+        rehomed.settle();
+        self.apply_changes(rehomed);
 
         if let Some(idx) = focused_area.and_then(|area| {
             self.core
@@ -3768,6 +3822,81 @@ mod tests {
         // file the user did not ask for.
         let named = std::path::PathBuf::from(r"D:\somewhere\keys");
         assert_eq!(hotkey_file_now(&named, &[]), named);
+    }
+
+    #[test]
+    fn a_hotkey_file_that_changed_its_name_is_still_the_hotkey_file() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        let dir = std::env::temp_dir().join(format!("mochi-route-{}", std::process::id()));
+        let preferred = dir.join("hotkeys");
+        let legacy = dir.join("whkdrc");
+
+        // What startup found, and what the watcher reports for the rest of the
+        // session: it captures one path and never changes it.
+        wm.hotkey_path = Some(legacy.clone());
+        wm.hotkey_candidates = vec![preferred.clone(), legacy.clone()];
+        assert!(wm.is_the_hotkey_file(&legacy));
+
+        // The user renames the file, so a reload moves the path it reads.
+        wm.hotkey_path = Some(preferred.clone());
+
+        // The watcher still reports the old name. Comparing that against the
+        // path in hand answered "this is mochi.json", so every later save of
+        // the hotkey file ran a full configuration reload: the bindings were
+        // never re-read, and the reload threw away the rules and the layouts a
+        // command had set.
+        assert!(
+            wm.is_the_hotkey_file(&legacy),
+            "a hotkey save after the rename was mistaken for a config change"
+        );
+        assert!(wm.is_the_hotkey_file(&preferred));
+        let elsewhere = std::env::temp_dir().join("mochi.json");
+        assert!(!wm.is_the_hotkey_file(&elsewhere));
+    }
+
+    #[test]
+    fn a_hotkey_path_given_on_the_command_line_is_the_only_one_that_counts() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        let named = std::env::temp_dir().join("named-keys");
+        wm.hotkey_path = Some(named.clone());
+        // No candidates is what `--hotkeys` produces: that file and no other.
+        wm.hotkey_candidates = Vec::new();
+        assert!(wm.is_the_hotkey_file(&named));
+        assert!(!wm.is_the_hotkey_file(&std::env::temp_dir().join("whkdrc")));
+    }
+
+    #[test]
+    fn a_window_rehomed_off_a_lost_screen_goes_off_the_air_with_its_workspace() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor")],
+            vec![main_screen(), portrait_screen()],
+        );
+        // A window on the portrait screen, on a workspace index the surviving
+        // screen is not looking at.
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        wm.handle_command(Command::FocusWorkspace { index: 2 });
+        let mut stray = window(7, "On the portrait screen");
+        // The helper hardcodes the main screen's id; this one really is over
+        // on the portrait panel.
+        stray.monitor = Some(MonitorId(2));
+        wm.manage(&stray);
+        assert!(wm.state().window(WindowId(7)).is_some());
+        wm.handle_command(Command::FocusMonitor { index: 0 });
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+
+        let before = platform.cloaks.lock().unwrap().len();
+        platform.set_monitors(vec![main_screen()]);
+        wm.refresh_monitors();
+
+        // It lands on a workspace nobody is looking at, so it has to go off
+        // screen. The retile that follows a display change only ever shows, so
+        // dropping the change set left it on screen over the layout while the
+        // model called it hidden.
+        let after: Vec<_> = platform.cloaks.lock().unwrap()[before..].to_vec();
+        assert!(
+            after.contains(&(Hwnd(7), true)),
+            "the rehomed window was left on screen: {after:?}"
+        );
     }
 
     #[test]
