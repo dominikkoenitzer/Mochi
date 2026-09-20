@@ -124,12 +124,23 @@ thread_local! {
     static BINDINGS: RefCell<Bindings> = RefCell::new(Bindings::default());
     /// Where a match is reported.
     static SENDER: RefCell<Option<EventSender>> = const { RefCell::new(None) };
-    /// Keys whose press was swallowed, so their release can be swallowed too.
+    /// What the hook did with the last press of each key that is down.
     ///
-    /// An application that never saw the press must not see the release either;
-    /// it would read as a key that went up on its own. Eight slots are more
-    /// than a human can hold down at once.
-    static SWALLOWED: RefCell<[u16; 8]> = const { RefCell::new([0; 8]) };
+    /// A release has to go the same way its press went, and *both* directions
+    /// have to be recorded to know which way that was.
+    ///
+    /// Recording only the swallowed ones is not enough, because a key can stop
+    /// being a hotkey while it is still held. Hold `alt + p` past the repeat
+    /// delay and then let go of Alt: the repeats stop matching and reach the
+    /// application, and a release that is swallowed on the strength of the
+    /// first press leaves that key **latched down** in it. The application goes
+    /// on repeating a character until the key is pressed again. The mirror case
+    /// is a plain key held while Alt is pressed, which starts matching
+    /// half way through.
+    ///
+    /// Sixteen slots is more than a keyboard can report at once. A press that
+    /// does not fit is never swallowed: see [`record_press`].
+    static PRESSES: RefCell<[(u16, bool); 16]> = const { RefCell::new([(0, false); 16]) };
 }
 
 /// True while the key is physically down, according to the async key state.
@@ -176,32 +187,41 @@ const fn is_modifier(vk: u16) -> bool {
     )
 }
 
-/// Records a swallowed press. True when this key was not already down, which
-/// is how auto-repeat is told apart from a fresh press.
-fn remember_swallowed(vk: u16) -> bool {
-    SWALLOWED.with(|cell| {
+/// Records which way a press went, so its release can follow.
+///
+/// `Some(true)` when this is a fresh press, `Some(false)` when the key was
+/// already down and this is auto-repeat, and `None` when there was no room to
+/// record it at all. A press that cannot be recorded must not be swallowed:
+/// its release would have nothing to follow and would reach the application on
+/// its own, which is the latched key this table exists to prevent.
+fn record_press(vk: u16, swallowed: bool) -> Option<bool> {
+    PRESSES.with(|cell| {
         let mut keys = cell.borrow_mut();
-        if keys.contains(&vk) {
-            return false;
+        if let Some(slot) = keys.iter_mut().find(|slot| slot.0 == vk) {
+            // The last press wins: a key that has changed sides while held is
+            // exactly the case that strands a release.
+            slot.1 = swallowed;
+            return Some(false);
         }
-        match keys.iter_mut().find(|slot| **slot == 0) {
-            Some(slot) => {
-                *slot = vk;
-                true
-            }
-            None => false,
-        }
+        let slot = keys.iter_mut().find(|slot| slot.0 == 0)?;
+        *slot = (vk, swallowed);
+        Some(true)
     })
 }
 
 /// Whether this release belongs to a press that was swallowed, clearing it.
-fn take_swallowed(vk: u16) -> bool {
-    SWALLOWED.with(|cell| {
+///
+/// A release with no recorded press is passed on. The key was held before the
+/// hook was installed, or its press went to another hook first; either way the
+/// application may be holding it and is owed the release.
+fn take_press(vk: u16) -> bool {
+    PRESSES.with(|cell| {
         let mut keys = cell.borrow_mut();
-        match keys.iter_mut().find(|slot| **slot == vk) {
+        match keys.iter_mut().find(|slot| slot.0 == vk) {
             Some(slot) => {
-                *slot = 0;
-                true
+                let swallowed = slot.1;
+                *slot = (0, false);
+                swallowed
             }
             None => false,
         }
@@ -240,17 +260,22 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         let message = wparam.0 as u32;
 
         if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
-            if !is_modifier(vk)
-                && let Some(modifiers) = press(vk)
-            {
-                // Only the first press of a held key masks: auto-repeat is
-                // still inside the same Alt, which is already masked.
-                if remember_swallowed(vk) && opens_a_menu(modifiers) {
-                    mask_the_modifier();
+            if !is_modifier(vk) {
+                let matched = press(vk);
+                // Every press is recorded, matched or not, so that the release
+                // follows the press the application actually saw.
+                if let Some(first) = record_press(vk, matched.is_some())
+                    && let Some(modifiers) = matched
+                {
+                    // Only the first press of a held key masks: auto-repeat is
+                    // still inside the same Alt, which is already masked.
+                    if first && opens_a_menu(modifiers) {
+                        mask_the_modifier();
+                    }
+                    return LRESULT(1);
                 }
-                return LRESULT(1);
             }
-        } else if matches!(message, WM_KEYUP | WM_SYSKEYUP) && take_swallowed(vk) {
+        } else if matches!(message, WM_KEYUP | WM_SYSKEYUP) && take_press(vk) {
             return LRESULT(1);
         }
     }
@@ -628,14 +653,60 @@ mod tests {
     }
 
     #[test]
+    fn a_key_that_stops_being_a_hotkey_while_held_is_not_left_latched_down() {
+        // The sequence that strands a key: press it while it is bound, then
+        // let the binding stop matching (let go of Alt, or reload the file)
+        // while it is still held. The repeats reach the application, so the
+        // release has to reach it too.
+        assert_eq!(record_press(0x50, true), Some(true));
+        assert_eq!(record_press(0x50, false), Some(false));
+        assert!(
+            !take_press(0x50),
+            "the release was swallowed for a press the application was given, \
+             which leaves that key held down in it"
+        );
+
+        // And the mirror: a plain key held while Alt is pressed starts
+        // matching half way through, and its release belongs to Mochi.
+        assert_eq!(record_press(0x51, false), Some(true));
+        assert_eq!(record_press(0x51, true), Some(false));
+        assert!(take_press(0x51));
+    }
+
+    #[test]
+    fn a_press_that_cannot_be_recorded_is_never_swallowed() {
+        // With every slot taken there is nowhere to note which way the press
+        // went, so it has to be handed on: swallowing it would strand the
+        // release. Sixteen keys held at once is already past what a keyboard
+        // reports, so this is the safety valve, not the normal path.
+        for vk in 0x41..0x51u16 {
+            assert_eq!(record_press(vk, true), Some(true), "slot for {vk:#x}");
+        }
+        assert_eq!(
+            record_press(0x60, true),
+            None,
+            "a seventeenth held key claimed a slot that does not exist"
+        );
+        for vk in 0x41..0x51u16 {
+            assert!(take_press(vk));
+        }
+    }
+
+    #[test]
+    fn a_release_with_no_recorded_press_is_handed_on() {
+        // The key was held before the hook was installed. The application may
+        // be holding it, so the release is owed to it.
+        assert!(!take_press(0x7B));
+    }
+
+    #[test]
     fn a_swallowed_press_swallows_its_release_exactly_once() {
-        assert!(!take_swallowed(0x48));
-        assert!(remember_swallowed(0x48));
-        // Auto-repeat presses the same key again before it comes up, and only
-        // the first of those is a new press.
-        assert!(!remember_swallowed(0x48));
-        assert!(take_swallowed(0x48));
-        assert!(!take_swallowed(0x48));
+        assert!(!take_press(0x48));
+        assert_eq!(record_press(0x48, true), Some(true));
+        // Auto-repeat presses the same key again before it comes up.
+        assert_eq!(record_press(0x48, true), Some(false));
+        assert!(take_press(0x48));
+        assert!(!take_press(0x48));
     }
 
     #[test]
