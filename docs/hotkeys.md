@@ -19,6 +19,11 @@ Mochi looks for it in this order and takes the first hit:
 4. `%USERPROFILE%\.config\mochi\whkdrc`, for a desktop that came from a
    standalone hotkey daemon and still uses that file name.
 
+Renaming the file from the fourth name to the third is safe while Mochi is
+running. Only the first two are taken literally; when the path was found rather
+than named, a reload looks for it again, so the rename is picked up instead of
+leaving the daemon reading a file that is no longer there.
+
 `mochic quickstart` writes a starting file: focus, moving windows, resizing,
 workspaces, layouts and game mode, one key each. Saving the file reloads it;
 nothing has to be restarted. `mochi --no-hotkeys` binds no keys at all, for a
