@@ -293,10 +293,15 @@ pub fn expand_env(raw: &str) -> String {
             }
         } else {
             let tail = &rest[1..];
-            let (tail, marker) = tail
-                .strip_prefix("Env:")
-                .or_else(|| tail.strip_prefix("env:"))
-                .map_or((tail, 1), |t| (t, 5));
+            // PowerShell's prefix is case insensitive, so `$ENV:` has to
+            // work too. It did not, and the whole path came back unexpanded:
+            // the application rule file was simply not found, and that is only
+            // a warning, so 363 rules went missing without an error.
+            let (tail, marker) = if tail.len() >= 4 && tail[..4].eq_ignore_ascii_case("env:") {
+                (&tail[4..], 5)
+            } else {
+                (tail, 1)
+            };
             let len = tail
                 .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .unwrap_or(tail.len());
@@ -556,6 +561,11 @@ mod tests {
         for raw in [
             "$Env:USERPROFILE/applications.json",
             "$env:USERPROFILE/applications.json",
+            // PowerShell does not care about the case of its own prefix, and
+            // an unexpanded path just means the rule file is not found, which
+            // is only a warning.
+            "$ENV:USERPROFILE/applications.json",
+            "$eNv:USERPROFILE/applications.json",
             "%USERPROFILE%/applications.json",
             "$USERPROFILE/applications.json",
         ] {
