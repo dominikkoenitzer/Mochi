@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "mochi"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "mochi-client"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "serde",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "mochi-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "regex",
  "schemars",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "mochi-hotkey"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "mochi-client",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "mochi-render"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "mochi-core",
  "serde",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "mochi-testbed"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "serde",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "mochic"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
