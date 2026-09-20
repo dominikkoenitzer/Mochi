@@ -550,9 +550,21 @@ impl Config {
     /// the entry has no preference pinning it elsewhere; see
     /// [`Config::monitor_assignments`].
     #[must_use]
-    pub fn workspace_rules(&self) -> Vec<(usize, usize, MatchingRule, bool)> {
+    pub fn workspace_rules(&self, state: &State) -> Vec<(usize, usize, MatchingRule, bool)> {
+        // The monitor a rule routes to is the one its entry configures, which
+        // is not the entry's own position once anything is pinned. Sending a
+        // window to the index of the entry would open it on whichever screen
+        // Windows happened to enumerate there, which is the guess the pinning
+        // exists to replace.
+        let assignments = self.monitor_assignments(state);
         let mut rules = Vec::new();
-        for (monitor_idx, monitor) in self.monitors.iter().flatten().enumerate() {
+        for (entry, monitor) in self.monitors.iter().flatten().enumerate() {
+            // An entry whose display is not attached configures nothing, so
+            // its rules have nowhere to send a window and are left out rather
+            // than pointed at a screen that is merely present.
+            let Some(monitor_idx) = assignments.get(entry).copied().flatten() else {
+                continue;
+            };
             for (workspace_idx, workspace) in monitor.workspaces.iter().enumerate() {
                 for rule in workspace.initial_workspace_rules.iter().flatten() {
                     rules.push((monitor_idx, workspace_idx, rule.clone(), true));
@@ -1100,7 +1112,15 @@ mod tests {
         assert_eq!(rules.get(&1), Some(&Layout::Bsp));
         assert_eq!(rules.get(&3), Some(&Layout::Columns));
 
-        let all = config.workspace_rules();
+        // One monitor, no preferences, so the entry configures the monitor at
+        // its own position exactly as it always did.
+        let mut state = State::new();
+        state.add_monitor(Monitor::new(
+            1,
+            Rect::new(0, 0, 3840, 2160),
+            Rect::new(0, 0, 3840, 2160),
+        ));
+        let all = config.workspace_rules(&state);
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].0, 0);
         assert_eq!(all[0].1, 0);
@@ -1438,6 +1458,71 @@ mod tests {
 
         assert_eq!(first_workspace_name(&state, 1).as_deref(), Some("pinned"));
         assert_eq!(first_workspace_name(&state, 0).as_deref(), Some("rest"));
+    }
+
+    #[test]
+    fn a_workspace_rule_routes_to_the_monitor_its_entry_is_pinned_to() {
+        // The first entry is pinned to the portrait panel, which Windows
+        // enumerates second, so the rule written under it has to open its
+        // windows on monitor one.
+        let config = Config::from_json(
+            r#"{
+                "display_index_preferences": { "0": "AW2521HF" },
+                "monitors": [
+                    {
+                        "workspaces": [{
+                            "name": "portrait",
+                            "workspace_rules": [
+                                { "kind": "Exe", "id": "firefox.exe", "matching_strategy": "Equals" }
+                            ]
+                        }]
+                    },
+                    { "workspaces": [{ "name": "main" }] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY2"));
+
+        let rules = config.workspace_rules(&state);
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].0, 1,
+            "the rule routed by the index of its entry, not by the display it is pinned to"
+        );
+    }
+
+    #[test]
+    fn a_workspace_rule_under_an_entry_whose_display_is_gone_routes_nowhere() {
+        // Only the 4K screen is plugged in. `apply_to` holds the portrait
+        // entry back rather than configuring the 4K screen with it, and its
+        // rule has to be held back with it.
+        let config = Config::from_json(
+            r#"{
+                "display_index_preferences": { "0": "AW2521HF" },
+                "monitors": [
+                    {
+                        "workspaces": [{
+                            "name": "portrait",
+                            "workspace_rules": [
+                                { "kind": "Exe", "id": "firefox.exe", "matching_strategy": "Equals" }
+                            ]
+                        }]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
+
+        assert!(
+            config.workspace_rules(&state).is_empty(),
+            "a rule for a display that is not attached opened windows on the 4K screen"
+        );
     }
 
     #[test]
