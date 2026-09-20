@@ -10,6 +10,15 @@ show up neither in the taskbar nor in Alt-Tab. So a batch of them can sit on a
 working desktop, be moved around by Mochi alone, and disappear again without
 having touched anything the user cares about.
 
+That protects the user's windows from the tests. It does not protect the tests
+from the user's window manager, and the two are not the same promise. Another
+manager that does take these windows moves and fades them underneath the
+assertions, and what comes out is overlapping tiles, focus commands that look
+broken and windows still faded after a stop, none of which is a defect in Mochi.
+Give the suite the desktop to itself. `SpawnOptions::taskbar` gives up the tool
+window bit deliberately, to be cloakable by the shell, and a window spawned that
+way is visible to everything: only a test that knows it is alone asks for one.
+
 Apart from that one bit the windows are ordinary: `WS_OVERLAPPEDWINDOW`, so DWM
 draws a normal Windows 11 frame with rounded corners, a caption and the
 invisible resize border that tiling has to compensate for. Each one paints a
