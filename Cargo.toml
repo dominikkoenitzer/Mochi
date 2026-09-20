@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/mochi-core",
     "crates/mochi-client",
+    "crates/mochi-hotkey",
     "crates/mochi",
     "crates/mochic",
     "crates/mochi-testbed",
@@ -21,6 +22,7 @@ publish = false
 mochi-core = { path = "crates/mochi-core" }
 mochi-client = { path = "crates/mochi-client" }
 mochi-render = { path = "crates/mochi-render" }
+mochi-hotkey = { path = "crates/mochi-hotkey" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.6", features = ["derive"] }
