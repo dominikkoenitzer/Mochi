@@ -479,6 +479,11 @@ impl Config {
     pub fn rule_sets(&self) -> RuleSets {
         RuleSets {
             ignore_rules: self.ignore_rules.clone().unwrap_or_default(),
+            // The same rules again, marked as the user's own. A community rule
+            // file is merged in later with `extend`, which deliberately does
+            // not add to this list, so a manage rule from one cannot overrule
+            // what the user wrote in their own file.
+            own_ignore_rules: self.ignore_rules.clone().unwrap_or_default(),
             manage_rules: self.manage_rules.clone().unwrap_or_default(),
             floating_applications: self.floating_applications.clone().unwrap_or_default(),
             tray_and_multi_window_applications: self

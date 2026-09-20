@@ -389,9 +389,12 @@ impl Animation {
     /// Always at least two: the start and the end.
     #[must_use]
     pub fn frame_count(&self) -> usize {
-        let millis = self.duration.as_millis().max(1) as u64;
-        let frames = (millis * u64::from(self.fps)).div_ceil(1000);
-        (frames as usize).max(1) + 1
+        // In milliseconds, because a duration long enough to overflow the
+        // multiplication is a configuration mistake, not a reason to panic.
+        let millis = self.duration.as_millis().max(1);
+        let frames = millis.saturating_mul(u128::from(self.fps)).div_ceil(1000);
+        let frames = usize::try_from(frames).unwrap_or(usize::MAX);
+        frames.clamp(1, usize::MAX - 1) + 1
     }
 
     /// The rectangle of frame `idx`.
@@ -533,6 +536,21 @@ mod tests {
             Animation::new(A, B, 0, 0, AnimationStyle::Linear).frame_count(),
             2,
             "a zero duration still has a start and an end"
+        );
+    }
+
+    /// A duration long enough to overflow the frame maths is a configuration
+    /// mistake, and [`Animation::new`] takes any `u64`, so it must come out as
+    /// an absurd frame count rather than a panic.
+    #[test]
+    fn a_duration_too_long_to_count_does_not_panic() {
+        let animation = Animation::new(A, B, u64::MAX, 60, AnimationStyle::Linear);
+        assert!(animation.frame_count() >= 2);
+        assert_eq!(animation.frame(0), A, "frame zero is still the start");
+        assert_eq!(
+            animation.frame(animation.frame_count() - 1),
+            B,
+            "and the last frame is still the end"
         );
     }
 

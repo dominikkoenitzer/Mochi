@@ -145,13 +145,39 @@ impl Changes {
         self.focused_monitor_changed |= other.focused_monitor_changed;
     }
 
-    /// Drops any window that appears in both `show` and `hide`, keeping it
-    /// shown, and removes duplicates. A workspace switch that moves a window
-    /// between two visible workspaces should not blink.
+    /// Drops the instructions that contradict each other, so the daemon is
+    /// never asked to do two opposite things to the same window.
+    ///
+    /// - A window in both `show` and `hide` stays shown: a workspace switch
+    ///   that moves a window between two visible workspaces should not blink.
+    /// - A window in both `minimize` and `hide` is only minimized. Hiding
+    ///   cloaks it as well, and a window that is cloaked and minimized comes
+    ///   back from the taskbar invisible.
+    /// - A window that is being hidden never gets the foreground, and the
+    ///   cursor does not follow the focus there either. Moving a window onto a
+    ///   monitor whose workspace is maximized used to produce `focus` and
+    ///   `hide` for the same window, which cloaked it and then typed into it.
+    ///
+    /// Duplicates go too, in both lists, keeping the first of each.
+    ///
+    /// Deliberately left alone: `restore` together with `minimize`, which is
+    /// how a maximized window is minimized as an ordinary one, because the
+    /// daemon restores before it minimizes; and `close` together with anything
+    /// else, because a window only goes once the daemon says it is gone, so
+    /// every other instruction is still valid until then. `maximize` and
+    /// `hide` would contradict each other, but no operation produces them for
+    /// the same window.
     pub fn settle(&mut self) {
-        self.hide.retain(|id| !self.show.contains(id));
+        self.hide
+            .retain(|id| !self.show.contains(id) && !self.minimize.contains(id));
         dedup_keeping_order(&mut self.show);
         dedup_keeping_order(&mut self.hide);
+        if let Some(id) = self.focus
+            && self.hide.contains(&id)
+        {
+            self.focus = None;
+            self.warp_mouse_to = None;
+        }
     }
 }
 
@@ -270,5 +296,36 @@ mod tests {
             .hiding([WindowId(6)]);
         let json = serde_json::to_string(&changes).unwrap();
         assert_eq!(serde_json::from_str::<Changes>(&json).unwrap(), changes);
+    }
+
+    #[test]
+    fn settling_never_focuses_a_window_it_also_hides() {
+        let mut changes = Changes::none().focus(WindowId(1)).hiding([WindowId(1)]);
+        changes.warp_mouse_to = Some(Rect::new(0, 0, 10, 10));
+
+        changes.settle();
+
+        assert_eq!(
+            changes.focus, None,
+            "a window that is being cloaked must never take the foreground"
+        );
+        assert_eq!(changes.hide, vec![WindowId(1)]);
+        assert!(
+            changes.warp_mouse_to.is_none(),
+            "and the cursor does not follow the focus there"
+        );
+    }
+
+    #[test]
+    fn settling_keeps_a_focus_that_is_shown_again() {
+        let mut changes = Changes::none()
+            .focus(WindowId(1))
+            .showing([WindowId(1)])
+            .hiding([WindowId(1)]);
+
+        changes.settle();
+
+        assert_eq!(changes.focus, Some(WindowId(1)));
+        assert!(changes.hide.is_empty());
     }
 }

@@ -851,12 +851,12 @@
       "description": "How the rule's `id` is compared against the window's value.",
       "oneOf": [
         {
-          "description": "The compatibility fallback used by older rule files.\n\nThe identifier is treated as a regular expression when it contains\nregex metacharacters, and as an exact comparison otherwise.",
+          "description": "The compatibility fallback used by older rule files.\n\nThe identifier has to describe the whole value: it matches when it is\nequal to the value, or when it is a regular expression that matches the\nvalue from end to end. An identifier that carries regex punctuation but\nwas meant literally, like `EVERYTHING_(1.5a)`, therefore still matches.",
           "type": "string",
           "const": "Legacy"
         },
         {
-          "description": "Exact, case sensitive.",
+          "description": "Exact. Byte exact for `Class` and `Title`, and case insensitive for\n`Exe` and `Path`, which Windows itself compares case insensitively.",
           "type": "string",
           "const": "Equals"
         },
