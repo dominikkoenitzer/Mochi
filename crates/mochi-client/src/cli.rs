@@ -103,11 +103,23 @@ pub enum Cmd {
         #[arg(value_enum)]
         direction: Direction,
     },
+    /// Step the focus along the container ring, by position not by geometry
+    CycleFocus {
+        /// next or previous
+        #[arg(value_enum)]
+        direction: CycleDirection,
+    },
     /// Move the focused window in a direction
     Move {
         /// left, right, up or down
         #[arg(value_enum)]
         direction: Direction,
+    },
+    /// Step the focused window along the container ring, by position
+    CycleMove {
+        /// next or previous
+        #[arg(value_enum)]
+        direction: CycleDirection,
     },
     /// Grow or shrink the focused window along an axis
     ResizeAxis {
@@ -118,12 +130,25 @@ pub enum Cmd {
         #[arg(value_enum)]
         sizing: Sizing,
     },
+    /// Grow or shrink the focused window by moving one named edge
+    ResizeEdge {
+        /// left, right, up or down
+        #[arg(value_enum)]
+        direction: Direction,
+        /// increase or decrease
+        #[arg(value_enum)]
+        sizing: Sizing,
+    },
     /// Swap the focused window with the first window of its workspace
     Promote,
+    /// Focus the first window of the workspace, moving nothing
+    PromoteFocus,
 
     // --- window state ----------------------------------------------------
     /// Toggle the focused window between tiled and floating
     ToggleFloat,
+    /// Toggle whether every new window floats
+    ToggleFloatOverride,
     /// Toggle the focused window between tiled and maximized
     ToggleMaximize,
     /// Toggle monocle mode for the focused window
@@ -172,6 +197,8 @@ pub enum Cmd {
         #[arg(value_enum)]
         axis: Axis,
     },
+    /// Stop and resume tiling the focused workspace
+    ToggleTiling,
 
     // --- workspaces -------------------------------------------------------
     /// Focus a workspace by its zero-based index
@@ -181,6 +208,11 @@ pub enum Cmd {
     },
     /// Move the focused window to a workspace and follow it
     MoveToWorkspace {
+        /// Zero-based workspace index
+        index: usize,
+    },
+    /// Move the focused window to a workspace and stay where you are
+    SendToWorkspace {
         /// Zero-based workspace index
         index: usize,
     },
@@ -219,6 +251,11 @@ pub enum Cmd {
     },
     /// Move the focused window to a monitor and follow it
     MoveToMonitor {
+        /// Zero-based monitor index
+        index: usize,
+    },
+    /// Move the focused window to a monitor and stay where you are
+    SendToMonitor {
         /// Zero-based monitor index
         index: usize,
     },
@@ -364,15 +401,27 @@ impl Cmd {
             Cmd::Focus { direction } => Command::Focus {
                 direction: *direction,
             },
+            Cmd::CycleFocus { direction } => Command::CycleFocus {
+                direction: *direction,
+            },
             Cmd::Move { direction } => Command::Move {
+                direction: *direction,
+            },
+            Cmd::CycleMove { direction } => Command::CycleMove {
                 direction: *direction,
             },
             Cmd::ResizeAxis { axis, sizing } => Command::ResizeAxis {
                 axis: *axis,
                 sizing: *sizing,
             },
+            Cmd::ResizeEdge { direction, sizing } => Command::ResizeEdge {
+                direction: *direction,
+                sizing: *sizing,
+            },
             Cmd::Promote => Command::Promote,
+            Cmd::PromoteFocus => Command::PromoteFocus,
             Cmd::ToggleFloat => Command::ToggleFloat,
+            Cmd::ToggleFloatOverride => Command::ToggleFloatOverride,
             Cmd::ToggleMaximize => Command::ToggleMaximize,
             Cmd::ToggleMonocle => Command::ToggleMonocle,
             Cmd::Minimize => Command::Minimize,
@@ -391,8 +440,10 @@ impl Cmd {
             },
             Cmd::ChangeLayout { layout } => Command::ChangeLayout { layout: *layout },
             Cmd::FlipLayout { axis } => Command::FlipLayout { axis: *axis },
+            Cmd::ToggleTiling => Command::ToggleTiling,
             Cmd::FocusWorkspace { index } => Command::FocusWorkspace { index: *index },
             Cmd::MoveToWorkspace { index } => Command::MoveToWorkspace { index: *index },
+            Cmd::SendToWorkspace { index } => Command::SendToWorkspace { index: *index },
             Cmd::CycleWorkspace { direction } => Command::CycleWorkspace {
                 direction: *direction,
             },
@@ -417,6 +468,7 @@ impl Cmd {
             },
             Cmd::FocusMonitor { index } => Command::FocusMonitor { index: *index },
             Cmd::MoveToMonitor { index } => Command::MoveToMonitor { index: *index },
+            Cmd::SendToMonitor { index } => Command::SendToMonitor { index: *index },
             Cmd::CycleMonitor { direction } => Command::CycleMonitor {
                 direction: *direction,
             },
@@ -724,6 +776,57 @@ mod tests {
             parse(&["animation-style", "ease-out-quad"]),
             Command::AnimationStyle {
                 style: AnimationStyle::EaseOutQuad
+            }
+        );
+    }
+
+    #[test]
+    fn the_commands_that_only_reached_the_model_from_rust_parse_too() {
+        assert_eq!(parse(&["toggle-tiling"]), Command::ToggleTiling);
+        assert_eq!(parse(&["promote-focus"]), Command::PromoteFocus);
+        assert_eq!(
+            parse(&["toggle-float-override"]),
+            Command::ToggleFloatOverride
+        );
+        assert_eq!(
+            parse(&["cycle-focus", "next"]),
+            Command::CycleFocus {
+                direction: CycleDirection::Next
+            }
+        );
+        assert_eq!(
+            parse(&["cycle-move", "previous"]),
+            Command::CycleMove {
+                direction: CycleDirection::Previous
+            }
+        );
+        assert_eq!(
+            parse(&["resize-edge", "left", "increase"]),
+            Command::ResizeEdge {
+                direction: Direction::Left,
+                sizing: Sizing::Increase
+            }
+        );
+        assert_eq!(
+            parse(&["send-to-workspace", "3"]),
+            Command::SendToWorkspace { index: 3 }
+        );
+        assert_eq!(
+            parse(&["send-to-monitor", "1"]),
+            Command::SendToMonitor { index: 1 }
+        );
+
+        // Every one of them is worth a key, which is the reason they exist.
+        assert_eq!(binding("toggle-tiling").unwrap(), Command::ToggleTiling);
+        assert_eq!(
+            binding("send-to-workspace 3").unwrap(),
+            Command::SendToWorkspace { index: 3 }
+        );
+        assert_eq!(
+            binding("resize-edge down decrease").unwrap(),
+            Command::ResizeEdge {
+                direction: Direction::Down,
+                sizing: Sizing::Decrease
             }
         );
     }

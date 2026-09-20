@@ -34,6 +34,8 @@ mochic schema > mochi.schema.json
 | `resize_delta` | integer | `50` | How many pixels one `mochic resize-axis` step moves a boundary. |
 | `default_workspace_padding` | integer | `10` | Gap between a workspace and the screen edge, in pixels. See the note on DPI below. |
 | `default_container_padding` | integer | `10` | Gap between tiled containers, in pixels. See the note on DPI below. |
+| `minimum_window_width` | integer | `64` | Width below which a tile is never shrunk, in pixels. See the note on DPI below and the note on minimum window size. |
+| `minimum_window_height` | integer | `64` | Height below which a tile is never shrunk, in pixels. See the note on DPI below and the note on minimum window size. |
 | `border` | boolean | `false` | Draw a border around the focused window. |
 | `border_width` | integer | `6` | Border thickness in physical pixels, not scaled by DPI. |
 | `border_offset` | integer | `-1` | How far the border sits outside the window frame, negative pulls it in. |
@@ -80,7 +82,8 @@ the file is where the implementation is chosen.
 
 ## Padding and DPI
 
-`default_workspace_padding`, `default_container_padding` and the per workspace
+`default_workspace_padding`, `default_container_padding`,
+`minimum_window_width`, `minimum_window_height` and the per workspace
 `workspace_padding` and `container_padding` are multiplied by the scale factor
 of the monitor they land on, so `10` is ten pixels at 100 percent and fifteen
 at 150 percent and the gap looks the same on both screens. There is no key to
@@ -88,6 +91,32 @@ turn that off: what the file carries is the value at 100 percent.
 
 The border is the exception. `border_width` and `border_offset` are physical
 pixels and are never scaled, so a border is the same thickness everywhere.
+
+## Minimum window size
+
+`minimum_window_width` and `minimum_window_height` are the floor a tile is
+never shrunk below, whether the squeeze comes from the number of windows on the
+workspace or from leaning on `mochic resize-axis`. Both default to `64`, which
+is the floor every layout used before the keys existed, so a file that sets
+neither tiles exactly as it always did.
+
+They are in the same units as the paddings: logical pixels at 100 percent,
+multiplied by the scale factor of the monitor the workspace lands on. A floor
+of `300` is 300 physical pixels on a display at 100 percent and 450 on one at
+150 percent, so a window stays the same size on the desk on both screens.
+
+The two are independent. Every cut a layout makes divides exactly one axis and
+takes the floor belonging to that axis, so a width of `300` with a height of
+`250` means no tile narrower than 300 and none shorter than 250. A width floor
+is usually the one worth setting: it is what keeps a column of text readable.
+
+A value the screen cannot possibly honour is not an error and cannot break a
+layout. When a workspace has more containers than the floor leaves room for,
+the layout scales the minimum back down for that cut and the tiles still cover
+the whole area exactly, with nothing inverted and nothing off screen. On a 4K
+screen with twelve BSP containers a floor of `300` is met exactly; a floor of
+`400` gives 400 pixel wide tiles that are 360 tall, because twelve of them do
+not fit into 2160 pixels any other way.
 
 ## Rules that are read but not acted on
 

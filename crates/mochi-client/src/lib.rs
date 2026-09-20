@@ -78,6 +78,18 @@ mod tests {
             round_trip(Command::FocusLastWorkspace),
             r#"{"cmd":"focus-last-workspace"}"#
         );
+        assert_eq!(
+            round_trip(Command::ToggleTiling),
+            r#"{"cmd":"toggle-tiling"}"#
+        );
+        assert_eq!(
+            round_trip(Command::PromoteFocus),
+            r#"{"cmd":"promote-focus"}"#
+        );
+        assert_eq!(
+            round_trip(Command::ToggleFloatOverride),
+            r#"{"cmd":"toggle-float-override"}"#
+        );
     }
 
     #[test]
@@ -131,8 +143,23 @@ mod tests {
             r#"{"cmd":"resize-axis","axis":"vertical","sizing":"decrease"}"#
         );
         assert_eq!(
+            round_trip(Command::ResizeEdge {
+                direction: Direction::Left,
+                sizing: Sizing::Increase
+            }),
+            r#"{"cmd":"resize-edge","direction":"left","sizing":"increase"}"#
+        );
+        assert_eq!(
             round_trip(Command::FocusWorkspace { index: 3 }),
             r#"{"cmd":"focus-workspace","index":3}"#
+        );
+        assert_eq!(
+            round_trip(Command::SendToWorkspace { index: 3 }),
+            r#"{"cmd":"send-to-workspace","index":3}"#
+        );
+        assert_eq!(
+            round_trip(Command::SendToMonitor { index: 1 }),
+            r#"{"cmd":"send-to-monitor","index":1}"#
         );
         assert_eq!(
             round_trip(Command::WorkspacePadding {
@@ -193,15 +220,27 @@ mod tests {
             Command::Focus {
                 direction: Direction::Up,
             },
+            Command::CycleFocus {
+                direction: CycleDirection::Next,
+            },
             Command::Move {
                 direction: Direction::Right,
+            },
+            Command::CycleMove {
+                direction: CycleDirection::Previous,
             },
             Command::ResizeAxis {
                 axis: Axis::Vertical,
                 sizing: Sizing::Increase,
             },
+            Command::ResizeEdge {
+                direction: Direction::Left,
+                sizing: Sizing::Decrease,
+            },
             Command::Promote,
+            Command::PromoteFocus,
             Command::ToggleFloat,
+            Command::ToggleFloatOverride,
             Command::ToggleMaximize,
             Command::ToggleMonocle,
             Command::Minimize,
@@ -224,8 +263,10 @@ mod tests {
             Command::FlipLayout {
                 axis: Axis::Horizontal,
             },
+            Command::ToggleTiling,
             Command::FocusWorkspace { index: 0 },
             Command::MoveToWorkspace { index: 0 },
+            Command::SendToWorkspace { index: 0 },
             Command::CycleWorkspace {
                 direction: CycleDirection::Next,
             },
@@ -242,6 +283,7 @@ mod tests {
             },
             Command::FocusMonitor { index: 0 },
             Command::MoveToMonitor { index: 0 },
+            Command::SendToMonitor { index: 0 },
             Command::CycleMonitor {
                 direction: CycleDirection::Next,
             },
@@ -291,7 +333,7 @@ mod tests {
             Command::UnsubscribePipe { name: "bar".into() },
         ];
 
-        assert_eq!(all.len(), 53, "add new variants to this list");
+        assert_eq!(all.len(), 61, "add new variants to this list");
         let mut seen = std::collections::HashSet::new();
         for cmd in &all {
             let json: serde_json::Value = serde_json::to_value(cmd).unwrap();

@@ -139,18 +139,20 @@ with a search and replace.
 | `query` | `target` |
 | `focus`, `move` | `direction`: `left` `right` `up` `down` |
 | `resize-axis` | `axis`: `horizontal` `vertical`, `sizing`: `increase` `decrease` |
-| `promote` | |
-| `toggle-float`, `toggle-maximize`, `toggle-monocle`, `minimize`, `close` | |
+| `resize-edge` | `direction`: `left` `right` `up` `down`, `sizing`: `increase` `decrease` |
+| `promote`, `promote-focus` | |
+| `toggle-float`, `toggle-float-override`, `toggle-maximize`, `toggle-monocle`, `minimize`, `close` | |
 | `manage`, `unmanage` | |
 | `stack` | `direction` |
 | `unstack` | |
-| `cycle-stack`, `cycle-layout`, `cycle-workspace`, `cycle-monitor` | `direction`: `next` `previous` |
+| `cycle-focus`, `cycle-move`, `cycle-stack`, `cycle-layout`, `cycle-workspace`, `cycle-monitor` | `direction`: `next` `previous` |
 | `change-layout` | `layout`: `bsp` `columns` `rows` `vertical-stack` `horizontal-stack` `ultrawide-vertical-stack` `grid` |
 | `flip-layout` | `axis` |
-| `focus-workspace`, `move-to-workspace` | `index` |
+| `toggle-tiling` | |
+| `focus-workspace`, `move-to-workspace`, `send-to-workspace` | `index` |
 | `focus-last-workspace` | |
 | `workspace-padding`, `container-padding` | `monitor`, `workspace`, `size` |
-| `focus-monitor`, `move-to-monitor` | `index` |
+| `focus-monitor`, `move-to-monitor`, `send-to-monitor` | `index` |
 | `focus-follows-mouse`, `mouse-follows-focus`, `border`, `animation` | `state`: `enable` `disable` |
 | `toggle-transparency` | |
 | `border-width` | `width` |

@@ -17,7 +17,7 @@ pub(crate) fn calculate(
     area: Rect,
     len: usize,
     resize: &[Option<Rect>],
-    min_tile: i32,
+    min_tile: super::MinSize,
 ) -> Vec<Rect> {
     let mut rects = Vec::with_capacity(len);
     let mut remaining = area;
@@ -32,11 +32,14 @@ pub(crate) fn calculate(
         let delta = boundary_delta(resize, idx, idx + 1, axis);
         // What is left over is cut along this axis again every second step, so
         // it has to keep room for one tile per later cut plus the last one.
+        // Every second cut from here divides this same axis, so the room to
+        // keep is this axis's floor once per later cut plus the last tile.
+        let floor = min_tile.along(axis);
         let later_tiles = (len - idx - 2) / 2 + 1;
-        let min_rest = (i64::from(min_tile) * later_tiles as i64).min(i64::from(i32::MAX)) as i32;
+        let min_rest = (i64::from(floor) * later_tiles as i64).min(i64::from(i32::MAX)) as i32;
         let start = remaining.start(axis);
         let end = remaining.end(axis);
-        let at = split_two(start, end, delta, min_tile, min_rest);
+        let at = split_two(start, end, delta, floor, min_rest);
 
         rects.push(rect_from_slice(remaining, axis, start, at));
         remaining = rect_from_slice(remaining, axis, at, end);
