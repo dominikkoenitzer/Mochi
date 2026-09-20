@@ -28,6 +28,7 @@ env:
 jobs:
   release:
     name: Build and publish
+    timeout-minutes: 60
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,12 +42,21 @@ jobs:
         with:
           key: release
 
-      # Nothing is packaged that has not passed the suite first.
+      # Nothing is packaged that has not passed the suite first. A tag push
+      # does not run CI, so everything CI would have said has to be said here
+      # too: a release built from a commit that never saw clippy or the
+      # advisory database is a release nobody checked.
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
       - name: Test
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
 
       - name: Build
-        run: cargo build --release --workspace
+        run: cargo build --locked --release --workspace
 
       - name: Stage binaries
         shell: pwsh
@@ -94,7 +104,11 @@ jobs:
           $zip = "dist/$env:PACKAGE_NAME.zip"
           Compress-Archive -Path "$env:STAGE_DIR/*" -DestinationPath $zip -Force
           $hash = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
-          "$hash  $env:PACKAGE_NAME.zip" | Set-Content -Path "$zip.sha256" -Encoding ascii
+          # LF, not CRLF: `sha256sum -c` takes the whole rest of the line as
+          # the file name, so a trailing CR makes it look for a file that does
+          # not exist and the check fails on a perfectly good download.
+          $line = "$hash  $env:PACKAGE_NAME.zip`n"
+          [System.IO.File]::WriteAllText("$env:GITHUB_WORKSPACE/$zip.sha256", $line, [System.Text.UTF8Encoding]::new($false))
           Get-Content "$zip.sha256"
 
       # Always available, so a workflow_dispatch without a tag still produces a
