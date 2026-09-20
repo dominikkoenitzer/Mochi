@@ -9,7 +9,9 @@
     SHA256 file that ships with it.
 
     The install directory is added to the user PATH when it is missing, and
-    `mochic quickstart` runs when there is no %USERPROFILE%\mochi.json yet.
+    `mochic quickstart` runs when there is no %USERPROFILE%\mochi.json or no
+    hotkey file in %USERPROFILE%\.config\mochi yet. It writes whichever of the
+    two is missing and never overwrites one that is there.
 
     The script is idempotent: running it twice leaves the same result. It only
     ever touches its own files, nothing that another program owns.
@@ -28,7 +30,7 @@
     Do not touch the user PATH.
 
 .PARAMETER SkipQuickstart
-    Do not create a default mochi.json.
+    Do not create a default mochi.json or hotkey file.
 
 .PARAMETER Uninstall
     Remove the binaries, the install directory and the PATH entry.
@@ -59,6 +61,8 @@ $script:BinDir = Join-Path $InstallRoot 'bin'
 $script:Binaries = @('mochi.exe', 'mochic.exe')
 $script:SourceDir = $null
 $script:ConfigPath = Join-Path $env:USERPROFILE 'mochi.json'
+$script:HotkeyDir = Join-Path $env:USERPROFILE '.config\mochi'
+$script:HotkeyPath = Join-Path $script:HotkeyDir 'hotkeys'
 $script:LogPath = Join-Path $env:LOCALAPPDATA 'mochi\mochi.log'
 
 function Write-Step {
@@ -242,19 +246,25 @@ function Install-Mochi {
         $env:Path = "$env:Path;$script:BinDir"
     }
 
+    # Mochi reads hotkeys or whkdrc from that directory and quickstart leaves
+    # either name alone, so either one means the hotkeys are there already.
+    $haveHotkeys = (Test-Path $script:HotkeyPath) -or (Test-Path (Join-Path $script:HotkeyDir 'whkdrc'))
+
     if ($SkipQuickstart) {
         Write-Step 'configuration left alone (-SkipQuickstart)'
-    } elseif (Test-Path $script:ConfigPath) {
+    } elseif ((Test-Path $script:ConfigPath) -and $haveHotkeys) {
         Write-Step "configuration is already there: $script:ConfigPath"
+        Write-Detail "hotkeys are already there: $script:HotkeyDir"
     } else {
-        Write-Step 'creating a default configuration with mochic quickstart'
-        if ($PSCmdlet.ShouldProcess($script:ConfigPath, 'mochic quickstart')) {
+        Write-Step 'creating a default configuration and hotkey file with mochic quickstart'
+        if ($PSCmdlet.ShouldProcess("$script:ConfigPath and $script:HotkeyPath", 'mochic quickstart')) {
             try {
                 & (Join-Path $script:BinDir 'mochic.exe') quickstart
                 if ($LASTEXITCODE -ne 0) { throw "mochic quickstart exited with $LASTEXITCODE" }
             } catch {
                 Write-Detail "quickstart failed: $($_.Exception.Message)"
                 Write-Detail "write $script:ConfigPath by hand, see docs/configuration.md"
+                Write-Detail "and $script:HotkeyPath, see docs/hotkeys.md"
             }
         }
     }
@@ -262,6 +272,7 @@ function Install-Mochi {
     Write-Step 'done'
     Write-Detail "binaries   $script:BinDir"
     Write-Detail "config     $script:ConfigPath"
+    Write-Detail "hotkeys    $script:HotkeyPath"
     Write-Detail "log        $script:LogPath"
     Write-Detail 'autostart  scripts\autostart.ps1 -Enable'
 }
@@ -293,6 +304,7 @@ function Uninstall-Mochi {
 
     Write-Step 'left in place on purpose'
     Write-Detail "config     $script:ConfigPath"
+    Write-Detail "hotkeys    $script:HotkeyPath"
     Write-Detail "log        $script:LogPath"
     Write-Detail 'autostart  remove it with scripts\autostart.ps1 -Disable'
 }

@@ -12,7 +12,8 @@ next to the old ones and the switch is reversible.
 | its JSON config, usually in `%USERPROFILE%` | `%USERPROFILE%\mochi.json` |
 | its daemon | `mochi.exe` |
 | its command line client | `mochic.exe` |
-| `%USERPROFILE%\.config\whkdrc` | `%USERPROFILE%\.config\mochi\whkdrc` |
+| its separate hotkey daemon | nothing to install, `mochi.exe` binds the keys |
+| `%USERPROFILE%\.config\whkdrc` | `%USERPROFILE%\.config\mochi\hotkeys` |
 | `applications.json` | same file, keep `app_specific_configuration_path` |
 | its log file | `%LOCALAPPDATA%\mochi\mochi.log` |
 
@@ -38,8 +39,8 @@ a new shell afterwards so the PATH is picked up.
 your setup:
 
 - `-Config`, the JSON configuration you use today
-- `-Hotkeys`, the whkdrc you use today
-- `-Command`, the name of the command line program your whkdrc calls today,
+- `-Hotkeys`, the hotkey file you use today
+- `-Command`, the name of the command line program that hotkey file calls today,
   without the `.exe`
 
 Look at what would change:
@@ -60,9 +61,11 @@ That produces:
   rewritten. Everything else is kept, including
   `app_specific_configuration_path`: Mochi reads the usual `applications.json`
   format as it is.
-- `%USERPROFILE%\.config\mochi\whkdrc`, the hotkey file with every standalone
-  call of the old CLI name replaced by `mochic`. whkd only ever loads a file
-  called `whkdrc` from `$env:WHKD_CONFIG_HOME`, so this is the copy it reads.
+- `%USERPROFILE%\.config\mochi\hotkeys`, the hotkey file with every standalone
+  call of the old CLI name replaced by `mochic`. Mochi binds that file itself,
+  reads the syntax the old file already uses, and rebinds every time it is
+  saved. `-HotkeyDir` writes it somewhere else, in which case start the daemon
+  with `--hotkeys <path>`.
 
 The script leaves both source files untouched and refuses to overwrite an
 existing `mochi.json` unless `-Force` is given. Lines that still point at the
@@ -70,39 +73,41 @@ old setup, for example a launcher name that is not a standalone token, are
 printed so you can fix them by hand.
 
 Every key `mochi.json` reads is listed in [configuration.md](configuration.md),
-every command in [cli.md](cli.md).
+every command in [cli.md](cli.md), and the hotkey file down to the key names in
+[hotkeys.md](hotkeys.md).
 
 ## 3. Game mode
 
-`scripts\game-mode.ps1` is the game mode toggle: it pauses tiling and restarts
-whkd with a minimal config in which only the toggle key works, then back. Point
-the hotkey at it, for example by running the import with
+Game mode is the built in `mochic toggle-game-mode`: it pauses tiling and
+suspends every binding except the one bound to `toggle-game-mode` itself, so the
+game in front gets the rest of the keyboard, and the same key brings both back.
+Nothing is restarted and there is no second hotkey file to keep in step.
+
+The import turns a line that ran a game mode script into that command and keeps
+its keys, so a setup that had game mode on `alt + shift + g` still has it there:
 
 ```
-.\scripts\import-config.ps1 -Config <config> -Hotkeys <whkdrc> -Command <old CLI name> -Apply -Force -GameModeScript C:\path\to\Mochi\scripts\game-mode.ps1
+alt + shift + g : mochic toggle-game-mode
 ```
-
-which repoints hotkey lines that call another `game-mode.ps1`. The minimal
-hotkey file `%USERPROFILE%\.config\mochi\gamemode\whkdrc` is written the first
-time game mode runs. whkd has to be on the PATH, or given with `-WhkdPath`,
-otherwise only the tiling pause is toggled.
 
 ## 4. Switch over
 
 Stop your current window manager and its hotkey daemon, then:
 
 ```
-$env:WHKD_CONFIG_HOME = "$env:USERPROFILE\.config\mochi"; mochic start --whkd
+mochic start
 ```
 
 Only one window manager may run at a time. Stopping the old one first also
-restores the windows it managed before Mochi takes over.
+restores the windows it managed before Mochi takes over. The hotkey daemon
+matters as much: Mochi binds the keys itself, so a key left bound in both places
+fires both bindings.
 
 ## 5. Autostart
 
 `scripts\autostart.ps1` registers a HKCU Run value called `Mochi` that runs
-`mochic start --whkd` with `WHKD_CONFIG_HOME` set, through a hidden PowerShell
-launcher so no console flashes at login.
+`mochic start` through a hidden PowerShell launcher, so no console flashes at
+login.
 
 If your current setup starts at login from a shortcut in the Startup folder,
 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\<name>.lnk`, the same
@@ -118,13 +123,13 @@ removed the same way.
 ## Going back
 
 ```
-mochic stop --whkd
-Remove-Item Env:WHKD_CONFIG_HOME -ErrorAction SilentlyContinue
+mochic stop
 ```
 
-then start your previous window manager and its hotkey daemon again. Without
-`WHKD_CONFIG_HOME`, whkd reads `%USERPROFILE%\.config\whkdrc` again, which still
-calls the old CLI name.
+then start your previous window manager again, and whatever it used for its
+hotkeys. In that order: while Mochi is running it is binding the keys itself.
+The old file is where it always was and still calls the old CLI name, because
+the import only ever wrote a copy.
 
 For the autostart:
 
@@ -139,6 +144,6 @@ And to remove Mochi completely:
 .\scripts\install.ps1 -Uninstall
 ```
 
-That deletes the binaries and the PATH entry. `mochi.json` and the log stay
-until they are deleted by hand. Nothing that belongs to your old setup is
-touched by the installer.
+That deletes the binaries and the PATH entry. `mochi.json`, the hotkey file and
+the log stay until they are deleted by hand. Nothing that belongs to your old
+setup is touched by the installer.
