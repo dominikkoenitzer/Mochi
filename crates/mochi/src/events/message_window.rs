@@ -39,6 +39,10 @@ mod msg {
     pub const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
     /// A power management event.
     pub const WM_POWERBROADCAST: u32 = 0x0218;
+    /// Windows is asking whether this process minds the session ending.
+    pub const WM_QUERYENDSESSION: u32 = 0x0011;
+    /// The session really is ending. `wparam` is false for a cancelled one.
+    pub const WM_ENDSESSION: u32 = 0x0016;
 
     /// `SPI_SETWORKAREA`, sent when an appbar such as the taskbar moves.
     pub const SPI_SETWORKAREA: usize = 0x002F;
@@ -81,6 +85,32 @@ unsafe extern "system" fn wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
+        // Logoff, restart and shutdown. Nothing else in the process hears
+        // about these: the console control handler's logoff and shutdown
+        // events are documented as reaching services only, and an interactive
+        // program is killed before they would fire. This hidden window is a
+        // real top-level window, so it is the one thing that does get asked,
+        // and it used to fall through to DefWindowProc, which answers "fine"
+        // and lets the process be terminated with every hidden window still
+        // cloaked and every faded window still translucent. With no second
+        // window manager on the machine there is nothing to undo that.
+        //
+        // The restore runs here, synchronously, because there is no promise of
+        // another message afterwards.
+        msg::WM_QUERYENDSESSION => {
+            tracing::warn!("the session is ending, putting the windows back");
+            crate::safety::restore_all();
+            LRESULT(1)
+        }
+        msg::WM_ENDSESSION => {
+            // Only when it really is ending; wparam is false for a session end
+            // that something else cancelled, and then the windows are wanted
+            // back under management, which the next retile does.
+            if wparam.0 != 0 {
+                crate::safety::restore_all();
+            }
+            LRESULT(0)
+        }
         msg::WM_DISPLAYCHANGE => {
             emit(Event::Monitors(MonitorEventKind::DisplayChange));
             LRESULT(0)

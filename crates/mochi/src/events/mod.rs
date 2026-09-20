@@ -171,6 +171,13 @@ pub enum ShutdownReason {
     Command,
     /// Ctrl-C or a console close.
     Signal,
+    /// The IPC acceptor could not carry on.
+    ///
+    /// Without a pipe there is no `mochic stop`, and `mochic stop` is how the
+    /// desktop gets its windows back. A daemon that keeps tiling with no way
+    /// to reach it is strictly worse than one that exits, because exiting runs
+    /// the restore path.
+    IpcLost,
 }
 
 /// The one-shot channel a command handler answers on.
