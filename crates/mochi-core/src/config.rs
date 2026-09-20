@@ -648,13 +648,45 @@ impl Config {
             if let Some(limit) = monitor_config.window_based_work_area_offset_limit {
                 monitor.window_based_work_area_offset_limit = limit;
             }
-            monitor.ensure_workspaces(monitor_config.workspaces.len());
-            for (workspace_idx, workspace_config) in monitor_config.workspaces.iter().enumerate() {
-                if let Some(workspace) = monitor.workspaces_mut().get_mut(workspace_idx) {
-                    workspace_config.apply_to(workspace);
-                }
-            }
+            configure_monitor(monitor_config, monitor);
         }
+    }
+
+    /// Configures one monitor from whichever entry assigns to it.
+    ///
+    /// For a display that has just been attached. [`Config::apply_to`] shapes
+    /// every monitor at once, which is right when the configuration is being
+    /// loaded and wrong on a display change: it would put every workspace back
+    /// to its configured layout and padding, throwing away what a `mochic`
+    /// command had set on screens that were never unplugged.
+    ///
+    /// Returns false when no entry configures this monitor, so the caller can
+    /// fall back to something better than a single empty workspace.
+    pub fn apply_to_monitor(&self, state: &mut State, monitor_idx: usize) -> bool {
+        let assignments = self.monitor_assignments(state);
+        let Some(entry) = assignments
+            .iter()
+            .position(|slot| *slot == Some(monitor_idx))
+        else {
+            return false;
+        };
+        let Some(monitor_config) = self.monitors.iter().flatten().nth(entry) else {
+            return false;
+        };
+        let Some(monitor) = state.monitors_mut().get_mut(monitor_idx) else {
+            return false;
+        };
+        if monitor_config.work_area_offset.is_some() {
+            monitor.work_area_offset = monitor_config.work_area_offset;
+        }
+        if monitor_config.window_based_work_area_offset.is_some() {
+            monitor.window_based_work_area_offset = monitor_config.window_based_work_area_offset;
+        }
+        if let Some(limit) = monitor_config.window_based_work_area_offset_limit {
+            monitor.window_based_work_area_offset_limit = limit;
+        }
+        configure_monitor(monitor_config, monitor);
+        true
     }
 
     /// Resolves which monitor of `state` each `monitors` entry configures.
@@ -773,6 +805,16 @@ fn names_display(monitor: &Monitor, id: &str) -> bool {
 pub fn json_schema() -> String {
     let schema = schemars::schema_for!(Config);
     serde_json::to_string_pretty(&schema).unwrap_or_else(|_| "{\"type\":\"object\"}".to_string())
+}
+
+/// Gives a monitor the workspaces its entry describes.
+fn configure_monitor(monitor_config: &MonitorConfig, monitor: &mut crate::model::Monitor) {
+    monitor.ensure_workspaces(monitor_config.workspaces.len());
+    for (workspace_idx, workspace_config) in monitor_config.workspaces.iter().enumerate() {
+        if let Some(workspace) = monitor.workspaces_mut().get_mut(workspace_idx) {
+            workspace_config.apply_to(workspace);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -49,6 +49,18 @@ fn allowed() -> Option<String> {
     if daemon_binary().is_none() {
         return Some("the mochi binary was not built".to_owned());
     }
+    if mochi_client::is_running() {
+        // Not a warning, a refusal. There is one pipe, so a daemon started
+        // here is refused by the single instance mutex and every `Stop` this
+        // suite sends lands on the daemon that already holds it: the user's.
+        // That is not a flaky test, it is the suite reaching out and turning
+        // off the window manager somebody is working in, which is exactly what
+        // it did on 2026-09-20.
+        return Some(
+            "a mochi daemon is already running, and this suite would stop it; stop it first"
+                .to_owned(),
+        );
+    }
     None
 }
 
@@ -135,6 +147,12 @@ impl Daemon {
 
     /// Asks the daemon to stop and waits for the pipe to go away.
     fn stop(&mut self) {
+        // Only ever stop the daemon this struct started. Once our own child is
+        // gone, whatever still answers on the pipe belongs to somebody else.
+        if self.child.try_wait().is_ok_and(|exited| exited.is_some()) {
+            let _ = self.child.wait();
+            return;
+        }
         if mochi_client::is_running() {
             let _ = send(&Command::Stop);
         }
