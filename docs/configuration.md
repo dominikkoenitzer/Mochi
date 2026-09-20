@@ -56,8 +56,8 @@ mochic schema > mochi.schema.json
 | `work_area_offset` | offset object | none | Pixels taken off every monitor's work area, to leave room for something else on screen. |
 | `global_work_area_offset` | offset object | none | The other spelling the existing config format uses for the same thing. `work_area_offset` wins when both are present. |
 | `unmanaged_window_operation_behaviour` | `Op`, `NoOp` | `Op` | Whether commands still act when the focused window is not managed. |
-| `monitor_index_preferences` | object | none | Monitor index to rect, pins an index to the screen at that position. |
-| `display_index_preferences` | object | none | Monitor index to display id, pins an index to a physical display. |
+| `monitor_index_preferences` | object | none | Monitor index to rect, pins an entry to the screen at that position. See below. |
+| `display_index_preferences` | object | none | Monitor index to display id, pins an entry to a physical display. See below. |
 
 ## focus_follows_mouse
 
@@ -100,6 +100,41 @@ validating and keeps its rules; they change no behaviour today.
 
 `ignore_rules`, `manage_rules`, `floating_applications` and
 `transparency_ignore_rules` are the four that are acted on.
+
+## Pinning a monitor
+
+Without one of these, the first `monitors` entry configures whatever screen
+Windows enumerated first. That order is not stable: a DisplayPort renegotiation,
+a monitor waking in a different sequence, or a cable in another socket can swap
+it, and then every workspace, padding and layout lands on the wrong screen.
+
+```json
+"monitor_index_preferences": {
+  "0": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 },
+  "1": { "left": 3840, "top": 0, "right": 4920, "bottom": 1920 }
+}
+```
+
+Read the rectangles out of `mochic state` with every screen attached, and use
+each monitor's own `size`. A rectangle survives a reboot and a renegotiation; it
+does not survive moving a screen in the display settings or changing its
+resolution, so update it if you do either.
+
+`display_index_preferences` maps the same indices to a display identifier
+instead, which is preferable when it works, because it survives a move as well.
+Check yours first: it is the `device_id` field in `mochic state`, and it comes
+from the display driver. Windows very often reports `Generic PnP Monitor` for
+every panel, and two panels reporting the same string cannot be told apart, so
+if that is what you see, pin by rectangle.
+
+An entry whose display or rectangle is not attached configures nothing at all
+rather than falling back to the screen that happens to be there. That is the
+point: applying a portrait panel's workspaces to a landscape one is the failure
+being prevented, not a lesser outcome. The entry takes effect at the next
+configuration load once its screen is back.
+
+An entry that names neither key keeps the old behaviour and takes the screen at
+its own position, among those no pin has claimed.
 
 ## border_colours
 
