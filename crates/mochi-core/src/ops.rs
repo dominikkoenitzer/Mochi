@@ -841,6 +841,17 @@ impl State {
             Direction::Up => (Axis::Vertical, false),
             Direction::Down => (Axis::Vertical, true),
         };
+
+        // The edge chosen above is in model space, and the layout is mirrored
+        // afterwards. Everything else in the model is screen relative: focus
+        // and move in a direction read the post-flip rectangles, so on a
+        // flipped workspace `resize-edge right` grew the container on its
+        // screen-left side and the two bindings were effectively swapped.
+        let far_edge = far_edge
+            != match axis {
+                Axis::Horizontal => target.layout_flip.horizontal,
+                Axis::Vertical => target.layout_flip.vertical,
+            };
         let next = Self::nudged(original.unwrap_or_default(), axis, far_edge, delta);
         target.set_resize_dimension(idx, Some(next));
         target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
@@ -1897,6 +1908,35 @@ mod tests {
         let changes = state.unstack().unwrap();
         assert_eq!(state.workspace(0, 0).unwrap().containers().len(), 2);
         assert!(changes.show.contains(&WindowId(2)));
+    }
+
+    #[test]
+    fn resize_edge_moves_the_edge_the_key_points_at_even_when_flipped() {
+        let mut state = with_windows(3);
+        state.change_layout(Layout::Columns).unwrap();
+        state.flip_layout(Axis::Horizontal).unwrap();
+        state.focus_window(WindowId(2)).unwrap();
+
+        let idx = state.workspace(0, 0).unwrap().focused_container_idx();
+        let before = state.workspace(0, 0).unwrap().latest_layout()[idx];
+
+        state
+            .resize_edge(Direction::Right, Sizing::Increase)
+            .unwrap();
+        let after = state.workspace(0, 0).unwrap().latest_layout()[idx];
+
+        // The edge is chosen in model space and the layout is mirrored after
+        // it, so on a flipped workspace this key used to move the container's
+        // screen-LEFT boundary: "resize right" and "resize left" were swapped.
+        // Everything else in the model is screen relative.
+        assert_eq!(
+            after.left, before.left,
+            "resize-edge right moved the left edge: {before:?} -> {after:?}"
+        );
+        assert!(
+            after.right > before.right,
+            "the right edge did not grow: {before:?} -> {after:?}"
+        );
     }
 
     #[test]

@@ -1949,9 +1949,16 @@ impl WindowManager {
         use mochi_client as wire;
 
         let response = match command {
-            Command::State => Response::State {
-                state: snapshot(&self.session, &self.core, self.foreground),
-            },
+            Command::State => {
+                // Refreshed here, not only when a subscribe command arrives.
+                // The fan-out thread drops a subscriber whose pipe has died,
+                // and the copy this document reports never heard about it, so
+                // `mochic state` listed bars that were gone for good.
+                self.session.subscribers = self.subscribers.names().to_vec();
+                Response::State {
+                    state: snapshot(&self.session, &self.core, self.foreground),
+                }
+            }
             Command::Query { target } => self.query(target),
             Command::Stop => {
                 tracing::info!("stop requested");
