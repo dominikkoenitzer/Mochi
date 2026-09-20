@@ -751,10 +751,14 @@ impl Config {
     ///
     /// The value is compared against [`Monitor::device_id`], then
     /// [`Monitor::name`], then [`Monitor::device`]. Those are the identifiers
-    /// the model already recognises a display by, in the order
-    /// [`State::reconcile_monitors`] prefers them, so a pin cannot name a
-    /// different display than the one the daemon carried across a
-    /// reconfiguration.
+    /// the model already recognises a display by, most stable first.
+    ///
+    /// Note that this is *not* the order the daemon carries monitors across a
+    /// reconfiguration in. That is done by rectangle first, because a model
+    /// name is not unique: on a machine whose panels all report `Generic PnP
+    /// Monitor` it matches every one of them, so it cannot tell them apart.
+    /// A pin is matched here, where the user named a specific string on
+    /// purpose; the carry is matched on geometry, where nobody did.
     ///
     /// [`Monitor::device_id`] is `EnumDisplayDevicesW`'s `DeviceString`, which
     /// is a model name such as `Odyssey G8` or `Generic PnP Monitor` and never

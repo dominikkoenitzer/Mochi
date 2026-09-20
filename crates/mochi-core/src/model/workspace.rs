@@ -684,8 +684,9 @@ impl Workspace {
     /// taking in the windows of a display that was unplugged does not steal
     /// it.
     ///
-    /// This is how [`crate::State::reconcile_monitors`] rescues the windows
-    /// of a monitor that is gone.
+    /// This is how the daemon rescues the windows of a monitor that is gone,
+    /// workspace by workspace rather than window by window, so the containers,
+    /// the stacks and the floating list survive the unplug.
     pub fn absorb(&mut self, other: Workspace) {
         let restore = self.containers.focused_idx();
         let had_containers = !self.containers.is_empty();
