@@ -1785,66 +1785,60 @@ impl WindowManager {
         }
 
         // Whatever was left behind on a monitor that is gone.
-        let orphans: Vec<(usize, Window)> = previous
+        //
+        // Taken workspace by workspace, not window by window. Flattening the
+        // vanished monitor through `all_windows` and re-adding each window
+        // destroyed everything about how they were arranged: a stack of three
+        // became three containers, a window floated by hand came back tiled
+        // because no rule said to float it, and with `Append` behaviour the
+        // whole screen collapsed into one stack. `Workspace::absorb` keeps the
+        // containers, the stacks, the floating list and the modes, which is
+        // what the model's own reconcile path has always done.
+        let vanished: Vec<Monitor> = previous;
+        let carried: usize = vanished
             .iter()
-            .flat_map(|monitor| {
-                monitor
-                    .workspaces()
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(idx, workspace)| {
-                        workspace.all_windows().map(move |w| (idx, w.clone()))
-                    })
-            })
-            .collect();
-        if !orphans.is_empty() {
+            .flat_map(|monitor| monitor.workspaces().iter())
+            .map(|workspace| workspace.all_windows().count())
+            .sum();
+        if carried > 0 {
             tracing::warn!(
-                count = orphans.len(),
+                count = carried,
                 "rehoming windows from a monitor that went away"
             );
         }
-        // The change set matters here. A window that lands on a workspace
-        // nobody is looking at has to be taken off screen, and this is the only
-        // thing that will do it: the retile that follows a display change only
-        // ever shows windows, it never hides one. Dropping these changes left
-        // the window on screen, untiled, over the surviving monitor's layout,
-        // while the model recorded it as hidden.
-        let mut rehomed = Changes::none();
-        for (workspace, window) in orphans {
-            let id = window.id;
-            if let Some(first) = self.core.monitors_mut().get_mut(0) {
-                first.ensure_workspaces(workspace + 1);
-            }
-            match self.core.add_window_to(0, workspace, window) {
-                Ok(changes) => rehomed.merge(changes),
-                Err(e) => tracing::error!(%id, error = %e, "could not rehome a window"),
-            }
-            // A rule can refuse the window outright, and then nothing holds it
-            // any more. If Mochi had it off screen, this is the last moment
-            // anything knows to give it back.
-            if self.core.window(id).is_none() {
-                let hwnd = handle(id);
-                let behaviour = match self.hidden.lock() {
-                    Ok(mut hidden) => hidden.show(hwnd),
-                    Err(_) => None,
+        for mut gone in vanished {
+            for (idx, workspace) in std::mem::take(gone.workspaces_mut())
+                .into_vec()
+                .into_iter()
+                .enumerate()
+            {
+                let Some(survivor) = self.core.monitors_mut().get_mut(0) else {
+                    continue;
                 };
-                if let Some(behaviour) = behaviour {
-                    tracing::warn!(%id, "a rehomed window was refused, giving it back");
-                    let result = match behaviour {
-                        HidingBehaviour::Cloak => self.platform.set_cloaked(hwnd, false),
-                        HidingBehaviour::Minimize => self.platform.show(hwnd, ShowState::Restore),
-                        HidingBehaviour::Hide => {
-                            self.platform.show(hwnd, ShowState::ShowNoActivate)
-                        }
-                    };
-                    if let Err(e) = result {
-                        tracing::error!(%id, error = %e, "could not give it back");
-                    }
+                survivor.ensure_workspaces(idx + 1);
+                if let Some(target) = survivor.workspaces_mut().get_mut(idx) {
+                    target.absorb(workspace);
                 }
             }
         }
-        rehomed.settle();
-        self.apply_changes(rehomed);
+
+        // Then make the screen agree about what is off it. The retile that
+        // follows a display change only ever shows a window, so without this
+        // everything that arrived on a workspace nobody is looking at stayed
+        // on screen, untiled, over the surviving monitor's layout, while the
+        // model recorded it as hidden.
+        if carried > 0 {
+            let visible: std::collections::BTreeSet<_> =
+                self.core.visible_window_ids().into_iter().collect();
+            let mut settling = Changes::none();
+            for id in self.core.all_window_ids() {
+                if !visible.contains(&id) {
+                    settling.hide.push(id);
+                }
+            }
+            settling.settle();
+            self.apply_changes(settling);
+        }
 
         if let Some(idx) = focused_area.and_then(|area| {
             self.core
@@ -4037,6 +4031,55 @@ mod tests {
         wm.hotkey_candidates = Vec::new();
         assert!(wm.is_the_hotkey_file(&named));
         assert!(!wm.is_the_hotkey_file(&std::env::temp_dir().join("whkdrc")));
+    }
+
+    #[test]
+    fn unplugging_a_screen_keeps_the_stacks_and_the_floating_windows() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+
+        // Two windows stacked together, and one floated by hand, on the screen
+        // that is about to go away.
+        for hwnd in [7, 8, 9] {
+            let mut w = window(hwnd, "On the portrait screen");
+            w.monitor = Some(MonitorId(2));
+            wm.manage(&w);
+        }
+        wm.handle_command(Command::FocusStackWindow { index: 0 });
+        wm.handle_command(Command::StackAll);
+        assert_eq!(wm.state().workspace(1, 0).unwrap().containers().len(), 1);
+        wm.handle_command(Command::ToggleFloat);
+        assert_eq!(
+            wm.state().workspace(1, 0).unwrap().floating_windows().len(),
+            1
+        );
+
+        platform.set_monitors(vec![main_screen()]);
+        wm.refresh_monitors();
+
+        // Rehoming used to flatten the vanished screen window by window and
+        // re-ask the rules about each one, so a stack of three came back as
+        // three containers and a hand-floated window came back tiled, because
+        // no rule ever said to float it.
+        let survivor = wm.state().workspace(0, 0).unwrap();
+        assert_eq!(
+            survivor.floating_windows().len(),
+            1,
+            "the floating window came back tiled"
+        );
+        let biggest = survivor
+            .containers()
+            .iter()
+            .map(mochi_core::model::Container::len)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            biggest, 2,
+            "the stack was flattened into separate containers"
+        );
     }
 
     #[test]
