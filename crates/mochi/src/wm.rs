@@ -524,27 +524,41 @@ impl WindowManager {
         // A previous session may have been killed while windows were off
         // screen. Put those back before anything else looks at the desktop,
         // so they are enumerated and tiled like any other window.
-        let record = crate::recover::default_path();
-        let recovered = crate::recover::recover(platform.as_ref(), &record);
-        if !recovered.back.is_empty() {
-            tracing::info!(
-                count = recovered.back.len(),
-                "brought back windows a previous session left off screen"
-            );
-        }
+        // A dry run takes no window off screen, so it has nothing to record and
+        // nothing to recover. It must also not so much as open the file. The
+        // record belongs to whichever daemon is really holding windows off
+        // screen, there is exactly one of them per user, and every unit test in
+        // this module builds its manager this way: pointed at the real path, a
+        // test run replaced a live daemon's record with fake handles, and the
+        // windows that daemon genuinely had cloaked would have had nothing left
+        // on disk to bring them back the moment it stopped.
+        let mut carried = Hidden::default();
+        if session.dry_run {
+            tracing::debug!("dry run: the off-screen record is left alone");
+        } else {
+            let record = crate::recover::default_path();
+            let recovered = crate::recover::recover(platform.as_ref(), &record);
+            if !recovered.back.is_empty() {
+                tracing::info!(
+                    count = recovered.back.len(),
+                    "brought back windows a previous session left off screen"
+                );
+            }
 
-        // Whatever the recovery could not finish is adopted, not started over.
-        // A fresh record rewrites the file on its first hide, and the entries
-        // the last session was still owed were the only thing that knew those
-        // windows exist: not in the model, not enumerable while cloaked, and
-        // gone from disk the moment any other window went off screen.
-        let mut carried = Hidden::with_record(record);
-        if !recovered.unfinished.is_empty() {
-            tracing::warn!(
-                count = recovered.unfinished.len(),
-                "still holding windows a previous session could not put back"
-            );
-            carried.adopt(recovered.unfinished);
+            // Whatever the recovery could not finish is adopted, not started
+            // over. A fresh record rewrites the file on its first hide, and the
+            // entries the last session was still owed were the only thing that
+            // knew those windows exist: not in the model, not enumerable while
+            // cloaked, and gone from disk the moment any other window went off
+            // screen.
+            carried = Hidden::with_record(record);
+            if !recovered.unfinished.is_empty() {
+                tracing::warn!(
+                    count = recovered.unfinished.len(),
+                    "still holding windows a previous session could not put back"
+                );
+                carried.adopt(recovered.unfinished);
+            }
         }
         let hidden = Arc::new(Mutex::new(carried));
         let visuals = crate::visuals::Visuals::new(Arc::clone(&platform), Arc::clone(&hidden));
@@ -3775,6 +3789,29 @@ mod tests {
             "a dead window was chased with an uncloak"
         );
         assert!(!wm.hidden().lock().unwrap().contains(Hwnd(1)));
+    }
+
+    #[test]
+    fn a_dry_run_never_touches_the_real_off_screen_record() {
+        // There is one record per user and the running daemon owns it. A dry
+        // run cloaks nothing, so it has nothing to put there, and every test in
+        // this module builds its manager this way: while this pointed at the
+        // real path, running the suite overwrote a live daemon's record with
+        // fake handles, leaving the windows it had genuinely cloaked with
+        // nothing on disk to bring them back.
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        assert!(
+            wm.hidden().lock().unwrap().record.is_none(),
+            "a dry run is mirroring to the record the real daemon owns"
+        );
+
+        // Still true once something has actually been hidden.
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert_eq!(wm.hidden().lock().unwrap().len(), 2, "it did hide them");
+        assert!(
+            wm.hidden().lock().unwrap().record.is_none(),
+            "hiding a window gave the dry run a record to write"
+        );
     }
 
     #[test]
