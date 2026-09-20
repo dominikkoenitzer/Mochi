@@ -85,6 +85,11 @@ impl<P: Platform> Platform for DryRunPlatform<P> {
         Ok(())
     }
 
+    fn focus_desktop(&self) -> Result<()> {
+        tracing::info!("dry-run: focus the desktop");
+        Ok(())
+    }
+
     fn close(&self, hwnd: Hwnd) -> Result<()> {
         tracing::info!(%hwnd, "dry-run: close");
         Ok(())
