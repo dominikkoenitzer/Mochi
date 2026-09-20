@@ -45,6 +45,7 @@ The groups below follow the order of the hotkey file.
 | `unstack` | none | Pull the focused window out of its stack. |
 | `stack-all` | none | Collapse the whole workspace into one stack, keeping the focused window in front. Floating windows are left alone. |
 | `unstack-all` | none | Give every stacked window its own container again, in the order they were stacked. The window you were looking at keeps the focus. |
+| `focus-stack-window` | index | Focus the window at that position in the focused stack, counting from zero. What `cycle-stack` does one step at a time. An index past the end does nothing rather than wrapping. |
 
 ## Resize
 
@@ -118,6 +119,11 @@ in [hotkeys.md](hotkeys.md).
 | `schema` | none | Print the JSON schema of the config file. |
 | `focus-follows-mouse` | `enable` \| `disable` | Focus whatever the cursor moves over. |
 | `mouse-follows-focus` | `enable` \| `disable` | Warp the cursor to a newly focused window. |
+| `window-container-behaviour` | `create` \| `append` | Whether a new window gets a container of its own or stacks onto the focused one. |
+| `toggle-window-container-behaviour` | none | Switch between the two, for a key that turns auto-stacking on while you fill a workspace and off again. |
+| `cross-monitor-move-behaviour` | `swap` \| `insert` \| `no-op` | What moving a container past a monitor edge does. |
+| `window-hiding-behaviour` | `hide` \| `minimize` \| `cloak` | How a window on an inactive workspace is taken off screen. Windows already off screen keep the method they were hidden with, so changing this mid-session cannot strand one. |
+| `unmanaged-window-operation-behaviour` | `op` \| `no-op` | Whether a command aimed at a window Mochi does not manage runs anyway or is refused. |
 | `border` | `enable` \| `disable` | Turn the focus border on or off. |
 | `border-width` | width | Border thickness in physical pixels. It is not scaled by DPI, so 6 is six pixels on the 4K monitor and on the 1080p one. |
 | `border-offset` | offset | How far the border sits outside the frame, in physical pixels too. |
