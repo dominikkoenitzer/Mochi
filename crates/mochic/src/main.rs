@@ -653,6 +653,17 @@ fn check_app_rules_text(label: &str, text: &str) -> Findings {
         "{} rules read from the application file",
         sets.len()
     ));
+    // Two of the lists are accepted so a file written for another window
+    // manager loads unchanged, and then nothing reads them: Mochi does not
+    // reject layered windows, so a whitelist of them has nothing to overrule,
+    // and it does not compensate an overflowing border. Counting them as
+    // rules and saying nothing told the user they were live.
+    let inert = sets.layered_whitelist.len() + sets.border_overflow_applications.len();
+    if inert > 0 {
+        found.notes.push(format!(
+            "{inert} of them are in lists Mochi accepts but never acts on (layered, border_overflow)"
+        ));
+    }
     // A mistyped list name parses into no rules at all, because every list
     // defaults to empty, so nothing else would ever mention it.
     found
