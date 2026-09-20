@@ -279,6 +279,7 @@ dependencies = [
  "embed-manifest",
  "mochi-client",
  "mochi-core",
+ "mochi-hotkey",
  "mochi-render",
  "mochi-testbed",
  "notify",
@@ -314,6 +315,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mochi-hotkey"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "mochi-client",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "mochi-render"
 version = "0.1.0"
 dependencies = [
@@ -343,6 +354,7 @@ dependencies = [
  "clap",
  "mochi-client",
  "mochi-core",
+ "mochi-hotkey",
  "serde_json",
 ]
 
