@@ -13,13 +13,21 @@ next to the old ones and the switch is reversible.
 | its daemon | `mochi.exe` |
 | its command line client | `mochic.exe` |
 | its separate hotkey daemon | nothing to install, `mochi.exe` binds the keys |
-| `%USERPROFILE%\.config\whkdrc` | `%USERPROFILE%\.config\mochi\hotkeys` |
+| `%USERPROFILE%\.config\mochi\whkdrc` | `%USERPROFILE%\.config\mochi\hotkeys` |
 | `applications.json` | same file, keep `app_specific_configuration_path` |
 | its log file | `%LOCALAPPDATA%\mochi\mochi.log` |
 
+`%USERPROFILE%\.config\mochi\whkdrc` is the one other name Mochi looks for by
+itself, for a desktop that kept the old file name in the new folder. A hotkey
+file anywhere else, `%USERPROFILE%\.config\whkdrc` for instance, is not found
+on its own: the import below copies it into place, or the daemon is pointed at
+it with `--hotkeys`.
+
 Anything that read the old daemon's event pipe has no counterpart. It goes
-dark while Mochi is the window manager. Mochi's own event subscriptions are
-`mochic subscribe-pipe`, so a script can follow along.
+dark while Mochi is the window manager. Mochi's own events come out of
+`mochic subscribe <name>`, one JSON line at a time on stdout, so a script can
+follow along. A program that would rather own the pipe itself uses
+`mochic subscribe-pipe`; both are in [cli.md](cli.md).
 
 ## 1. Install
 

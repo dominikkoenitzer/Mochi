@@ -6,7 +6,10 @@ existing whkdrc imports by replacing the program name. See
 [import.md](import.md).
 
 Enum arguments are kebab-case on the command line (`bsp`, `ease-out-quad`)
-while the same values are PascalCase in `mochi.json`.
+while the same values are PascalCase in `mochi.json`. The two sets are not
+always the same size: the file accepts ten matching strategies and the command
+line five, and `focus-follows-mouse` is `enable`/`disable` here and an
+implementation name in the file. Each of those is called out where it appears.
 
 The groups below follow the order of the hotkey file.
 
@@ -67,14 +70,15 @@ The groups below follow the order of the hotkey file.
 |---|---|---|
 | `state` | none | Print the whole daemon state as JSON. |
 | `query` | target | Print one value. Targets: `focused-monitor-index`, `focused-workspace-index`, `focused-container-index`, `focused-window-index` (the index inside the focused container), `focused-workspace-name`, `monitor-count`, `window-count`, `paused`, `dry-run`, `config-path`, `version`. |
-| `subscribe-pipe` | name | Send every event to a named pipe the subscriber created, for scripts and integrations. |
+| `subscribe` | name | Create a pipe of that name, register it, and print every event to stdout as one JSON line until Ctrl-C. The one command to watch what the daemon is doing. |
+| `subscribe-pipe` | name | Send every event to a named pipe the subscriber created itself, for a bar or a service that owns its own pipe. |
 | `unsubscribe-pipe` | name | Stop sending events to that pipe. |
 
 ## Control
 
 | Command | Arguments | Does |
 |---|---|---|
-| `start` | `--config`, `--dry-run` | Start the daemon, hotkeys and all. |
+| `start` | `--config PATH`, `--hotkeys PATH`, `--no-hotkeys`, `--dry-run` | Start the daemon, hotkeys and all. Every switch is handed straight to `mochi`; they mean what the table under "Daemon switches" says. |
 | `stop` | none | Restore every managed window, then exit. |
 | `toggle-pause` | none | Stop and resume management without exiting. |
 | `retile` | none | Recompute and apply every layout. |
@@ -100,10 +104,10 @@ in [hotkeys.md](hotkeys.md).
 | `focus-follows-mouse` | `enable` \| `disable` | Focus whatever the cursor moves over. |
 | `mouse-follows-focus` | `enable` \| `disable` | Warp the cursor to a newly focused window. |
 | `border` | `enable` \| `disable` | Turn the focus border on or off. |
-| `border-width` | width | Border thickness in logical pixels. |
-| `border-offset` | offset | How far the border sits outside the frame. |
+| `border-width` | width | Border thickness in physical pixels. It is not scaled by DPI, so 6 is six pixels on the 4K monitor and on the 1080p one. |
+| `border-offset` | offset | How far the border sits outside the frame, in physical pixels too. |
 | `border-style` | `system` \| `rounded` \| `square` | Border corner shape. |
-| `border-colour` | `--kind` `single` \| `stack` \| `monocle` \| `floating` \| `unfocused`, r, g, b | Border colour for one kind of window. |
+| `border-colour` | r, g, b, `--window-kind` `single` \| `stack` \| `monocle` \| `floating` \| `unfocused` | Border colour for one kind of window. The three channels are positional, the kind is the option and defaults to `single`. |
 | `toggle-transparency` | none | Turn transparency for unfocused windows on or off. |
 | `animation` | `enable` \| `disable` | Turn move and resize animations on or off. |
 | `animation-duration` | milliseconds | Length of one animation. |
@@ -115,6 +119,12 @@ in [hotkeys.md](hotkeys.md).
 Rules added with `float-rule` and `ignore-rule` live until the daemon stops or
 the configuration is reloaded. Put the permanent ones in `mochi.json`.
 
+`--matching-strategy` takes `equals` (the default), `contains`, `starts-with`,
+`ends-with` or `regex`. The file knows ten strategies and the command line only
+these five: `Legacy`, `DoesNotEqual`, `DoesNotStartWith`, `DoesNotEndWith` and
+`DoesNotContain` have no spelling here, so a rule that needs one of them belongs
+in `mochi.json`. [configuration.md](configuration.md) lists all ten.
+
 ## Daemon switches
 
 `mochic` talks to a running daemon; these are arguments to `mochi` itself.
@@ -122,10 +132,15 @@ the configuration is reloaded. Put the permanent ones in `mochi.json`.
 | Switch | Does |
 |---|---|
 | `--config PATH` | Use this file instead of `$MOCHI_CONFIG` or `%USERPROFILE%\mochi.json`. |
+| `--hotkeys PATH` | Bind this hotkey file instead of `$MOCHI_HOTKEYS` or the default path. See [hotkeys.md](hotkeys.md). |
+| `--no-hotkeys` | Bind no keys at all, for a desktop that drives Mochi from something else. Conflicts with `--hotkeys`. |
 | `--dry-run` | Read everything, move nothing: every write becomes a log line. The only safe way to run Mochi next to another window manager. |
 | `--manage-class CLASS` | Manage only windows of that class, even when they are tool windows, and leave every other window alone. May be repeated. This is the switch `crates/mochi-testbed` needs; see its README. |
 
 ## Exit codes
 
-`0` when the daemon accepted the command, `1` when it answered with an error or
-was not reachable. The error message goes to stderr.
+| Code | When |
+|---|---|
+| `0` | The daemon accepted the command. |
+| `1` | The daemon answered with an error, or was not reachable. The message goes to stderr. |
+| `2` | The command line itself was wrong: an unknown command, a missing argument, a value outside the list. This one comes from the argument parser before anything is sent, so the message is a usage hint rather than an answer from the daemon. |

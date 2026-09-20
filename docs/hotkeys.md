@@ -71,13 +71,50 @@ alt + b                 : [console]::beep(440,200)
 
 ### Key names
 
-Letters and digits by themselves; `f1` to `f24`; the arrows as `left`, `right`,
-`up`, `down`; `space`, `return` (`enter`), `tab`, `esc`, `backspace`, `delete`,
-`insert`, `home`, `end`, `pageup`, `pagedown`; `numpad0` to `numpad9` and the
-numpad operators; the punctuation keys by name (`comma`, `period`, `slash`,
-`semicolon`, `quote`, `backtick`, `lbracket`, `rbracket`, `minus`, `plus`); the
-media and volume keys; `apps`. `mochic hotkeys` prints what Mochi made of the
-file, which is the fastest way to check a name.
+These are the canonical names, the spelling `mochic hotkeys` prints back:
+
+| Group | Names |
+|---|---|
+| Letters and digits | `a` to `z`, `0` to `9` |
+| Function keys | `f1` to `f24` |
+| Arrows | `left`, `right`, `up`, `down` |
+| Editing and navigation | `space`, `enter`, `tab`, `esc`, `backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown` |
+| Locks and system | `pause`, `capslock`, `printscreen`, `scrolllock`, `apps` |
+| Numeric keypad | `numpad0` to `numpad9`, `multiply`, `add`, `subtract`, `decimal`, `divide` |
+| Punctuation | `semicolon`, `plus`, `comma`, `minus`, `period`, `slash`, `backtick`, `lbracket`, `backslash`, `rbracket`, `quote`, `oem_8` |
+| Media and volume | `volumemute`, `volumedown`, `volumeup`, `medianext`, `mediaprev`, `mediastop`, `mediaplaypause` |
+| Browser | `browserback`, `browserforward`, `browserrefresh`, `browserstop`, `browsersearch`, `browserfavorites`, `browserhome` |
+| Launch | `launchmail`, `launchmedia`, `launchapp1`, `launchapp2` |
+
+The punctuation names are the US engraving of each Windows OEM code, because
+that is what Windows reports whatever the layout says. On a Swiss or German
+keyboard `backslash` is the key Windows calls `VK_OEM_5`, wherever the
+engraving puts it, and `oem_8` has no US label at all.
+
+These spellings are accepted as well and come back as the canonical one:
+
+| Alias | Canonical |
+|---|---|
+| `return` | `enter` |
+| `escape` | `esc` |
+| `pgup` | `pageup` |
+| `pgdn` | `pagedown` |
+| `del` | `delete` |
+| `grave` | `backtick` |
+| `oem_1` | `semicolon` |
+| `oem_2` | `slash` |
+| `oem_3` | `backtick` |
+| `oem_4` | `lbracket` |
+| `oem_5` | `backslash` |
+| `oem_6` | `rbracket` |
+| `oem_7` | `quote` |
+
+The `oem_*` aliases are there because a file written to the common hotkey file
+conventions spells punctuation by its Windows code name.
+
+The keypad Enter has no name of its own: it shares `VK_RETURN` with the main
+one and Windows tells them apart only by a flag. `mochic hotkeys` prints what
+Mochi made of the file, which is the fastest way to check a name.
 
 ## What a key press does
 
