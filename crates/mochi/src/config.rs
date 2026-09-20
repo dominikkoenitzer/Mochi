@@ -63,6 +63,24 @@ pub fn resolve_path(explicit: Option<&Path>) -> Result<PathBuf> {
     Ok(user_profile()?.join(CONFIG_FILE_NAME))
 }
 
+/// Both names the hotkey file is accepted under, in the directory it lives in.
+///
+/// Empty when the path was given explicitly: a `--hotkeys` argument names one
+/// file and nothing else counts.
+pub fn hotkey_candidates(explicit: Option<&Path>) -> Result<Vec<PathBuf>> {
+    if explicit.is_some() || std::env::var_os(HOTKEYS_ENV).is_some_and(|v| !v.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let directory = HOTKEYS_PATH
+        .iter()
+        .take(HOTKEYS_PATH.len() - 1)
+        .fold(user_profile()?, |path, part| path.join(part));
+    Ok(vec![
+        directory.join(HOTKEYS_PATH[HOTKEYS_PATH.len() - 1]),
+        directory.join(HOTKEYS_LEGACY_FILE_NAME),
+    ])
+}
+
 /// Resolves the hotkey file path.
 ///
 /// Precedence: the `--hotkeys` argument, then `MOCHI_HOTKEYS`, then
@@ -318,11 +336,27 @@ pub struct ConfigWatcher {
 impl ConfigWatcher {
     /// Starts watching. A missing file is fine, the watch fires when it appears.
     pub fn start(path: PathBuf, tx: EventSender) -> Result<Self> {
+        Self::start_watching(path, Vec::new(), tx)
+    }
+
+    /// Starts watching a file that may legitimately change its name.
+    ///
+    /// The hotkey file is read under either of two names, and renaming it from
+    /// one to the other is a thing a user does exactly once: the day they stop
+    /// carrying a file that was written for something else. Watching only the
+    /// name that happened to exist at startup means that rename is the last
+    /// event this watcher ever reports.
+    pub fn start_any(path: PathBuf, others: Vec<PathBuf>, tx: EventSender) -> Result<Self> {
+        Self::start_watching(path, others, tx)
+    }
+
+    fn start_watching(path: PathBuf, others: Vec<PathBuf>, tx: EventSender) -> Result<Self> {
         let directory = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let watched = path.clone();
+        let mut watched = vec![path.clone()];
+        watched.extend(others);
 
         let (dirty_tx, dirty_rx) = std::sync::mpsc::channel::<()>();
         let reported = path.clone();
@@ -343,7 +377,11 @@ impl ConfigWatcher {
                 ) {
                     return;
                 }
-                if !event.paths.iter().any(|p| same_file(p, &watched)) {
+                if !event
+                    .paths
+                    .iter()
+                    .any(|p| watched.iter().any(|w| same_file(p, w)))
+                {
                     return;
                 }
                 let _ = notify_dirty.send(());
