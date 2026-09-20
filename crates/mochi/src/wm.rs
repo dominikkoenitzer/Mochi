@@ -1139,6 +1139,17 @@ impl WindowManager {
             // would only ever follow a layout change.
             let targets = self.visuals_targets();
             self.visuals.update(&targets);
+        } else if self.keyboard_was_left_behind(&changes) {
+            // Nothing was named to focus and the keyboard is somewhere the user
+            // is no longer looking. Handing it to the desktop is the only thing
+            // that makes the model and the real foreground agree again.
+            if let Err(e) = self.platform.focus_desktop() {
+                tracing::debug!(error = %e, "could not take the keyboard off the old window");
+            } else {
+                self.foreground = None;
+            }
+            let targets = self.visuals_targets();
+            self.visuals.update(&targets);
         }
         if let Some(rect) = changes.warp_mouse_to
             && self.core.mouse_follows_focus
@@ -1230,6 +1241,26 @@ impl WindowManager {
     }
 
     /// Gives a window the foreground, unless it already has it.
+    /// Whether a change set that named no window to focus has stranded the
+    /// keyboard on a window the user has navigated away from.
+    ///
+    /// Two ways that happens, and the model reports neither as a focus change
+    /// because from its point of view there is simply nothing to focus:
+    ///
+    /// - the focused monitor moved to a workspace with no window on it, so the
+    ///   keyboard stays on the screen the user just left, every border goes
+    ///   unfocused, and the next thing typed lands on the other screen;
+    /// - the window holding the keyboard was just taken off screen, which is
+    ///   every switch to an empty workspace. Windows then hands the foreground
+    ///   to whatever it likes, which can be a window on another monitor.
+    fn keyboard_was_left_behind(&self, changes: &Changes) -> bool {
+        if changes.focused_monitor_changed {
+            return true;
+        }
+        self.foreground
+            .is_some_and(|held| changes.hide.iter().any(|id| handle(*id) == held))
+    }
+
     fn focus_hwnd(&mut self, hwnd: Hwnd) {
         if self.foreground == Some(hwnd) {
             return;
@@ -3151,6 +3182,8 @@ mod tests {
         cloaks: Mutex<Vec<(Hwnd, bool)>>,
         shows: Mutex<Vec<(Hwnd, ShowState)>>,
         focused: Mutex<Vec<Hwnd>>,
+        /// How many times the keyboard was handed to the desktop.
+        desktop_focus: AtomicUsize,
         placements: Mutex<Vec<(Hwnd, Rect)>>,
         history: Mutex<Vec<(Hwnd, Rect)>>,
         /// Windows that refuse to be positioned, which is what an elevated
@@ -3180,6 +3213,7 @@ mod tests {
                 cloaks: Mutex::new(Vec::new()),
                 shows: Mutex::new(Vec::new()),
                 focused: Mutex::new(Vec::new()),
+                desktop_focus: AtomicUsize::new(0),
                 placements: Mutex::new(Vec::new()),
                 history: Mutex::new(Vec::new()),
                 refuses: Mutex::new(Vec::new()),
@@ -3317,6 +3351,10 @@ mod tests {
         }
         fn focus(&self, hwnd: Hwnd) -> Result<()> {
             self.focused.lock().unwrap().push(hwnd);
+            Ok(())
+        }
+        fn focus_desktop(&self) -> Result<()> {
+            self.desktop_focus.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         fn close(&self, _hwnd: Hwnd) -> Result<()> {
@@ -4193,6 +4231,116 @@ mod tests {
         wm.hotkey_candidates = Vec::new();
         assert!(wm.is_the_hotkey_file(&named));
         assert!(!wm.is_the_hotkey_file(&std::env::temp_dir().join("whkdrc")));
+    }
+
+    #[test]
+    fn crossing_to_an_empty_screen_takes_the_keyboard_with_it() {
+        // The two-monitor case that bites in practice: windows on one screen,
+        // nothing on the other. The model moves its focused monitor and names
+        // no window to focus, because there is none. Left there, the keyboard
+        // stays on the screen the user just navigated away from while every
+        // border says nothing is focused, so the next thing typed goes into a
+        // window they are no longer looking at.
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor"), window(2, "Browser")],
+            vec![main_screen(), portrait_screen()],
+        );
+        platform.focused.lock().unwrap().clear();
+        assert_eq!(platform.desktop_focus.load(Ordering::SeqCst), 0);
+
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+
+        assert_eq!(wm.state().focused_monitor_idx(), 1, "the model did cross");
+        assert!(
+            wm.state().focused_window_id().is_none(),
+            "there is nothing on the empty screen to focus"
+        );
+        assert_eq!(
+            platform.desktop_focus.load(Ordering::SeqCst),
+            1,
+            "the keyboard was left behind on the screen with the windows"
+        );
+        assert!(
+            platform.focused.lock().unwrap().is_empty(),
+            "a window was focused on a screen that has none: {:?}",
+            platform.focused.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn switching_to_an_empty_workspace_does_not_leave_the_keyboard_on_a_cloaked_window() {
+        // The common half of the same defect, on one screen: every window of
+        // the workspace goes off screen, including the one holding the
+        // keyboard, and the model names nothing to focus because the workspace
+        // arrived at is empty. Left there, the daemon believes the foreground
+        // is a window it has just cloaked, and Windows hands the keyboard to
+        // whatever it likes, which can be a window on another monitor.
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        platform.focused.lock().unwrap().clear();
+        assert_eq!(wm.foreground, Some(Hwnd(2)), "it starts on a real window");
+
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+
+        assert_eq!(
+            platform.desktop_focus.load(Ordering::SeqCst),
+            1,
+            "the keyboard was left on a window that is now off screen"
+        );
+        assert_eq!(
+            wm.foreground, None,
+            "the daemon still believes a cloaked window holds the keyboard"
+        );
+    }
+
+    #[test]
+    fn switching_to_a_workspace_that_has_windows_leaves_the_desktop_alone() {
+        // The guard on the other side: an ordinary workspace switch names a
+        // window, so the desktop must never be touched.
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        platform.desktop_focus.store(0, Ordering::SeqCst);
+
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+
+        assert_eq!(
+            platform.desktop_focus.load(Ordering::SeqCst),
+            0,
+            "the desktop was focused although the workspace has windows"
+        );
+        assert!(wm.foreground.is_some(), "it dropped the keyboard entirely");
+    }
+
+    #[test]
+    fn crossing_to_a_screen_that_has_a_window_focuses_the_window_not_the_desktop() {
+        // The other half of the same branch: when there IS something to focus,
+        // the desktop must not be touched, or every monitor change would drop
+        // the keyboard on the way past.
+        //
+        // The window on the far screen is listed first on purpose. The last
+        // window managed is the one the fake desktop reports as foreground, and
+        // a window that is already the foreground is deliberately not focused
+        // again, so a test that crosses TO it proves nothing.
+        let mut over_there = window(7, "On the portrait screen");
+        over_there.monitor = Some(MonitorId(2));
+        let (mut wm, platform) = manager_on(
+            vec![over_there, window(1, "Editor"), window(2, "Browser")],
+            vec![main_screen(), portrait_screen()],
+        );
+        platform.focused.lock().unwrap().clear();
+
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+
+        assert_eq!(wm.state().focused_monitor_idx(), 1);
+        assert_eq!(
+            platform.desktop_focus.load(Ordering::SeqCst),
+            0,
+            "the desktop was focused although there was a window to focus"
+        );
+        assert_eq!(
+            platform.focused.lock().unwrap().as_slice(),
+            &[Hwnd(7)],
+            "the window on the other screen was not focused"
+        );
     }
 
     #[test]

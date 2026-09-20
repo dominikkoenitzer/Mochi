@@ -135,6 +135,14 @@ pub trait Platform: Send + Sync {
     /// WRITE. Brings a window to the foreground, thread-input dance included.
     fn focus(&self, hwnd: Hwnd) -> Result<()>;
 
+    /// WRITE. Takes the keyboard off every window, leaving the desktop with it.
+    ///
+    /// Used when the focused monitor moves to a workspace that has no window on
+    /// it. Nothing can be focused there, and leaving the keyboard on the window
+    /// the user just navigated away from means typing into a screen they are no
+    /// longer looking at.
+    fn focus_desktop(&self) -> Result<()>;
+
     /// WRITE. Posts `WM_CLOSE`, which asks the window to close but never forces it.
     fn close(&self, hwnd: Hwnd) -> Result<()>;
 

@@ -515,6 +515,10 @@ mod tests {
             Ok(())
         }
 
+        fn focus_desktop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
         fn close(&self, _hwnd: Hwnd) -> anyhow::Result<()> {
             Ok(())
         }
