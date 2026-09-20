@@ -708,8 +708,13 @@ impl Config {
         if let Some(limit) = monitor_config.window_based_work_area_offset_limit {
             monitor.window_based_work_area_offset_limit = limit;
         }
+        // An entry that names no workspaces configures nothing that the
+        // caller's fallback would not do better: `ensure_workspaces` only ever
+        // adds, so `ensure_workspaces(0)` is a no-op and the screen would come
+        // up with the single workspace it was born with while every other
+        // screen has nine.
         configure_monitor(monitor_config, monitor);
-        true
+        !monitor_config.workspaces.is_empty()
     }
 
     /// Resolves which monitor of `state` each `monitors` entry configures.
