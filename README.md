@@ -22,9 +22,17 @@ managers that came before it, but shares no code with any of them.
 All five milestones are done, see [PLAN.md](PLAN.md). Mochi tiles real windows
 and binds its own keys, and the proof is a test suite that drives throwaway
 windows and injects real key presses on a real desktop rather than only checking
-a model in memory: run it with `MOCHI_E2E=1`. What is still owed is real
-hardware for the cross monitor and unplugged screen paths, which so far have run
-only against a simulated second monitor.
+a model in memory. CI runs it: the end to end job fails if those tests skip,
+because a test that returns early still reports as passed.
+
+What is still owed is real hardware for the cross monitor and unplugged screen
+paths, which have only ever run against a simulated second monitor, and time on
+a desktop someone actually works in. The first supervised trial found a defect
+no test could have: a window Mochi was hiding could be forgotten without being
+uncloaked, and the shell cloak that every real application takes had never once
+run in a test, because a tool window is given no application view and every
+cloak in every test fell back to hiding. Both are fixed and both are covered
+now, which is the argument for running it rather than only testing it.
 
 What works: BSP, columns, rows, the two stacks, ultrawide and grid layouts;
 focus, move and resize by direction; workspaces and monitors, including a screen
