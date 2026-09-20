@@ -64,6 +64,69 @@ fn rows_of(bindings: &mochi_hotkey::Bindings) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The freshly loaded configuration, with every visual key the file does not
+/// carry taken from the one in force.
+///
+/// The same rule `Settings::apply` follows, applied to the copy the border,
+/// transparency and animation managers are built from, so the two cannot drift
+/// apart. A file that *does* set a key wins, which is what makes editing the
+/// file the way to undo a command.
+fn keeping_visuals(mut loaded: Config, live: &Config) -> Config {
+    loaded.border = loaded.border.or(live.border);
+    loaded.border_width = loaded.border_width.or(live.border_width);
+    loaded.border_offset = loaded.border_offset.or(live.border_offset);
+    loaded.border_style = loaded.border_style.or(live.border_style);
+    loaded.border_colours = loaded.border_colours.or(live.border_colours);
+    loaded.transparency = loaded.transparency.or(live.transparency);
+    loaded.transparency_alpha = loaded.transparency_alpha.or(live.transparency_alpha);
+
+    match (loaded.animation.as_mut(), live.animation) {
+        (Some(fresh), Some(current)) => {
+            fresh.enabled = fresh.enabled.or(current.enabled);
+            fresh.duration = fresh.duration.or(current.duration);
+            fresh.style = fresh.style.or(current.style);
+            fresh.fps = fresh.fps.or(current.fps);
+        }
+        (None, Some(current)) => loaded.animation = Some(current),
+        _ => {}
+    }
+
+    loaded
+}
+
+/// Which of the monitors we already had is the one this enumeration describes.
+///
+/// The obvious answer, the GDI device name, is the wrong one. `\\.\DISPLAY1` is
+/// whichever screen Windows is currently calling the first, and a DisplayPort
+/// renegotiation reassigns it: the panels come back in the other order, the name
+/// follows the order rather than the hardware, and a workspace carried across by
+/// name lands on the other screen. The `HMONITOR` behind it is no better, since
+/// it is not promised to survive a reconfiguration at all.
+///
+/// Geometry is what survives. Two monitors cannot occupy the same rectangle of
+/// the virtual desktop, so the rectangle identifies a screen exactly, and it is
+/// unchanged by a renegotiation that only renames things. The name and the
+/// handle are still tried afterwards, because a screen whose resolution changed
+/// or that was moved in the display settings has a new rectangle and has to be
+/// recognised by something.
+///
+/// What this cannot tell apart: two panels that swapped *places*. Their
+/// rectangles swap with them, so the workspaces stay with the position rather
+/// than following the hardware. No identifier available here decides that one.
+/// `EnumDisplayDevicesW` gives a model name, not a serial, and on plenty of
+/// machines every panel reports `Generic PnP Monitor`, this user's included.
+fn same_panel(previous: &[Monitor], info: &MonitorInfo) -> Option<usize> {
+    previous
+        .iter()
+        .position(|m| m.size == info.size)
+        .or_else(|| {
+            previous
+                .iter()
+                .position(|m| !m.device.is_empty() && m.device == info.device_name)
+        })
+        .or_else(|| previous.iter().position(|m| m.id == info.id.0))
+}
+
 /// Whether the loop keeps going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Flow {
@@ -310,6 +373,13 @@ pub struct WindowManager {
     hotkey_rows: Vec<(String, String)>,
     /// The lines of the hotkey file that did not parse.
     hotkey_errors: Vec<String>,
+    /// Every notification this manager sent, recorded in tests only.
+    ///
+    /// [`Subscribers`] writes to named pipes, so a test that has not connected
+    /// one has no way to see what went out, and "an event fired that should
+    /// not have" is exactly what the tests below check.
+    #[cfg(test)]
+    sent: Mutex<Vec<NotificationEvent>>,
 }
 
 impl WindowManager {
@@ -366,6 +436,8 @@ impl WindowManager {
             hotkey_path: None,
             hotkey_rows: Vec::new(),
             hotkey_errors: Vec::new(),
+            #[cfg(test)]
+            sent: Mutex::new(Vec::new()),
         };
 
         wm.refresh_monitors();
@@ -512,13 +584,20 @@ impl WindowManager {
             tracing::warn!(error = %broken, "a rule was dropped");
         }
         self.session.settings.apply(&loaded.config);
-        self.visual_config = loaded.config.clone();
+        // Not a plain replace. `Settings::apply` is deliberately sticky: a key
+        // the file does not mention keeps whatever a `mochic` command set. The
+        // managers are built from this second copy, so replacing it wholesale
+        // made the two disagree permanently, and they are meant to be the same
+        // answer. `mochic state` would go on reporting transparency that had
+        // just been switched off underneath it, and the next toggle would read
+        // the stale value and write the state it was already in.
+        self.visual_config = keeping_visuals(loaded.config.clone(), &self.visual_config);
         self.visuals.set_settings(&self.visual_config);
         self.session.app_config_path.clone_from(&loaded.app_path);
 
         self.workspace_rules = loaded
             .config
-            .workspace_rules()
+            .workspace_rules(&self.core)
             .into_iter()
             .map(|(monitor, workspace, rule, initial_only)| WorkspaceRule {
                 monitor,
@@ -1579,11 +1658,10 @@ impl WindowManager {
             return;
         }
 
-        let focused_device = self
-            .core
-            .focused_monitor()
-            .map(|monitor| monitor.device.clone())
-            .unwrap_or_default();
+        // Which screen had the focus, remembered the same way a monitor is
+        // carried across: by where it is, not by what Windows is calling it
+        // this time round.
+        let focused_area = self.core.focused_monitor().ok().map(|monitor| monitor.size);
 
         let mut previous = Vec::new();
         while let Some(monitor) = self.core.remove_monitor(0) {
@@ -1591,10 +1669,7 @@ impl WindowManager {
         }
 
         for info in infos {
-            let carried = previous
-                .iter()
-                .position(|m| !m.device.is_empty() && m.device == info.device_name)
-                .or_else(|| previous.iter().position(|m| m.id == info.id.0));
+            let carried = same_panel(&previous, info);
             let mut monitor = match carried {
                 Some(idx) => previous.remove(idx),
                 None => Monitor::new(info.id.0, info.size, info.work_area),
@@ -1629,11 +1704,11 @@ impl WindowManager {
             let _ = self.core.add_window_to(0, workspace, window);
         }
 
-        if let Some(idx) = self
-            .core
-            .monitors()
-            .position(|monitor| monitor.device == focused_device)
-        {
+        if let Some(idx) = focused_area.and_then(|area| {
+            self.core
+                .monitors()
+                .position(|monitor| monitor.size == area)
+        }) {
             self.core.monitors_mut().focus(idx);
         }
 
@@ -1691,21 +1766,39 @@ impl WindowManager {
     }
 
     /// The same, followed by a `layout-change` notification.
+    /// The layout and mirroring of the focused workspace, or `None` when there
+    /// is no workspace to ask.
+    fn focused_arrangement(
+        &self,
+    ) -> Option<(mochi_core::layout::Layout, mochi_core::layout::Flip)> {
+        let (monitor, workspace) = self.core.focused_indices().ok()?;
+        let target = self.core.workspace(monitor, workspace).ok()?;
+        Some((target.effective_layout(), target.layout_flip))
+    }
+
     fn run_layout_op(
         &mut self,
         op: impl FnOnce(&mut CoreState) -> mochi_core::Result<Changes>,
     ) -> Response {
+        // What the arrangement was before, so a command that asks for the
+        // layout a workspace already has does not tell every subscriber it
+        // changed. The flip is part of it: mirroring a layout keeps its name
+        // and is still a different arrangement, so a bar that redraws on this
+        // notification has to hear about it.
+        let before = self.focused_arrangement();
         let response = self.run_op(op);
         if response.is_ok()
             && let Ok((monitor, workspace)) = self.core.focused_indices()
             && let Ok(target) = self.core.workspace(monitor, workspace)
         {
-            let layout = target.effective_layout().to_string();
-            self.notify(NotificationEvent::LayoutChange {
-                monitor,
-                workspace,
-                layout,
-            });
+            let after = (target.effective_layout(), target.layout_flip);
+            if Some(after) != before {
+                self.notify(NotificationEvent::LayoutChange {
+                    monitor,
+                    workspace,
+                    layout: after.0.to_string(),
+                });
+            }
         }
         response
     }
@@ -2305,7 +2398,25 @@ impl WindowManager {
     }
 
     fn notify(&self, event: NotificationEvent) {
+        #[cfg(test)]
+        if let Ok(mut sent) = self.sent.lock() {
+            sent.push(event.clone());
+        }
         self.subscribers.notify(Notification::new(event));
+    }
+
+    /// The layouts every `layout-change` notification so far carried.
+    #[cfg(test)]
+    fn layout_changes(&self) -> Vec<String> {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                NotificationEvent::LayoutChange { layout, .. } => Some(layout.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -3608,6 +3719,112 @@ mod tests {
         assert!(
             portrait_screen().work_area.contains_rect(&rect),
             "{rect:?} is not inside the screen that came back"
+        );
+    }
+
+    #[test]
+    fn a_renegotiation_that_renames_the_displays_leaves_the_workspaces_on_their_panels() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        let moved = wm.state().focused_window_id().expect("nothing is focused");
+        wm.handle_command(Command::MoveToMonitor { index: 1 });
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        assert!(
+            wm.state()
+                .workspace(1, 0)
+                .unwrap()
+                .all_windows()
+                .any(|w| w.id == moved),
+            "the window never reached the portrait panel"
+        );
+
+        // The DisplayPort renegotiation: the same two panels, plugged into the
+        // same ports, come back with the GDI name and the handle the other one
+        // had. Nothing about either physical screen changed.
+        let mut portrait_first = portrait_screen();
+        portrait_first.device_name = r"\\.\DISPLAY1".into();
+        portrait_first.id = MonitorId(1);
+        let mut main_second = main_screen();
+        main_second.device_name = r"\\.\DISPLAY2".into();
+        main_second.id = MonitorId(2);
+        platform.set_monitors(vec![portrait_first, main_second]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+
+        let panel = wm
+            .state()
+            .monitors()
+            .position(|m| m.size == portrait_screen().size)
+            .expect("the portrait panel is gone");
+        assert!(
+            wm.state()
+                .workspace(panel, 0)
+                .unwrap()
+                .all_windows()
+                .any(|w| w.id == moved),
+            "the workspaces followed the GDI device name onto the other screen"
+        );
+        assert_eq!(
+            wm.state().focused_monitor_idx(),
+            panel,
+            "the focus followed the name rather than the screen it was on"
+        );
+    }
+
+    #[test]
+    fn a_reload_keeps_the_visuals_a_command_turned_on() {
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        wm.handle_command(Command::ToggleTransparency);
+        wm.handle_command(Command::AnimationDuration { duration: 80 });
+        assert!(wm.session.settings.transparency);
+
+        // The configuration file at this path does not exist, so it carries no
+        // visual key at all: everything the two commands set has to survive it.
+        wm.load_config().expect("a missing file is not an error");
+
+        assert!(
+            wm.session.settings.transparency,
+            "`mochic state` stopped reporting it"
+        );
+        assert_eq!(
+            wm.visual_config.transparency,
+            Some(true),
+            "the managers were rebuilt without the transparency that is on"
+        );
+        assert_eq!(wm.session.settings.animation_duration, 80);
+        assert_eq!(
+            wm.visual_config.animation.unwrap_or_default().duration,
+            Some(80),
+            "the animator was rebuilt with the default duration"
+        );
+
+        // The next toggle has to turn it off rather than be swallowed by a
+        // stale reading of a setting the reload had already switched off.
+        wm.handle_command(Command::ToggleTransparency);
+        assert!(!wm.session.settings.transparency);
+        assert_eq!(wm.visual_config.transparency, Some(false));
+    }
+
+    #[test]
+    fn a_change_layout_to_the_layout_it_already_had_announces_nothing() {
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        wm.handle_command(Command::ChangeLayout {
+            layout: mochi_client::Layout::Rows,
+        });
+        assert_eq!(
+            wm.layout_changes().len(),
+            1,
+            "a real layout change has to go out"
+        );
+
+        wm.handle_command(Command::ChangeLayout {
+            layout: mochi_client::Layout::Rows,
+        });
+        assert_eq!(
+            wm.layout_changes().len(),
+            1,
+            "a layout that did not change was announced to every subscriber"
         );
     }
 
