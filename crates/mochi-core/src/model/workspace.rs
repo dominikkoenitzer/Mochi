@@ -16,8 +16,17 @@ use super::window::{Window, WindowId};
 /// Where a window came from, so it can be put back when a mode is toggled off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 struct Restore {
-    /// The index of the container the window was in.
-    container: usize,
+    /// The window holding the spot this one came out of: the sibling it shared
+    /// a stack with, or the container it sat behind when it had a tile to
+    /// itself. `None` means it was the first container in the ring.
+    ///
+    /// A handle and not an index on purpose. The ring keeps changing shape
+    /// while a window is maximized, because windows close and containers are
+    /// promoted, stacked and inserted, and every one of those shifts the
+    /// indices to their right. An index taken before all that hands the window
+    /// back into a stranger's stack; a handle still points at the container
+    /// the user left it in.
+    anchor: Option<WindowId>,
     /// The index inside that container's stack, or in the floating list.
     window: usize,
     /// `true` when the window was alone and its container went away with it.
@@ -52,7 +61,10 @@ pub struct Workspace {
     focus_is_floating: bool,
     /// The container that is currently filling the whole workspace, if any.
     monocle_container: Option<Container>,
-    monocle_restore_idx: Option<usize>,
+    /// The window the monocled container goes back behind, or `None` when it
+    /// was the first in the ring. A handle for the same reason as
+    /// [`Restore::anchor`].
+    monocle_restore: Option<WindowId>,
     /// The window that is currently maximized, if any.
     maximized_window: Option<Window>,
     maximized_restore: Option<Restore>,
@@ -88,7 +100,7 @@ impl Default for Workspace {
             floating_windows: Ring::new(),
             focus_is_floating: false,
             monocle_container: None,
-            monocle_restore_idx: None,
+            monocle_restore: None,
             maximized_window: None,
             maximized_restore: None,
             workspace_padding: None,
@@ -569,7 +581,7 @@ impl Workspace {
                 .is_some_and(Container::is_empty)
             {
                 self.monocle_container = None;
-                self.monocle_restore_idx = None;
+                self.monocle_restore = None;
             }
             return window;
         }
@@ -665,19 +677,40 @@ impl Workspace {
 
     // -- modes --------------------------------------------------------------
 
+    /// The window holding the spot in front of the container at `idx`, so a
+    /// container that is lifted out of the ring can find its way back after
+    /// the ring has moved. `None` when it is the first container.
+    fn anchor_before(&self, idx: usize) -> Option<WindowId> {
+        idx.checked_sub(1)
+            .and_then(|previous| self.containers.get(previous))
+            .and_then(Container::focused_window_id)
+    }
+
+    /// The index right behind the container holding `anchor`: the front of the
+    /// ring when there is no anchor, the back when the anchor itself is gone.
+    fn slot_behind(&self, anchor: Option<WindowId>) -> usize {
+        match anchor {
+            None => 0,
+            Some(id) => self
+                .container_idx_for_window(id)
+                .map_or(self.containers.len(), |idx| idx + 1),
+        }
+    }
+
     /// Turns monocle mode on for the focused container, or off again.
     ///
     /// Returns `true` when monocle mode is on afterwards.
     pub fn toggle_monocle(&mut self) -> bool {
         if let Some(container) = self.monocle_container.take() {
-            let idx = self.monocle_restore_idx.take().unwrap_or(0);
-            self.insert_container(idx, container);
+            let anchor = self.monocle_restore.take();
+            let at = self.slot_behind(anchor);
+            self.insert_container(at, container);
             false
         } else {
-            let idx = self.containers.focused_idx();
+            let anchor = self.anchor_before(self.containers.focused_idx());
             if let Some(container) = self.remove_focused_container() {
                 self.monocle_container = Some(container);
-                self.monocle_restore_idx = Some(idx);
+                self.monocle_restore = anchor;
                 self.focus_is_floating = false;
                 true
             } else {
@@ -690,7 +723,8 @@ impl Workspace {
     ///
     /// Returns `true` when a window is maximized afterwards. Un-maximizing puts
     /// the window back where it came from when that spot still exists, and next
-    /// to it otherwise.
+    /// to it otherwise. Monocle mode refuses the maximize, because it already
+    /// fills the workspace and the two modes are exclusive.
     pub fn toggle_maximize(&mut self) -> bool {
         if let Some(window) = self.maximized_window.take() {
             match self.maximized_restore.take() {
@@ -703,24 +737,42 @@ impl Workspace {
                     self.focus_is_floating = true;
                 }
                 Some(Restore {
-                    container,
+                    anchor,
                     window: window_idx,
                     own_container: false,
                     ..
-                }) if container < self.containers.len() => {
-                    self.containers.focus(container);
-                    self.focus_is_floating = false;
-                    if let Some(target) = self.containers.get_mut(container) {
-                        target.insert_window(window_idx, window);
+                }) => match anchor.and_then(|id| self.container_idx_for_window(id)) {
+                    Some(idx) => {
+                        self.containers.focus(idx);
+                        self.focus_is_floating = false;
+                        if let Some(target) = self.containers.get_mut(idx) {
+                            target.insert_window(window_idx, window);
+                        }
                     }
-                }
-                Some(Restore { container, .. }) => {
-                    self.insert_container(container, Container::from_window(window));
+                    // Everything it shared the stack with is gone, so there is
+                    // no stack left to rejoin.
+                    None => {
+                        self.add_window(window);
+                    }
+                },
+                Some(Restore { anchor, .. }) => {
+                    let at = self.slot_behind(anchor);
+                    self.insert_container(at, Container::from_window(window));
                 }
                 None => {
                     self.add_window(window);
                 }
             }
+            return false;
+        }
+
+        // Monocle is the other mode that lifts a container out of the ring, so
+        // while it is on the ring's focused container is never the window the
+        // user is looking at. Maximizing it would blow up a hidden window,
+        // hide the monocled one behind it and leave the workspace in two
+        // exclusive modes at once. A monocle already fills the workspace,
+        // which is all a maximize would do, so this refuses instead.
+        if self.is_monocle() {
             return false;
         }
 
@@ -734,7 +786,7 @@ impl Workspace {
             }
             self.maximized_window = Some(window);
             self.maximized_restore = Some(Restore {
-                container: 0,
+                anchor: None,
                 window: window_idx,
                 own_container: false,
                 floating: true,
@@ -751,15 +803,18 @@ impl Workspace {
             return false;
         };
         let own_container = container.is_empty();
+        // The sibling that stays behind holds the spot for the way back.
+        let mut anchor = container.focused_window_id();
         if own_container {
             self.containers.remove(container_idx);
             if container_idx < self.resize_dimensions.len() {
                 self.resize_dimensions.remove(container_idx);
             }
+            anchor = self.anchor_before(container_idx);
         }
         self.maximized_window = Some(window);
         self.maximized_restore = Some(Restore {
-            container: container_idx,
+            anchor,
             window: window_idx,
             own_container,
             floating: false,
@@ -1323,5 +1378,87 @@ mod tests {
         assert_eq!(ws.name.as_deref(), Some("1"));
         assert_eq!(ws.layout, Layout::Bsp);
         assert!(ws.tile);
+    }
+
+    // -- regressions --------------------------------------------------------
+
+    fn container_ids(ws: &Workspace) -> Vec<Vec<WindowId>> {
+        ws.containers()
+            .iter()
+            .map(|c| c.window_ids().collect())
+            .collect()
+    }
+
+    #[test]
+    fn maximizing_while_monocle_is_on_is_refused() {
+        let mut ws = workspace_with(2);
+        assert!(ws.toggle_monocle());
+
+        assert!(
+            !ws.toggle_maximize(),
+            "monocle already fills the workspace, the two modes are exclusive"
+        );
+        assert!(!ws.is_maximized());
+        assert!(ws.is_monocle());
+        assert_eq!(ws.focused_window_id(), Some(WindowId(2)));
+        assert_eq!(ws.visible_window_ids(), vec![WindowId(2)]);
+    }
+
+    #[test]
+    fn un_maximizing_puts_the_window_back_in_its_own_stack_after_a_container_closed() {
+        let mut ws = workspace_with(4);
+        assert!(ws.focus_window(WindowId(3)));
+        assert!(ws.stack_focused_window_into(1));
+        assert!(ws.toggle_maximize());
+        assert!(ws.remove_window(WindowId(1)).is_some());
+
+        assert!(!ws.toggle_maximize());
+
+        assert_eq!(
+            container_ids(&ws),
+            vec![vec![WindowId(2), WindowId(3)], vec![WindowId(4)]],
+            "window 3 belongs in the stack it came from, not in window 4's"
+        );
+        assert_eq!(ws.focused_window_id(), Some(WindowId(3)));
+    }
+
+    #[test]
+    fn un_maximizing_lands_behind_its_old_neighbour_after_a_container_was_inserted() {
+        let mut ws = workspace_with(3);
+        assert!(ws.toggle_maximize());
+        ws.insert_window(0, Window::new(9));
+
+        assert!(!ws.toggle_maximize());
+
+        assert_eq!(
+            container_ids(&ws),
+            vec![
+                vec![WindowId(9)],
+                vec![WindowId(1)],
+                vec![WindowId(2)],
+                vec![WindowId(3)]
+            ],
+            "the container that was inserted to the left shifted the restore spot"
+        );
+    }
+
+    #[test]
+    fn leaving_monocle_lands_behind_its_old_neighbour_after_a_container_was_inserted() {
+        let mut ws = workspace_with(3);
+        assert!(ws.toggle_monocle());
+        ws.insert_window(0, Window::new(9));
+
+        assert!(!ws.toggle_monocle());
+
+        assert_eq!(
+            container_ids(&ws),
+            vec![
+                vec![WindowId(9)],
+                vec![WindowId(1)],
+                vec![WindowId(2)],
+                vec![WindowId(3)]
+            ],
+            "the container that was inserted to the left shifted the restore spot"
+        );
     }
 }

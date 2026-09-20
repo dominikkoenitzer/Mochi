@@ -63,6 +63,31 @@ impl State {
         changes.settle();
     }
 
+    /// `true` when the focused window of that workspace is not in its
+    /// container ring.
+    ///
+    /// [`Workspace::focused_window_id`] resolves a maximized, monocled or
+    /// floating window before it ever looks at the ring, and all three have
+    /// been lifted out of it. Every op that rearranges containers works
+    /// through the ring's focus index instead, so with one of those focused it
+    /// would take hold of a completely different window: `move-to-monitor`
+    /// teleported an unrelated tile to the other screen and dragged the focus
+    /// along with it.
+    ///
+    /// The ops refuse in that case rather than moving the focused window.
+    /// Refusing is the choice because there is no honest translation of the
+    /// command: a floating window has no tile to trade places with, a monocle
+    /// belongs to the workspace it was turned on in and cannot travel with the
+    /// window, and a maximized window is a mode, not a container. Doing
+    /// nothing is the only outcome that can never touch a window the user did
+    /// not point at. The modes are one keystroke away from being off, and then
+    /// the move does exactly what it says.
+    fn focus_outside_the_ring(&self, monitor: usize, workspace: usize) -> bool {
+        self.workspace(monitor, workspace).is_ok_and(|target| {
+            target.is_maximized() || target.is_monocle() || target.focus_is_floating()
+        })
+    }
+
     /// The window that is focused right now, for a follow-up focus change.
     fn focused_window_after(&self) -> Option<WindowId> {
         self.focused_workspace()
@@ -224,10 +249,18 @@ impl State {
 
     /// Focuses a window the daemon saw take the foreground.
     ///
+    /// A no-op while paused, like every other mutating command: this one moves
+    /// the focused monitor and workspace of the model, and the retile that
+    /// unpausing does would then be aimed at whichever workspace the user
+    /// happened to click on in the meantime.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::WindowNotFound`] when the window is not managed.
     pub fn focus_window(&mut self, id: WindowId) -> Result<Changes> {
+        if self.is_paused {
+            return Ok(Changes::none());
+        }
         let (monitor, workspace) = self.locate_window(id).ok_or(Error::WindowNotFound(id))?;
         let before = self.visible_window_ids();
         self.monitors_mut().focus(monitor);
@@ -248,6 +281,9 @@ impl State {
     /// What happens at the edge is decided by
     /// [`State::cross_monitor_move_behaviour`].
     ///
+    /// Does nothing when the focused window is outside the container ring; see
+    /// `focus_outside_the_ring`.
+    ///
     /// # Errors
     ///
     /// Returns an error when there is no focused workspace.
@@ -256,6 +292,9 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
 
         if let Some(idx) = self
             .workspace(monitor, workspace)?
@@ -292,6 +331,9 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let target = self.workspace_mut(monitor, workspace)?;
         target.cycle_container_move(direction);
         let id = target.focused_window_id();
@@ -311,6 +353,9 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let target = self.workspace_mut(monitor, workspace)?;
         if !target.promote_focused_container() {
             return Ok(Changes::none());
@@ -351,6 +396,9 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let Some(idx) = self
             .workspace(monitor, workspace)?
             .container_idx_in_direction(direction)
@@ -379,6 +427,9 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
         if !target.unstack_focused_window() {
@@ -436,6 +487,9 @@ impl State {
 
     /// Maximizes the focused window, or restores it.
     ///
+    /// Does nothing while monocle mode is on: the two modes both fill the
+    /// workspace and are exclusive.
+    ///
     /// # Errors
     ///
     /// Returns an error when there is no focused workspace.
@@ -446,7 +500,14 @@ impl State {
         let (monitor, workspace) = self.focused_indices()?;
         let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
+        let was_maximized = target.is_maximized();
         let maximized = target.toggle_maximize();
+        if maximized == was_maximized {
+            // Nothing happened: monocle mode refuses the maximize, and an
+            // empty workspace has nothing to maximize. Falling through would
+            // tell the daemon to restore a window that was never maximized.
+            return Ok(Changes::none());
+        }
         let id = target.focused_window_id();
 
         let mut changes = self.retiled(monitor, workspace);
@@ -472,14 +533,27 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
         let Some(id) = target.focused_window_id() else {
             return Ok(Changes::none());
         };
+        let was_maximized = target.is_maximized();
         target.remove_window(id);
         let mut changes = self.retiled(monitor, workspace);
+        if was_maximized {
+            // The model forgets the window was maximized, but Windows does
+            // not: without this the user un-minimizes it and it comes back
+            // filling the screen with nothing in the model saying so. The
+            // daemon restores before it minimizes, so the order works out.
+            changes.restore.push(id);
+        }
         changes.minimize.push(id);
         changes.merge(self.focus_changes(self.focused_window_after()));
+        // Minimizing the visible window of a stack leaves the one underneath
+        // cloaked while it holds the tile, and in monocle mode it blanks the
+        // whole workspace. The delta is what brings the replacement back.
+        self.visibility_delta(&before, &mut changes);
         Ok(changes)
     }
 
@@ -557,6 +631,9 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let delta = sizing.signed(self.resize_delta);
         let Some(work_area) = self.work_area_for(monitor, workspace) else {
             return Err(Error::MonitorNotFound(monitor));
@@ -762,6 +839,9 @@ impl State {
     /// another workspace of the same monitor never swaps, whatever the setting
     /// says, because the setting is about monitor edges.
     ///
+    /// Does nothing when the focused window is outside the container ring; see
+    /// `focus_outside_the_ring`.
+    ///
     /// # Errors
     ///
     /// Returns an error when either end does not exist.
@@ -795,6 +875,9 @@ impl State {
         }
         let (from_monitor, from_workspace) = self.focused_indices()?;
         if (from_monitor, from_workspace) == (to_monitor, to_workspace) {
+            return Ok(Changes::none());
+        }
+        if self.focus_outside_the_ring(from_monitor, from_workspace) {
             return Ok(Changes::none());
         }
         // Make sure the destination exists before anything is taken apart.
@@ -980,10 +1063,20 @@ impl State {
         }
         let (monitor, workspace) = self.locate_window(id).ok_or(Error::WindowNotFound(id))?;
         let before = self.visible_window_ids();
+        let was_maximized = self
+            .workspace(monitor, workspace)?
+            .maximized_window()
+            .is_some_and(|window| window.id == id);
         if !self.workspace_mut(monitor, workspace)?.float_window(id) {
             return Ok(Changes::none());
         }
         let mut changes = self.retiled(monitor, workspace);
+        if was_maximized {
+            // Floating drops the maximized state from the model; the real
+            // window stays SW_SHOWMAXIMIZED unless it is restored here, and a
+            // maximized window ignores the rectangle the layout gives it.
+            changes.restore.push(id);
+        }
         self.visibility_delta(&before, &mut changes);
         Ok(changes)
     }
@@ -2587,5 +2680,151 @@ mod tests {
         assert!(changes.is_empty());
         assert_eq!(state.monitors().len(), 2);
         assert_eq!(container_ids(&state, 0, 0), vec![WindowId(1), WindowId(2)]);
+    }
+
+    // -- regressions --------------------------------------------------------
+
+    #[test]
+    fn minimizing_the_visible_window_of_a_stack_shows_the_one_underneath() {
+        let mut state = with_windows(3);
+        state.stack(Direction::Left).unwrap();
+        assert_eq!(state.visible_window_ids(), vec![WindowId(3), WindowId(2)]);
+
+        let changes = state.minimize_focused_window().unwrap();
+
+        assert_eq!(changes.minimize, vec![WindowId(3)]);
+        assert_eq!(
+            changes.show,
+            vec![WindowId(1)],
+            "the window the stack now shows is still cloaked: {changes:?}"
+        );
+        assert_eq!(state.visible_window_ids(), vec![WindowId(1), WindowId(2)]);
+    }
+
+    #[test]
+    fn minimizing_a_maximized_window_takes_it_out_of_the_maximized_state() {
+        let mut state = with_windows(2);
+        state.toggle_maximize().unwrap();
+
+        let changes = state.minimize_focused_window().unwrap();
+
+        assert_eq!(changes.minimize, vec![WindowId(2)]);
+        assert_eq!(
+            changes.restore,
+            vec![WindowId(2)],
+            "the real window is still SW_SHOWMAXIMIZED: {changes:?}"
+        );
+        assert!(!state.workspace(0, 0).unwrap().is_maximized());
+    }
+
+    #[test]
+    fn floating_a_maximized_window_takes_it_out_of_the_maximized_state() {
+        let mut state = with_windows(2);
+        state.toggle_maximize().unwrap();
+
+        let changes = state.float_window(WindowId(2)).unwrap();
+
+        assert_eq!(
+            changes.restore,
+            vec![WindowId(2)],
+            "the real window is still SW_SHOWMAXIMIZED: {changes:?}"
+        );
+        assert!(!state.workspace(0, 0).unwrap().is_maximized());
+        assert_eq!(state.workspace(0, 0).unwrap().floating_windows().len(), 1);
+    }
+
+    #[test]
+    fn focusing_a_window_while_paused_leaves_the_model_alone() {
+        let mut state = with_windows(1);
+        state.focus_workspace(1).unwrap();
+        state.add_window(Window::new(2)).unwrap();
+        state.toggle_pause().unwrap();
+
+        let changes = state.focus_window(WindowId(1)).unwrap();
+
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(
+            state.focused_indices().unwrap(),
+            (0, 1),
+            "a paused manager keeps the workspace it had"
+        );
+    }
+
+    #[test]
+    fn moving_a_floating_window_to_another_monitor_leaves_the_tiled_ones_alone() {
+        let mut state = with_windows(2);
+        state.toggle_float().unwrap();
+
+        let changes = state.move_to_monitor(1, true).unwrap();
+
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(1)]);
+        assert!(state.workspace(1, 0).unwrap().is_empty());
+        assert_eq!(focused(&state), Some(WindowId(2)));
+    }
+
+    #[test]
+    fn moving_a_monocled_window_to_another_workspace_leaves_the_ring_alone() {
+        let mut state = with_windows(2);
+        state.toggle_monocle().unwrap();
+
+        let changes = state.move_to_workspace(1, false).unwrap();
+
+        assert!(changes.is_empty(), "{changes:?}");
+        assert!(state.workspace(0, 1).unwrap().is_empty());
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(1)]);
+    }
+
+    #[test]
+    fn promoting_while_a_floating_window_is_focused_moves_nothing() {
+        let mut state = with_windows(3);
+        state.toggle_float().unwrap();
+
+        let changes = state.promote().unwrap();
+
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(1), WindowId(2)]);
+    }
+
+    #[test]
+    fn resizing_while_a_floating_window_is_focused_leaves_the_tiles_alone() {
+        let mut state = with_windows(3);
+        state.toggle_float().unwrap();
+
+        let changes = state
+            .resize_axis(Axis::Horizontal, Sizing::Increase)
+            .unwrap();
+
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(state.workspace(0, 0).unwrap().resize_dimension(0), None);
+    }
+
+    #[test]
+    fn stacking_while_a_floating_window_is_focused_leaves_the_stacks_alone() {
+        let mut state = with_windows(3);
+        state.toggle_float().unwrap();
+
+        let changes = state.stack(Direction::Left).unwrap();
+
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(container_ids(&state, 0, 0), vec![WindowId(1), WindowId(2)]);
+    }
+
+    #[test]
+    fn a_window_moved_behind_a_maximized_one_never_takes_the_foreground() {
+        let mut state = with_windows(1);
+        state.focus_monitor(1).unwrap();
+        state.add_window(Window::new(2)).unwrap();
+        state.toggle_maximize().unwrap();
+        state.focus_monitor(0).unwrap();
+
+        let changes = state.move_to_monitor(1, true).unwrap();
+
+        assert!(changes.hide.contains(&WindowId(1)), "{changes:?}");
+        assert_ne!(
+            changes.focus,
+            Some(WindowId(1)),
+            "the daemon would cloak the window and then type into it: {changes:?}"
+        );
     }
 }
