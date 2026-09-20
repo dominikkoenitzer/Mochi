@@ -25,8 +25,15 @@ pub struct Entry {
     pub pid: u32,
     /// The window class, to catch handle reuse within one process.
     pub class: String,
-    /// How the window was taken off screen.
-    pub behaviour: HidingBehaviour,
+    /// How the window was taken off screen, or `None` for a window Mochi
+    /// only faded: that one is still on screen and needs its alpha cleared,
+    /// not showing.
+    ///
+    /// Defaulted so a record written before this field could be missing still
+    /// parses. An entry with no behaviour in an old file cannot happen, so the
+    /// default costs nothing there.
+    #[serde(default)]
+    pub behaviour: Option<HidingBehaviour>,
     /// Whether Mochi also made the window translucent.
     pub faded: bool,
 }
@@ -151,19 +158,32 @@ pub fn recover(platform: &dyn Platform, path: &Path) -> Vec<Hwnd> {
             tracing::debug!(%hwnd, "the handle belongs to another window now, leaving it alone");
             continue;
         }
-        tracing::warn!(
-            %hwnd,
-            title = %info.title,
-            "putting back a window a previous session left off screen"
-        );
+        if entry.behaviour.is_some() {
+            tracing::warn!(
+                %hwnd,
+                title = %info.title,
+                "putting back a window a previous session left off screen"
+            );
+        } else {
+            tracing::warn!(
+                %hwnd,
+                title = %info.title,
+                "clearing the alpha a previous session left on a window"
+            );
+        }
         let result = match entry.behaviour {
-            HidingBehaviour::Cloak => platform.set_cloaked(hwnd, false),
-            HidingBehaviour::Minimize => platform.show(hwnd, ShowState::Restore),
-            HidingBehaviour::Hide => platform.show(hwnd, ShowState::ShowNoActivate),
+            Some(HidingBehaviour::Cloak) => platform.set_cloaked(hwnd, false),
+            Some(HidingBehaviour::Minimize) => platform.show(hwnd, ShowState::Restore),
+            Some(HidingBehaviour::Hide) => platform.show(hwnd, ShowState::ShowNoActivate),
+            // On screen the whole time, only translucent. Clearing the alpha
+            // below is the whole of it.
+            None => Ok(()),
         };
         let restored = match result {
             Ok(()) => {
-                back.push(hwnd);
+                if entry.behaviour.is_some() {
+                    back.push(hwnd);
+                }
                 true
             }
             Err(e) => {
@@ -171,12 +191,16 @@ pub fn recover(platform: &dyn Platform, path: &Path) -> Vec<Hwnd> {
                 false
             }
         };
+        let mut alpha_cleared = true;
         if entry.faded
             && let Err(e) = platform.set_transparency(hwnd, None)
         {
             tracing::debug!(%hwnd, error = %e, "could not clear the alpha");
+            alpha_cleared = false;
         }
-        if !restored {
+        // A window that was only faded has nothing else to it, so a failed
+        // alpha clear is the whole failure and the entry has to survive.
+        if !restored || (entry.behaviour.is_none() && !alpha_cleared) {
             unfinished.push(entry);
         }
     }
@@ -202,7 +226,7 @@ mod tests {
             hwnd,
             pid: 42,
             class: "Test".to_owned(),
-            behaviour,
+            behaviour: Some(behaviour),
             faded: false,
         }
     }
@@ -295,7 +319,7 @@ mod tests {
             hwnd: 1,
             pid: 4242,
             class: "Chrome_WidgetWin_1".to_owned(),
-            behaviour: HidingBehaviour::Cloak,
+            behaviour: Some(HidingBehaviour::Cloak),
             faded: false,
         };
         assert!(still_the_same_window(&known, &live));

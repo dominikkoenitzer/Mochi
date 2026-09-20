@@ -54,10 +54,18 @@ pub fn is_layered(hwnd: HWND) -> bool {
 /// Fades a window to `alpha`, where 0 is invisible and 255 is opaque.
 ///
 /// Sets `WS_EX_LAYERED` if the window does not have it yet, then applies a
-/// whole-window alpha with `LWA_ALPHA`. An alpha of 255 is applied as an alpha
-/// too, rather than by removing the style, so that the daemon can go back and
-/// forth without the window flickering; use [`clear_alpha`] to really put it
-/// back the way it was.
+/// whole-window alpha with `LWA_ALPHA`.
+///
+/// An [`OPAQUE`] alpha never brings the style with it: a window that is not
+/// layered is opaque already, so layering it would be every hazard in the
+/// module header for no visible change. A window that is already layered does
+/// get the opaque alpha applied, rather than losing the style, so that the
+/// daemon can go back and forth without the window flickering; use
+/// [`clear_alpha`] to really put it back the way it was.
+///
+/// The style and the alpha go together: if the alpha cannot be applied the
+/// style bit is taken off again, so a window that refuses is left exactly as it
+/// was found rather than layered for good.
 ///
 /// # Errors
 ///
@@ -68,15 +76,28 @@ pub fn set_alpha(hwnd: HWND, alpha: u8) -> Result<()> {
         return Err(windows::core::Error::from_thread().into());
     }
 
-    if !is_layered(hwnd) {
-        let style = current_ex_style(hwnd) | WS_EX_LAYERED;
-        set_ex_style(hwnd, style)?;
+    let previous = current_ex_style(hwnd);
+    let was_layered = previous.contains(WS_EX_LAYERED);
+    if !was_layered {
+        if alpha == OPAQUE {
+            return Ok(());
+        }
+        set_ex_style(hwnd, previous | WS_EX_LAYERED)?;
     }
 
     // SAFETY: the window is live and now layered, which is what
     // SetLayeredWindowAttributes requires. LWA_ALPHA ignores the colour key, so
     // the zero passed for it is not read.
-    unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA) }?;
+    let applied = unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA) };
+    if let Err(error) = applied {
+        if !was_layered {
+            // Half a fade is worse than none: the style would stay on the
+            // window for good, and the next pass would read it as somebody
+            // else's compositing and never take it off again.
+            let _ = set_ex_style(hwnd, previous);
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -252,8 +273,9 @@ impl<A: WindowAlpha> TransparencyManager<A> {
     ///
     /// A window that is already faded to the same alpha costs nothing, so this
     /// is cheap enough to call after every focus change. A window that refuses
-    /// the call, normally because it has just died, is dropped from the
-    /// bookkeeping and the rest of the set is still applied.
+    /// the call, normally because it has just died, keeps whatever the
+    /// bookkeeping already said about it and the rest of the set is still
+    /// applied.
     ///
     /// # Errors
     ///
@@ -280,7 +302,10 @@ impl<A: WindowAlpha> TransparencyManager<A> {
                     self.faded.insert(handle.0, self.alpha);
                 }
                 Err(error) => {
-                    self.faded.remove(&handle.0);
+                    // Whatever alpha this manager set on an earlier pass is
+                    // still on the window: [`set_alpha`] puts a window it
+                    // could not fade back the way it found it, so a refusal
+                    // here never leaves a state nobody is tracking.
                     failure.get_or_insert(error);
                 }
             }
@@ -293,9 +318,16 @@ impl<A: WindowAlpha> TransparencyManager<A> {
             .filter(|key| !wanted.contains(key))
             .collect();
         for key in stale {
-            self.faded.remove(&key);
-            if let Err(error) = self.backend.clear_alpha(WindowHandle(key)) {
-                failure.get_or_insert(error);
+            match self.backend.clear_alpha(WindowHandle(key)) {
+                Ok(()) => {
+                    self.faded.remove(&key);
+                }
+                // The window is still faded, so it stays in the bookkeeping
+                // and the next pass tries again. Forgetting it here would
+                // leave it translucent with nothing left to put it back.
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
             }
         }
 
@@ -309,20 +341,24 @@ impl<A: WindowAlpha> TransparencyManager<A> {
     ///
     /// This is the restore path: the daemon calls it when transparency is
     /// switched off and on shutdown. Afterwards the manager is as fresh as a
-    /// new one, so the next update checks every window again.
+    /// new one, so the next update checks every window again, except for any
+    /// window that could not be put back.
     ///
     /// # Errors
     ///
-    /// The first error any window reported. Every window is still attempted and
-    /// the bookkeeping is emptied either way, because a failure here means the
-    /// window is gone.
+    /// The first error any window reported. Every window is still attempted,
+    /// and a window that could not be put back keeps its entry, because it is
+    /// still faded and somebody has to try again.
     pub fn clear_all(&mut self) -> Result<()> {
         let mut failure = None;
-        for key in std::mem::take(&mut self.faded).into_keys() {
+        let mut still_faded = BTreeMap::new();
+        for (key, alpha) in std::mem::take(&mut self.faded) {
             if let Err(error) = self.backend.clear_alpha(WindowHandle(key)) {
+                still_faded.insert(key, alpha);
                 failure.get_or_insert(error);
             }
         }
+        self.faded = still_faded;
         self.foreign.clear();
 
         match failure {
@@ -357,6 +393,8 @@ mod tests {
     const B: WindowHandle = WindowHandle(0x2222);
     const OWN: WindowHandle = WindowHandle(0x3333);
     const DEAD: WindowHandle = WindowHandle(0x4444);
+    /// A window that takes an alpha but never gives it back.
+    const STUCK: WindowHandle = WindowHandle(0x5555);
 
     /// What a fake window did, so a test can assert on the calls themselves
     /// rather than on the bookkeeping only.
@@ -371,6 +409,8 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         calls: RefCell<Vec<Call>>,
+        /// Windows that refuse a new alpha from now on, on top of [`DEAD`].
+        refusing: RefCell<BTreeSet<isize>>,
     }
 
     impl Fake {
@@ -381,6 +421,16 @@ mod tests {
         fn forget(&self) {
             self.calls.borrow_mut().clear();
         }
+
+        /// From now on this window refuses a new alpha, keeping the one it has.
+        fn refuse(&self, handle: WindowHandle) {
+            self.refusing.borrow_mut().insert(handle.0);
+        }
+
+        /// Undoes [`Fake::refuse`].
+        fn allow(&self, handle: WindowHandle) {
+            self.refusing.borrow_mut().remove(&handle.0);
+        }
     }
 
     impl WindowAlpha for &Fake {
@@ -390,7 +440,7 @@ mod tests {
 
         fn set_alpha(&self, handle: WindowHandle, alpha: u8) -> Result<()> {
             self.calls.borrow_mut().push(Call::Set(handle.0, alpha));
-            if handle == DEAD {
+            if handle == DEAD || self.refusing.borrow().contains(&handle.0) {
                 return Err(crate::RenderError::ThreadGone("fake window"));
             }
             Ok(())
@@ -398,6 +448,9 @@ mod tests {
 
         fn clear_alpha(&self, handle: WindowHandle) -> Result<()> {
             self.calls.borrow_mut().push(Call::Clear(handle.0));
+            if handle == STUCK {
+                return Err(crate::RenderError::ThreadGone("fake window"));
+            }
             Ok(())
         }
     }
@@ -498,5 +551,132 @@ mod tests {
         fake.forget();
         manager.clear_all().unwrap();
         assert!(fake.calls().is_empty(), "twice over is not an error");
+    }
+
+    /// A window this manager already faded and that then refuses a new alpha
+    /// still carries the old one, so it has to stay in the bookkeeping;
+    /// forgetting it leaves it translucent with nobody left to put it back.
+    #[test]
+    fn a_window_that_refuses_a_new_alpha_is_still_this_managers_to_put_back() {
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        manager.update(&[A]).unwrap();
+        assert!(manager.is_faded(A));
+
+        fake.refuse(A);
+        manager.set_alpha(150);
+        assert!(manager.update(&[A]).is_err(), "the caller hears about it");
+        assert!(manager.is_faded(A), "235 is still on the window");
+
+        fake.allow(A);
+        fake.forget();
+        manager.clear_all().unwrap();
+        assert_eq!(*fake.calls(), vec![Call::Clear(A.0)], "and it is put back");
+    }
+
+    /// The restore path is the same the other way round: a window that cannot
+    /// be put back is still faded, so the manager keeps it and tries again
+    /// rather than dropping it on the floor.
+    #[test]
+    fn a_window_that_cannot_be_put_back_stays_in_the_bookkeeping() {
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        manager.update(&[STUCK]).unwrap();
+        assert!(manager.is_faded(STUCK));
+
+        // It takes the focus, so the manager tries to put it back and fails.
+        fake.forget();
+        assert!(manager.update(&[]).is_err());
+        assert!(manager.is_faded(STUCK), "it is still faded");
+        assert_eq!(*fake.calls(), vec![Call::Clear(STUCK.0)]);
+
+        // Every later pass tries again.
+        fake.forget();
+        assert!(manager.update(&[]).is_err());
+        assert_eq!(*fake.calls(), vec![Call::Clear(STUCK.0)], "tried again");
+    }
+
+    #[test]
+    fn clear_all_keeps_the_window_it_could_not_put_back() {
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        manager.update(&[A, STUCK]).unwrap();
+
+        fake.forget();
+        assert!(manager.clear_all().is_err());
+        assert!(
+            !manager.is_faded(A),
+            "A went back to opaque and is forgotten"
+        );
+        assert!(manager.is_faded(STUCK), "STUCK is still faded");
+
+        fake.forget();
+        assert!(manager.clear_all().is_err());
+        assert_eq!(
+            *fake.calls(),
+            vec![Call::Clear(STUCK.0)],
+            "the second call tries the one that is still faded, and only that one"
+        );
+    }
+
+    /// A window of this process, created by the test and destroyed with it, so
+    /// the Win32 functions can be exercised without touching anybody else's.
+    struct TestWindow(HWND);
+
+    impl TestWindow {
+        fn new() -> Self {
+            let class = crate::win::wide("STATIC");
+            // SAFETY: STATIC is a predefined class, both arguments outlive the
+            // call, and the window is a hidden, parentless popup of this
+            // process which DestroyWindow takes down again in Drop.
+            let hwnd = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    windows::core::PCWSTR(class.as_ptr()),
+                    windows::core::PCWSTR::null(),
+                    windows::Win32::UI::WindowsAndMessaging::WS_POPUP,
+                    0,
+                    0,
+                    10,
+                    10,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .expect("a window of our own");
+            Self(hwnd)
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from CreateWindowExW on this thread and
+            // is destroyed exactly once.
+            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(self.0) };
+        }
+    }
+
+    /// Fading to [`OPAQUE`] changes nothing on screen, so it must not bring
+    /// `WS_EX_LAYERED` with it: that is the whole hazard of the module header
+    /// for no visible effect.
+    #[test]
+    fn an_opaque_alpha_does_not_layer_a_window() {
+        let window = TestWindow::new();
+        assert!(!is_layered(window.0));
+
+        set_alpha(window.0, OPAQUE).expect("an opaque window is opaque already");
+        assert!(!is_layered(window.0), "nothing was layered for nothing");
+
+        // A real fade still layers, and an opaque alpha on top of it is still
+        // applied rather than flickering the style off.
+        set_alpha(window.0, 200).expect("a real fade");
+        assert!(is_layered(window.0));
+        set_alpha(window.0, OPAQUE).expect("back to opaque, still layered");
+        assert!(is_layered(window.0));
+
+        clear_alpha(window.0).expect("and the style comes off");
+        assert!(!is_layered(window.0));
     }
 }
