@@ -1,8 +1,9 @@
 # mochic
 
 `mochic` sends one command to the running daemon and prints its answer. The
-command names follow the common tiling window manager conventions, so an existing whkdrc imports by replacing the program
-name. See [import.md](import.md).
+command names follow the common tiling window manager conventions, so an
+existing whkdrc imports by replacing the program name. See
+[import.md](import.md).
 
 Enum arguments are kebab-case on the command line (`bsp`, `ease-out-quad`)
 while the same values are PascalCase in `mochi.json`.
@@ -73,17 +74,28 @@ The groups below follow the order of the hotkey file.
 
 | Command | Arguments | Does |
 |---|---|---|
-| `start` | `--whkd`, `--config`, `--dry-run` | Start the daemon, and whkd with it when `--whkd` is given. |
-| `stop` | `--whkd` | Restore every managed window, then exit. Also stops whkd with `--whkd`. |
+| `start` | `--config`, `--dry-run` | Start the daemon, hotkeys and all. |
+| `stop` | none | Restore every managed window, then exit. |
 | `toggle-pause` | none | Stop and resume management without exiting. |
 | `retile` | none | Recompute and apply every layout. |
-| `reload-configuration` | none | Re-read `mochi.json`. |
+| `reload-configuration` | none | Re-read `mochi.json` and the hotkey file. |
+
+## Hotkeys
+
+Mochi binds the keys itself. The file, its syntax and where it is looked for are
+in [hotkeys.md](hotkeys.md).
+
+| Command | Arguments | Does |
+|---|---|---|
+| `hotkeys` | `--json` | Print every binding, and every line of the file that did not parse. `--json` prints the document those tables are made of. |
+| `set-hotkeys` | `enable` \| `disable` | Bind keys, or stop binding them and leave the keyboard alone. Tiling carries on either way. |
+| `toggle-game-mode` | none | Pause tiling and suspend every binding except the one bound to `toggle-game-mode`, so the game in front gets the rest of the keyboard. Again to come back. |
 
 ## Config
 
 | Command | Arguments | Does |
 |---|---|---|
-| `quickstart` | none | Write a default `mochi.json` when there is none. |
+| `quickstart` | none | Write a default `mochi.json` and a default hotkey file, each only when there is none. |
 | `schema` | none | Print the JSON schema of the config file. |
 | `focus-follows-mouse` | `enable` \| `disable` | Focus whatever the cursor moves over. |
 | `mouse-follows-focus` | `enable` \| `disable` | Warp the cursor to a newly focused window. |

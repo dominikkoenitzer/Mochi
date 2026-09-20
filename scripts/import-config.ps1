@@ -12,10 +12,12 @@
          the $schema line rewritten. Everything else stays as it is, including
          app_specific_configuration_path: the daemon reads the usual
          applications.json format.
-      2. The whkdrc given with -Hotkeys is copied to <WhkdConfigHome>\whkdrc
-         with every standalone call of -Command replaced by `mochic`. whkd only
-         ever loads a file called whkdrc from $env:WHKD_CONFIG_HOME, so that is
-         the copy it reads. The original file is never touched.
+      2. The hotkey file given with -Hotkeys is copied to <HotkeyDir>\hotkeys
+         with every standalone call of -Command replaced by `mochic`, and every
+         line that ran a game mode script replaced by `mochic toggle-game-mode`,
+         which is what game mode is now. Mochi binds that file itself and reads
+         the syntax the old file already uses, see docs\hotkeys.md. The original
+         file is never touched.
 
     Without -Apply nothing is written, the script only prints what would change.
 
@@ -23,26 +25,22 @@
     The JSON configuration in use today. Required, there is no default.
 
 .PARAMETER Hotkeys
-    The whkdrc in use today. Required, there is no default.
+    The hotkey file in use today. Required, there is no default.
 
 .PARAMETER Command
-    Name of the command line program the whkdrc calls today, without the .exe.
-    Every standalone occurrence of it becomes `mochic`. Required.
+    Name of the command line program the hotkey file calls today, without the
+    .exe. Every standalone occurrence of it becomes `mochic`. Required.
 
 .PARAMETER MochiConfig
     Target configuration. Default %USERPROFILE%\mochi.json.
 
-.PARAMETER WhkdConfigHome
-    Directory that gets the imported hotkeys as a loadable whkdrc.
-    Default %USERPROFILE%\.config\mochi.
+.PARAMETER HotkeyDir
+    Directory the imported hotkeys are written to, as a file called hotkeys.
+    Default %USERPROFILE%\.config\mochi, where Mochi looks for it.
 
 .PARAMETER SchemaUrl
     Value for the $schema key in mochi.json. A local path works too, for
     example the file produced by `mochic schema > mochi.schema.json`.
-
-.PARAMETER GameModeScript
-    When given, hotkey lines pointing at another game-mode.ps1 are repointed at
-    this path. Without it those lines are reported and left alone.
 
 .PARAMETER Apply
     Write the files. Without it the script is a dry run.
@@ -62,9 +60,8 @@ param(
     [Parameter(Mandatory)][string] $Hotkeys,
     [Parameter(Mandatory)][string] $Command,
     [string] $MochiConfig = (Join-Path $env:USERPROFILE 'mochi.json'),
-    [string] $WhkdConfigHome = (Join-Path $env:USERPROFILE '.config\mochi'),
+    [string] $HotkeyDir = (Join-Path $env:USERPROFILE '.config\mochi'),
     [string] $SchemaUrl = 'https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/schema.json',
-    [string] $GameModeScript,
     [switch] $Apply,
     [switch] $Force
 )
@@ -224,46 +221,53 @@ function Convert-Hotkeys {
     $hits = ([regex]::Matches($raw, $token)).Count
     $text = [regex]::Replace($raw, $token, 'mochic')
 
-    if ($GameModeScript) {
-        $found = [regex]::Matches($text, '(?i)[A-Za-z]:\\[^"]*\\game-mode\.ps1')
-        foreach ($hit in $found) {
-            if ($hit.Value -ine $GameModeScript) { $text = $text.Replace($hit.Value, $GameModeScript) }
-        }
+    # Game mode used to be a script that restarted the hotkey daemon with a
+    # cut down file. Mochi has the whole thing as one command, so the line
+    # keeps its keys and loses everything else.
+    $lines = Split-Lines -Text $text
+    $gameModeLines = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -match '^\s*#') { continue }
+        $parts = $line -split ':', 2
+        if ($parts.Count -ne 2) { continue }
+        if ($parts[1] -notmatch '(?i)game[-_ ]?mode[^\\/]*\.ps1') { continue }
+        $lines[$i] = "$($parts[0]): mochic toggle-game-mode"
+        $gameModeLines++
     }
 
-    $after = Split-Lines -Text $text
-    $loadable = Join-Path $WhkdConfigHome 'whkdrc'
+    $after = $lines
+    $target = Join-Path $HotkeyDir 'hotkeys'
 
-    Write-Detail "$Hotkeys -> $loadable"
+    Write-Detail "$Hotkeys -> $target"
     Write-Detail "$hits $Command call(s) become mochic"
+    if ($gameModeLines -gt 0) {
+        Write-Detail "$gameModeLines game mode line(s) become mochic toggle-game-mode"
+    }
     Show-LineDiff -Before $before -After $after
 
-    $leftovers = @($after | Where-Object { $_ -match "(?i)$name" -or $_ -match '(?i)game-mode\.ps1' })
+    $leftovers = @($after | Where-Object { $_ -match "(?i)$name" })
     if ($leftovers.Count -gt 0) {
         Write-Detail 'lines that still point at the old setup:'
         foreach ($line in $leftovers) { Write-Output "      $($line.Trim())" }
-        if (-not $GameModeScript) {
-            Write-Detail 'repoint a game mode hotkey with -GameModeScript <path to scripts\game-mode.ps1>'
-        }
     }
 
-    Write-Target -Path $loadable -Content ($after -join $newline)
+    Write-Target -Path $target -Content ($after -join $newline)
 }
 
 function Show-SwitchCommands {
-    $loadable = Join-Path $WhkdConfigHome 'whkdrc'
+    $target = Join-Path $HotkeyDir 'hotkeys'
     Write-Output ''
     Write-Output 'Switch to Mochi:'
     Write-Output '    stop your current window manager and its hotkey daemon, then run'
-    Write-Output "    `$env:WHKD_CONFIG_HOME = '$WhkdConfigHome'; mochic start --whkd"
+    Write-Output '    mochic start'
     Write-Output ''
     Write-Output 'Go back:'
-    Write-Output '    mochic stop --whkd'
-    Write-Output '    Remove-Item Env:WHKD_CONFIG_HOME -ErrorAction SilentlyContinue'
+    Write-Output '    mochic stop'
     Write-Output '    then start your previous window manager and its hotkey daemon again'
     Write-Output ''
-    Write-Output "whkd loads $loadable while WHKD_CONFIG_HOME points at $WhkdConfigHome,"
-    Write-Output "and $Hotkeys again once the variable is gone."
+    Write-Output "Mochi binds $target itself, and rebinds it every time the file is saved."
+    Write-Output "$Hotkeys is left as it is, so the old setup finds it where it always was."
     Write-Output 'For the same switch at login use scripts\autostart.ps1.'
 }
 
