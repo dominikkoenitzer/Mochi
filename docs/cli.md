@@ -21,6 +21,8 @@ The groups below follow the order of the hotkey file.
 | `focus-monitor` | index | Focus a monitor by zero based index. |
 | `focus-workspace` | index | Focus a workspace of the current monitor by zero based index. |
 | `focus-last-workspace` | none | Go back to the workspace focused before this one. |
+| `cycle-focus` | `next` \| `previous` | Step the focus one container along the ring. It goes by position rather than by geometry, so it is the one that still makes sense on a layout where "left" is ambiguous. |
+| `promote-focus` | none | Focus the first window of the workspace, the one most layouts give the biggest tile. Moves nothing; `promote` is the half that does. |
 | `cycle-monitor` | `next` \| `previous` | Step through the monitors. |
 | `cycle-workspace` | `next` \| `previous` | Step through the workspaces of the current monitor. |
 | `cycle-stack` | `next` \| `previous` | Step through the windows of the focused stack. |
@@ -30,8 +32,11 @@ The groups below follow the order of the hotkey file.
 | Command | Arguments | Does |
 |---|---|---|
 | `move` | `left` \| `right` \| `up` \| `down` | Move the focused window. At the screen edge `cross_monitor_move_behaviour` decides what happens. |
+| `cycle-move` | `next` \| `previous` | Swap the focused window with its neighbour in the ring, by position rather than by geometry. The counterpart to `cycle-focus`. |
 | `move-to-workspace` | index | Move the focused window to a workspace and follow it. |
+| `send-to-workspace` | index | Move the focused window to a workspace and stay where you are. The same command without the following, which is often exactly what you want: park something and carry on. |
 | `move-to-monitor` | index | Move the focused window to a monitor and follow it. |
+| `send-to-monitor` | index | Move the focused window to a monitor and stay where you are. |
 | `promote` | none | Swap the focused window with the first window of the workspace. |
 | `stack` | `left` \| `right` \| `up` \| `down` | Stack the focused window onto the neighbour in that direction. |
 | `unstack` | none | Pull the focused window out of its stack. |
@@ -40,7 +45,8 @@ The groups below follow the order of the hotkey file.
 
 | Command | Arguments | Does |
 |---|---|---|
-| `resize-axis` | `horizontal` \| `vertical`, `increase` \| `decrease` | Grow or shrink the focused window along an axis. |
+| `resize-axis` | `horizontal` \| `vertical`, `increase` \| `decrease` | Grow or shrink the focused window along an axis. Mochi picks the edge: the far one where there is a boundary, the near one where there is not. |
+| `resize-edge` | `left` \| `right` \| `up` \| `down`, `increase` \| `decrease` | Grow or shrink the focused window by moving that one edge. Nothing happens when the edge named is the edge of the screen, which is the difference from `resize-axis`: a key per edge never moves the other one instead. |
 | `workspace-padding` | monitor, workspace, size | Set the outer padding of one workspace. |
 | `container-padding` | monitor, workspace, size | Set the padding between containers of one workspace. |
 
@@ -49,6 +55,7 @@ The groups below follow the order of the hotkey file.
 | Command | Arguments | Does |
 |---|---|---|
 | `toggle-float` | none | Switch the focused window between tiled and floating. |
+| `toggle-float-override` | none | Float every window that appears from now on, and again to stop. Nothing already on screen moves. It lasts until the daemon stops or the configuration is reloaded; `float_override` in `mochi.json` is the permanent version. |
 | `toggle-maximize` | none | Switch the focused window between tiled and maximized. |
 | `toggle-monocle` | none | Give the focused window the whole work area. |
 | `minimize` | none | Minimize the focused window. |
@@ -63,6 +70,7 @@ The groups below follow the order of the hotkey file.
 | `cycle-layout` | `next` \| `previous` | Step through the layout list. |
 | `change-layout` | `bsp` \| `columns` \| `rows` \| `vertical-stack` \| `horizontal-stack` \| `ultrawide-vertical-stack` \| `grid` | Set the layout of the focused workspace. |
 | `flip-layout` | `horizontal` \| `vertical` | Mirror the layout of the focused workspace. |
+| `toggle-tiling` | none | Stop arranging the focused workspace, and again to arrange it once more. Every window stays managed and stays where it is, so this is the one to reach for while dragging things around by hand; `unmanage` and `toggle-pause` are the bigger hammers. |
 
 ## State
 
@@ -100,6 +108,7 @@ in [hotkeys.md](hotkeys.md).
 | Command | Arguments | Does |
 |---|---|---|
 | `quickstart` | none | Write a default `mochi.json` and a default hotkey file, each only when there is none. |
+| `check` | `[PATH]` | Read a configuration file and say what is wrong with it, without a daemon and without applying anything. No path means the file the daemon would load. Reports a parse failure with its line, column and the offending text; every rule that cannot do what it says, with its list, its line and the compiler's complaint; every top level key that parses and is then ignored; and, when the file names an `app_specific_configuration_path`, the same for that file, whose problems are warnings because the daemon carries on past them. Exits 0 when the file is usable, 1 when it is not; warnings do not fail. Hand it an `applications.json` and it checks that instead. |
 | `schema` | none | Print the JSON schema of the config file. |
 | `focus-follows-mouse` | `enable` \| `disable` | Focus whatever the cursor moves over. |
 | `mouse-follows-focus` | `enable` \| `disable` | Warp the cursor to a newly focused window. |

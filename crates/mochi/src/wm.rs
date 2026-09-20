@@ -1749,16 +1749,37 @@ impl WindowManager {
             Command::Focus { direction } => {
                 self.run_op(|core| core.focus_direction(direction_of(direction)))
             }
+            Command::CycleFocus { direction } => {
+                self.run_op(|core| core.cycle_focus(cycle_of(direction)))
+            }
             Command::Move { direction } => {
                 self.run_op(|core| core.move_direction(direction_of(direction)))
+            }
+            Command::CycleMove { direction } => {
+                self.run_op(|core| core.cycle_move(cycle_of(direction)))
             }
             Command::ResizeAxis { axis, sizing } => {
                 self.run_op(|core| core.resize_axis(axis_of(axis), sizing_of(sizing)))
             }
+            Command::ResizeEdge { direction, sizing } => {
+                self.run_op(|core| core.resize_edge(direction_of(direction), sizing_of(sizing)))
+            }
             Command::Promote => self.run_op(CoreState::promote),
+            Command::PromoteFocus => self.run_op(CoreState::promote_focus),
 
             // --- window state ------------------------------------------
             Command::ToggleFloat => self.run_op(CoreState::toggle_float),
+            Command::ToggleFloatOverride => {
+                // Not an operation on the model's geometry: nothing already on
+                // screen moves, the next window to appear is the one that
+                // notices. `add_window` reads the flag.
+                self.core.float_override = !self.core.float_override;
+                tracing::info!(
+                    float_override = self.core.float_override,
+                    "float override toggled"
+                );
+                Response::Ok
+            }
             Command::ToggleMaximize => self.run_op(CoreState::toggle_maximize),
             Command::ToggleMonocle => self.run_op(CoreState::toggle_monocle),
             Command::Minimize => self.run_op(CoreState::minimize_focused_window),
@@ -1783,11 +1804,17 @@ impl WindowManager {
             Command::FlipLayout { axis } => {
                 self.run_layout_op(|core| core.flip_layout(axis_of(axis)))
             }
+            // Not a layout change: the workspace keeps the layout it had, it
+            // just stops being arranged by it, so no `layout-change` goes out.
+            Command::ToggleTiling => self.run_op(CoreState::toggle_tiling),
 
             // --- workspaces ----------------------------------------------
             Command::FocusWorkspace { index } => self.run_op(|core| core.focus_workspace(index)),
             Command::MoveToWorkspace { index } => {
                 self.run_op(|core| core.move_to_workspace(index, true))
+            }
+            Command::SendToWorkspace { index } => {
+                self.run_op(|core| core.move_to_workspace(index, false))
             }
             Command::CycleWorkspace { direction } => {
                 self.run_op(|core| core.cycle_workspace(cycle_of(direction)))
@@ -1808,6 +1835,9 @@ impl WindowManager {
             Command::FocusMonitor { index } => self.run_op(|core| core.focus_monitor(index)),
             Command::MoveToMonitor { index } => {
                 self.run_op(|core| core.move_to_monitor(index, true))
+            }
+            Command::SendToMonitor { index } => {
+                self.run_op(|core| core.move_to_monitor(index, false))
             }
             Command::CycleMonitor { direction } => {
                 self.run_op(|core| core.cycle_monitor(cycle_of(direction)))
@@ -2813,6 +2843,230 @@ mod tests {
             direction: mochi_client::Direction::Right,
         });
         assert_eq!(wm.state().focused_window_id(), Some(WindowId(2)));
+    }
+
+    /// The window in each container of the first workspace, in ring order.
+    fn ring_order(wm: &WindowManager) -> Vec<Option<WindowId>> {
+        wm.state()
+            .workspace(0, 0)
+            .unwrap()
+            .containers()
+            .iter()
+            .map(mochi_core::model::Container::focused_window_id)
+            .collect()
+    }
+
+    #[test]
+    fn cycle_focus_walks_the_container_ring_by_position() {
+        // The point of this one next to `focus`: it never has to decide what
+        // is to the left, so it works the same on every layout.
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two"), window(3, "Three")]);
+        assert_eq!(wm.state().focused_window_id(), Some(WindowId(3)));
+
+        assert_eq!(
+            wm.handle_command(Command::CycleFocus {
+                direction: mochi_client::CycleDirection::Next,
+            })
+            .0,
+            Response::Ok
+        );
+        assert_eq!(
+            wm.state().focused_window_id(),
+            Some(WindowId(1)),
+            "the ring wraps"
+        );
+
+        wm.handle_command(Command::CycleFocus {
+            direction: mochi_client::CycleDirection::Previous,
+        });
+        assert_eq!(wm.state().focused_window_id(), Some(WindowId(3)));
+        assert_eq!(
+            ring_order(&wm),
+            vec![Some(WindowId(1)), Some(WindowId(2)), Some(WindowId(3))],
+            "focus alone moved nothing"
+        );
+    }
+
+    #[test]
+    fn cycle_move_swaps_the_focused_window_along_the_ring() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two"), window(3, "Three")]);
+        assert_eq!(wm.state().focused_window_id(), Some(WindowId(3)));
+
+        assert_eq!(
+            wm.handle_command(Command::CycleMove {
+                direction: mochi_client::CycleDirection::Next,
+            })
+            .0,
+            Response::Ok
+        );
+        assert_eq!(
+            ring_order(&wm),
+            vec![Some(WindowId(3)), Some(WindowId(2)), Some(WindowId(1))],
+            "the wrap swapped the last container with the first"
+        );
+        assert_eq!(
+            wm.state().focused_window_id(),
+            Some(WindowId(3)),
+            "the focus travelled with the window"
+        );
+    }
+
+    #[test]
+    fn promote_focus_focuses_the_front_of_the_ring_without_moving_anything() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two"), window(3, "Three")]);
+        let before = ring_order(&wm);
+        assert_eq!(wm.state().focused_window_id(), Some(WindowId(3)));
+
+        assert_eq!(wm.handle_command(Command::PromoteFocus).0, Response::Ok);
+        assert_eq!(wm.state().focused_window_id(), Some(WindowId(1)));
+        assert_eq!(
+            ring_order(&wm),
+            before,
+            "promote-focus is the half of promote that moves no window"
+        );
+    }
+
+    #[test]
+    fn toggle_tiling_stops_arranging_a_workspace_without_unmanaging_anything() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        assert!(wm.state().workspace(0, 0).unwrap().tile);
+
+        assert_eq!(wm.handle_command(Command::ToggleTiling).0, Response::Ok);
+        assert!(!wm.state().workspace(0, 0).unwrap().tile);
+        assert!(
+            wm.state()
+                .workspace(0, 0)
+                .unwrap()
+                .latest_layout()
+                .is_empty(),
+            "an untiled workspace lays nothing out"
+        );
+        assert_eq!(
+            wm.state().all_window_ids().count(),
+            2,
+            "this is not unmanage: both windows are still Mochi's"
+        );
+
+        wm.handle_command(Command::ToggleTiling);
+        assert!(wm.state().workspace(0, 0).unwrap().tile);
+        assert_eq!(wm.state().workspace(0, 0).unwrap().latest_layout().len(), 2);
+    }
+
+    #[test]
+    fn send_to_workspace_moves_the_window_and_leaves_the_focus_behind() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        assert_eq!(wm.state().focused_window_id(), Some(WindowId(2)));
+
+        assert_eq!(
+            wm.handle_command(Command::SendToWorkspace { index: 1 }).0,
+            Response::Ok
+        );
+        assert_eq!(wm.state().locate_window(WindowId(2)), Some((0, 1)));
+        assert_eq!(
+            wm.state().focused_indices().unwrap(),
+            (0, 0),
+            "send is move-to-workspace without the following"
+        );
+        assert_eq!(wm.state().workspace(0, 0).unwrap().containers().len(), 1);
+        assert_eq!(wm.state().focused_window_id(), Some(WindowId(1)));
+
+        // The contrast, on the very next command: `move-to-workspace` follows.
+        wm.handle_command(Command::MoveToWorkspace { index: 2 });
+        assert_eq!(wm.state().focused_indices().unwrap(), (0, 2));
+    }
+
+    #[test]
+    fn send_to_monitor_moves_the_window_and_leaves_the_focus_behind() {
+        let (mut wm, _) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        assert_eq!(wm.state().focused_window_id(), Some(WindowId(2)));
+
+        assert_eq!(
+            wm.handle_command(Command::SendToMonitor { index: 1 }).0,
+            Response::Ok
+        );
+        assert_eq!(wm.state().locate_window(WindowId(2)), Some((1, 0)));
+        assert_eq!(
+            wm.state().focused_monitor_idx(),
+            0,
+            "send is move-to-monitor without the following"
+        );
+        assert_eq!(wm.state().workspace(0, 0).unwrap().containers().len(), 1);
+        assert_eq!(wm.state().workspace(1, 0).unwrap().containers().len(), 1);
+    }
+
+    #[test]
+    fn resize_edge_moves_the_edge_it_was_given_and_no_other() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        // The focused window is the right hand tile, so its right edge is the
+        // edge of the screen and there is nothing on that side to push.
+        let before = wm.state().rect_for_window(WindowId(2)).unwrap();
+
+        assert_eq!(
+            wm.handle_command(Command::ResizeEdge {
+                direction: mochi_client::Direction::Right,
+                sizing: mochi_client::Sizing::Increase,
+            })
+            .0,
+            Response::Ok
+        );
+        assert_eq!(
+            wm.state().rect_for_window(WindowId(2)),
+            Some(before),
+            "resize-axis would have moved the other edge instead"
+        );
+
+        wm.handle_command(Command::ResizeEdge {
+            direction: mochi_client::Direction::Left,
+            sizing: mochi_client::Sizing::Increase,
+        });
+        let after = wm.state().rect_for_window(WindowId(2)).unwrap();
+        assert!(after.left < before.left, "{after:?} against {before:?}");
+        assert_eq!(after.right, before.right, "the far edge stayed put");
+        assert_eq!(after.top, before.top);
+        assert_eq!(after.bottom, before.bottom);
+    }
+
+    #[test]
+    fn toggle_float_override_floats_the_next_window_to_appear() {
+        let (mut wm, platform) = manager(vec![window(1, "One")]);
+        assert!(!wm.state().float_override);
+
+        assert_eq!(
+            wm.handle_command(Command::ToggleFloatOverride).0,
+            Response::Ok
+        );
+        assert!(wm.state().float_override);
+
+        platform.windows.lock().unwrap().push(window(2, "Two"));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(2));
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().floating_windows().len(),
+            1,
+            "the new window was tiled anyway"
+        );
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().containers().len(),
+            1,
+            "the window that was already tiled was disturbed"
+        );
+
+        wm.handle_command(Command::ToggleFloatOverride);
+        assert!(!wm.state().float_override);
+        platform.windows.lock().unwrap().push(window(3, "Three"));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(3));
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().containers().len(),
+            2,
+            "new windows are tiled again"
+        );
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().floating_windows().len(),
+            1,
+            "the one that floated was pulled back into the layout"
+        );
     }
 
     #[test]
