@@ -214,6 +214,14 @@ impl Hidden {
     pub fn show(&mut self, hwnd: Hwnd) -> Option<HidingBehaviour> {
         let previous = self.windows.remove(&hwnd);
         if previous.is_some() {
+            // Nothing is holding this handle any more, so the note on how to
+            // recognise it goes too. It used to be kept until the next restore,
+            // which is once per session: the map grew by one entry for every
+            // distinct window ever hidden, and a stale entry could later be
+            // written against a handle Windows had recycled for someone else.
+            if !self.faded.contains(&hwnd) {
+                self.identity.remove(&hwnd);
+            }
             self.write();
         }
         previous
@@ -258,8 +266,15 @@ impl Hidden {
 
     /// Records that Mochi set an alpha value on a window.
     pub fn fade(&mut self, hwnd: Hwnd) {
-        self.faded.insert(hwnd);
-        self.write();
+        // Only when something actually changed, the way `unfade` already does
+        // it. The caller re-fades the whole unfocused set on every pass, so an
+        // unconditional write meant one full serialise-and-rename of the crash
+        // record per faded window per focus change — a dozen windows open and
+        // one alt-tab was a dozen file writes, synchronously, on the thread
+        // that also has to answer every hotkey.
+        if self.faded.insert(hwnd) {
+            self.write();
+        }
     }
 
     /// Forgets that Mochi had faded a window, because it has since been put

@@ -46,7 +46,17 @@ pub fn log_directory() -> Result<PathBuf> {
 /// Returns a guard that must stay alive for as long as anything logs.
 pub fn init() -> Result<LogGuard> {
     let directory = log_directory()?;
-    let appender = tracing_appender::rolling::daily(&directory, LOG_FILE_NAME);
+    // Capped. A plain daily roll keeps every file for ever: a week of ordinary
+    // use is tens of megabytes across a growing pile of them, and the thirty
+    // lines that matter after something goes wrong are a rounding error inside
+    // it. A fortnight is long enough to explain a problem someone noticed a
+    // few days late.
+    let appender = tracing_appender::rolling::Builder::new()
+        .filename_prefix(LOG_FILE_NAME)
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .max_log_files(14)
+        .build(&directory)
+        .with_context(|| format!("could not open a log file in {}", directory.display()))?;
     let (writer, worker) = tracing_appender::non_blocking(appender);
 
     let console_filter =

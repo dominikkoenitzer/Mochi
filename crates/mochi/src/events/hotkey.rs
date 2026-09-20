@@ -195,6 +195,12 @@ const fn is_modifier(vk: u16) -> bool {
 /// its release would have nothing to follow and would reach the application on
 /// its own, which is the latched key this table exists to prevent.
 fn record_press(vk: u16, swallowed: bool) -> Option<bool> {
+    record_press_with(vk, swallowed, |vk| down(VIRTUAL_KEY(vk)))
+}
+
+/// [`record_press`] with the "is this key still held" question injected, so the
+/// full-table path can be tested without a keyboard.
+fn record_press_with(vk: u16, swallowed: bool, still_down: impl Fn(u16) -> bool) -> Option<bool> {
     PRESSES.with(|cell| {
         let mut keys = cell.borrow_mut();
         if let Some(slot) = keys.iter_mut().find(|slot| slot.0 == vk) {
@@ -203,10 +209,35 @@ fn record_press(vk: u16, swallowed: bool) -> Option<bool> {
             slot.1 = swallowed;
             return Some(false);
         }
+        if !keys.iter().any(|slot| slot.0 == 0) {
+            // (see `reclaim`)
+            // Full. Not because sixteen keys are really held, but because a
+            // key-up is not always delivered: Ctrl-Alt-Del, Win-L and a UAC
+            // prompt all switch to the secure desktop, where the release goes
+            // to hooks on *that* desktop and never reaches this one. The slot
+            // then stays taken for the life of the process. Sixteen of those
+            // and every binding starts behaving as if it were auto-repeat,
+            // with no way back short of restarting Mochi.
+            //
+            // Windows still knows which keys are physically down, so ask it.
+            reclaim(&mut keys, &still_down);
+        }
         let slot = keys.iter_mut().find(|slot| slot.0 == 0)?;
         *slot = (vk, swallowed);
         Some(true)
     })
+}
+
+/// Frees the slots of keys that are no longer held.
+///
+/// Split out from the caller so it can be tested without a keyboard: the
+/// predicate is `GetAsyncKeyState` in the daemon and a list in the tests.
+fn reclaim(keys: &mut [(u16, bool); 16], still_down: impl Fn(u16) -> bool) {
+    for slot in keys.iter_mut() {
+        if slot.0 != 0 && !still_down(slot.0) {
+            *slot = (0, false);
+        }
+    }
 }
 
 /// Whether this release belongs to a press that was swallowed, clearing it.
@@ -559,6 +590,37 @@ pub fn run_shell(shell: Shell, line: &str) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_key_whose_release_never_arrived_does_not_hold_its_slot_for_ever() {
+        // Ctrl-Alt-Del, Win-L and a UAC prompt all switch to the secure
+        // desktop, so the key-up is delivered to hooks over there and never
+        // reaches this one. The slot stayed taken for the life of the process,
+        // and sixteen of those left every binding behaving as auto-repeat with
+        // no way back short of restarting Mochi.
+        let mut keys = [(0u16, false); 16];
+        for (i, slot) in keys.iter_mut().enumerate() {
+            *slot = (u16::try_from(i + 1).unwrap(), true);
+        }
+        assert!(
+            !keys.iter().any(|slot| slot.0 == 0),
+            "the table starts full"
+        );
+
+        // Only key 7 is still physically held.
+        reclaim(&mut keys, |vk| vk == 7);
+
+        assert_eq!(
+            keys.iter().filter(|slot| slot.0 != 0).count(),
+            1,
+            "the keys that are no longer down kept their slots"
+        );
+        assert!(
+            keys.iter().any(|slot| slot.0 == 7 && slot.1),
+            "the key that really is held was forgotten, so its release would \
+             be handed to the application after being swallowed"
+        );
+    }
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LSHIFT, VK_RSHIFT};
 
     use super::*;
@@ -679,17 +741,28 @@ mod tests {
         // went, so it has to be handed on: swallowing it would strand the
         // release. Sixteen keys held at once is already past what a keyboard
         // reports, so this is the safety valve, not the normal path.
+        // Every one of the sixteen really is held, so nothing can be reclaimed.
+        let all_held = |_vk: u16| true;
         for vk in 0x41..0x51u16 {
-            assert_eq!(record_press(vk, true), Some(true), "slot for {vk:#x}");
+            assert_eq!(
+                record_press_with(vk, true, all_held),
+                Some(true),
+                "slot for {vk:#x}"
+            );
         }
         assert_eq!(
-            record_press(0x60, true),
+            record_press_with(0x60, true, all_held),
             None,
             "a seventeenth held key claimed a slot that does not exist"
         );
-        for vk in 0x41..0x51u16 {
-            assert!(take_press(vk));
-        }
+        // But when they are not held, the slots come back rather than wedging
+        // every binding for the life of the process.
+        assert_eq!(
+            record_press_with(0x60, true, |_| false),
+            Some(true),
+            "slots left behind by a lost key-up were never reclaimed"
+        );
+        assert!(take_press(0x60));
     }
 
     #[test]

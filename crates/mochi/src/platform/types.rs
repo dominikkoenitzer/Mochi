@@ -365,7 +365,14 @@ pub fn is_manageable_with(w: &WindowInfo, allow_tool_window: bool) -> Result<(),
     // were managed like ordinary windows: tiled, and hidden on a workspace
     // switch.
     if SHELL_CLASS_PREFIXES.iter().any(|prefix| {
-        w.class.len() >= prefix.len() && w.class[..prefix.len()].eq_ignore_ascii_case(prefix)
+        // `get`, not a slice. A class name is whatever the application passed
+        // to RegisterClassW, so it can be any UTF-8, and indexing by a byte
+        // length that lands inside a multi-byte character panics. A panic here
+        // is not a mis-tiled window: it is in the event loop, so it takes the
+        // whole window manager down and leaves the desktop untiled.
+        w.class
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
     }) {
         return Err(Unmanageable::ShellClass);
     }
@@ -435,6 +442,25 @@ mod tests {
         let mut w = app_window();
         w.style |= style::WS_CHILD;
         assert_eq!(is_manageable(&w), Err(Unmanageable::Child));
+    }
+
+    #[test]
+    fn a_class_name_that_is_not_ascii_does_not_take_the_daemon_down() {
+        // A class name is whatever the application handed RegisterClassW, so
+        // it can be any UTF-8. Comparing a prefix by slicing at its byte
+        // length panics when that byte lands inside a character — and this
+        // runs in the event loop, so the panic is the whole window manager,
+        // not one mis-tiled window.
+        for class in [
+            "日本語のウィンドウクラスの名前",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAA€",
+            "Ünicöde",
+            "",
+        ] {
+            let mut w = app_window();
+            w.class = class.into();
+            let _ = is_manageable(&w);
+        }
     }
 
     #[test]
