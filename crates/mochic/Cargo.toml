@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 mochi-client = { workspace = true, features = ["clap"] }
 mochi-core = { workspace = true }
+mochi-hotkey = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

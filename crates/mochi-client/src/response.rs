@@ -25,6 +25,12 @@ pub enum Response {
         /// A single JSON scalar: number, string or boolean.
         answer: serde_json::Value,
     },
+    /// The bindings the hotkey daemon holds, as produced by `{"cmd":"hotkeys"}`.
+    Hotkeys {
+        /// Opaque bindings document. Its shape is owned by the daemon; the
+        /// table `mochic hotkeys` prints is only a rendering of it.
+        hotkeys: serde_json::Value,
+    },
 }
 
 impl Response {

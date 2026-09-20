@@ -21,8 +21,20 @@ pub const CONFIG_FILE_NAME: &str = "mochi.json";
 /// Environment variable that overrides the configuration path.
 pub const CONFIG_ENV: &str = "MOCHI_CONFIG";
 
+/// Environment variable that overrides the hotkey file path.
+pub const HOTKEYS_ENV: &str = "MOCHI_HOTKEYS";
+
+/// Where the hotkey file lives when nothing says otherwise, relative to the
+/// user profile.
+pub const HOTKEYS_PATH: [&str; 3] = [".config", "mochi", "hotkeys"];
+
+/// The other file name [`resolve_hotkeys_path`] accepts, for a setup that
+/// arrived from a standalone hotkey daemon and still uses its file name.
+pub const HOTKEYS_LEGACY_FILE_NAME: &str = "whkdrc";
+
 /// Editors save by writing a temporary file and renaming it, which produces a
-/// burst of events. Anything inside this window after the first one is dropped.
+/// burst of events. The watcher waits for this long of quiet before it reports
+/// one change, so a burst costs one reload and the last write in it still wins.
 const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// The stub `mochic quickstart` writes.
@@ -51,6 +63,82 @@ pub fn resolve_path(explicit: Option<&Path>) -> Result<PathBuf> {
     Ok(user_profile()?.join(CONFIG_FILE_NAME))
 }
 
+/// Resolves the hotkey file path.
+///
+/// Precedence: the `--hotkeys` argument, then `MOCHI_HOTKEYS`, then
+/// `%USERPROFILE%\.config\mochi\hotkeys`, then the same directory's `whkdrc`.
+/// The last one is there so a desktop that came from a standalone hotkey daemon
+/// keeps working the day Mochi takes the job over: the file is read where it
+/// already lies, under the name it already has.
+///
+/// When neither file exists the first path is returned anyway, so the watcher
+/// has something to wait on and the file starts working the moment it appears.
+pub fn resolve_hotkeys_path(explicit: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(from_env) = std::env::var_os(HOTKEYS_ENV).filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(from_env));
+    }
+
+    let directory = HOTKEYS_PATH
+        .iter()
+        .take(HOTKEYS_PATH.len() - 1)
+        .fold(user_profile()?, |path, part| path.join(part));
+    let preferred = directory.join(HOTKEYS_PATH[HOTKEYS_PATH.len() - 1]);
+    if preferred.exists() {
+        return Ok(preferred);
+    }
+
+    let legacy = directory.join(HOTKEYS_LEGACY_FILE_NAME);
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    Ok(preferred)
+}
+
+/// Reads and parses the hotkey file.
+///
+/// A missing file is not an error and not a warning: hotkeys are optional, and
+/// plenty of setups drive Mochi from a separate hotkey daemon or from scripts.
+/// A file that is there but has broken lines is loaded anyway, with every bad
+/// line reported: one typo must not cost the user all fifty of their working
+/// bindings. The errors come back so the daemon can log them and `mochic
+/// hotkeys` can show them.
+pub fn load_hotkeys(path: &Path) -> (mochi_hotkey::Bindings, Vec<String>) {
+    if !path.exists() {
+        tracing::info!(path = %path.display(), "no hotkey file, Mochi binds no keys");
+        return (mochi_hotkey::Bindings::default(), Vec::new());
+    }
+
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) => {
+            let message = format!("could not read {}: {e}", path.display());
+            tracing::error!(message);
+            return (mochi_hotkey::Bindings::default(), vec![message]);
+        }
+    };
+
+    let (bindings, errors) = mochi_hotkey::Bindings::parse_lossy(&text);
+    for error in &errors {
+        tracing::error!(path = %path.display(), "{error}");
+    }
+    tracing::info!(
+        path = %path.display(),
+        bindings = bindings.len(),
+        broken = errors.len(),
+        "loaded the hotkeys"
+    );
+    (
+        bindings,
+        errors
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+    )
+}
+
 /// The user profile directory, the home of `mochi.json`.
 pub fn user_profile() -> Result<PathBuf> {
     std::env::var_os("USERPROFILE")
@@ -63,6 +151,18 @@ pub fn user_profile() -> Result<PathBuf> {
 ///
 /// Returns true when a file was written.
 pub fn write_default(path: &Path) -> Result<bool> {
+    write_if_absent(path, DEFAULT_CONFIG)
+}
+
+/// Writes the shipped hotkey file to `path` unless something is already there.
+///
+/// Returns true when a file was written.
+pub fn write_default_hotkeys(path: &Path) -> Result<bool> {
+    write_if_absent(path, mochi_hotkey::DEFAULT)
+}
+
+/// Creates the parent directory and writes `contents`, never clobbering.
+fn write_if_absent(path: &Path, contents: &str) -> Result<bool> {
     if path.exists() {
         return Ok(false);
     }
@@ -70,7 +170,7 @@ pub fn write_default(path: &Path) -> Result<bool> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
     }
-    std::fs::write(path, DEFAULT_CONFIG)
+    std::fs::write(path, contents)
         .with_context(|| format!("could not write {}", path.display()))?;
     Ok(true)
 }
@@ -196,12 +296,22 @@ pub fn expand_env(raw: &str) -> String {
     out
 }
 
-/// Watches the configuration file and turns changes into [`Event::ConfigChanged`].
+/// Watches a file and turns changes into [`Event::ConfigChanged`].
 ///
 /// The *directory* is watched, not the file: a rename-into-place save would
 /// otherwise take the watch with it and the second save would go unnoticed.
+///
+/// Between the watcher and the window manager sits a thread that collects the
+/// burst one save produces and reports it once, after [`DEBOUNCE`] of quiet.
+/// Counting from the *first* event of a burst instead, and dropping the rest,
+/// loses a save that lands just after one: the events that would have reported
+/// it were already spent, and nothing comes along later to make up for it.
 pub struct ConfigWatcher {
-    _watcher: RecommendedWatcher,
+    /// Dropped before the thread is joined: the closure inside it holds the
+    /// other sender, and the thread ends when every sender is gone.
+    watcher: Option<RecommendedWatcher>,
+    dirty: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
     path: PathBuf,
 }
 
@@ -213,8 +323,15 @@ impl ConfigWatcher {
             .filter(|p| !p.as_os_str().is_empty())
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let watched = path.clone();
-        let mut last = std::time::Instant::now() - DEBOUNCE;
 
+        let (dirty_tx, dirty_rx) = std::sync::mpsc::channel::<()>();
+        let reported = path.clone();
+        let thread = std::thread::Builder::new()
+            .name("mochi-file-watch".into())
+            .spawn(move || settle(&dirty_rx, &tx, &reported))
+            .context("could not spawn the file watcher thread")?;
+
+        let notify_dirty = dirty_tx.clone();
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
                 let Ok(event) = result else {
@@ -229,11 +346,7 @@ impl ConfigWatcher {
                 if !event.paths.iter().any(|p| same_file(p, &watched)) {
                     return;
                 }
-                if last.elapsed() < DEBOUNCE {
-                    return;
-                }
-                last = std::time::Instant::now();
-                let _ = tx.send(Event::ConfigChanged(watched.clone()));
+                let _ = notify_dirty.send(());
             })
             .context("could not create a file watcher")?;
 
@@ -243,7 +356,9 @@ impl ConfigWatcher {
 
         tracing::debug!(path = %path.display(), "watching the configuration");
         Ok(Self {
-            _watcher: watcher,
+            watcher: Some(watcher),
+            dirty: Some(dirty_tx),
+            thread: Some(thread),
             path,
         })
     }
@@ -251,6 +366,33 @@ impl ConfigWatcher {
     /// The path being watched.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl Drop for ConfigWatcher {
+    fn drop(&mut self) {
+        // The thread waits on the channel, so dropping every sender is what
+        // tells it to stop. The watcher closure holds one, this struct the
+        // other, and both have to go before the join can return.
+        self.watcher = None;
+        self.dirty = None;
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            tracing::error!("the file watcher thread panicked");
+        }
+    }
+}
+
+/// Reports one change per burst, once the writes have stopped.
+fn settle(dirty: &std::sync::mpsc::Receiver<()>, tx: &EventSender, path: &Path) {
+    while dirty.recv().is_ok() {
+        // Wait out the rest of the burst. A save that is still in progress
+        // keeps extending the quiet period rather than starting a second one.
+        while dirty.recv_timeout(DEBOUNCE).is_ok() {}
+        if tx.send(Event::ConfigChanged(path.to_path_buf())).is_err() {
+            return;
+        }
     }
 }
 
@@ -438,6 +580,133 @@ mod tests {
         }
 
         drop(watcher);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_saves_in_quick_succession_do_not_lose_the_second() {
+        // The bug this covers: a debounce that counts from the first event of a
+        // burst and drops the rest will drop a real save that lands just after
+        // one, and nothing comes along later to report it. The desktop is then
+        // running the file before last, with no sign that anything went wrong.
+        let dir = std::env::temp_dir().join(format!("mochi-burst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mochi.json");
+        std::fs::write(&path, "{}").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watcher = ConfigWatcher::start(path.clone(), tx).unwrap();
+
+        std::fs::write(&path, "{\"first\":true}").unwrap();
+        std::thread::sleep(DEBOUNCE / 5);
+        std::fs::write(&path, "{\"second\":true}").unwrap();
+
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the burst should be reported");
+        // Whatever the watcher reported, the file it points at has to be the
+        // one that was written last.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"second\":true}");
+
+        // And a save after the burst is still noticed, rather than the thread
+        // having gone away with it.
+        std::fs::write(&path, "{\"third\":true}").unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a later save should be reported too");
+
+        drop(watcher);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_explicit_hotkey_path_wins() {
+        let explicit = PathBuf::from(r"D:\somewhere\keys");
+        assert_eq!(resolve_hotkeys_path(Some(&explicit)).unwrap(), explicit);
+    }
+
+    #[test]
+    fn the_default_hotkey_path_sits_under_the_user_profile() {
+        if std::env::var_os(HOTKEYS_ENV).is_some() {
+            return;
+        }
+        let path = resolve_hotkeys_path(None).unwrap();
+        let directory = path.parent().unwrap();
+        assert!(path.starts_with(user_profile().unwrap()));
+        assert_eq!(directory.file_name().unwrap(), "mochi");
+        // Either the preferred name or the one a migrated setup still uses.
+        let name = path.file_name().unwrap();
+        assert!(
+            name == HOTKEYS_PATH[2] || name == HOTKEYS_LEGACY_FILE_NAME,
+            "unexpected hotkey file name: {name:?}"
+        );
+    }
+
+    #[test]
+    fn the_default_hotkeys_parse_and_bind_every_command_group() {
+        let (bindings, errors) = mochi_hotkey::Bindings::parse_lossy(mochi_hotkey::DEFAULT);
+        assert!(
+            errors.is_empty(),
+            "the shipped hotkeys do not parse: {errors:?}"
+        );
+
+        let bound = |text: &str| {
+            bindings
+                .get(text.parse().expect("the test spells its triggers right"))
+                .map(|binding| binding.action.clone())
+        };
+        assert_eq!(
+            bound("alt + shift + g"),
+            Some(mochi_hotkey::Action::Command(
+                mochi_client::Command::ToggleGameMode
+            ))
+        );
+        assert_eq!(
+            bound("alt + 3"),
+            Some(mochi_hotkey::Action::Command(
+                mochi_client::Command::FocusWorkspace { index: 2 }
+            ))
+        );
+        assert!(bound("alt + shift + 9").is_some());
+    }
+
+    #[test]
+    fn a_hotkey_file_with_one_bad_line_still_binds_the_rest() {
+        let dir = std::env::temp_dir().join(format!("mochi-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hotkeys");
+        std::fs::write(&path, "alt + h : focus left\nalt + nosuchkey : retile\n").unwrap();
+
+        let (bindings, errors) = load_hotkeys(&path);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].contains("nosuchkey"),
+            "unhelpful error: {errors:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_hotkey_file_is_not_an_error() {
+        let (bindings, errors) = load_hotkeys(Path::new(r"D:\no\such\hotkeys"));
+        assert!(bindings.is_empty());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn the_shipped_hotkeys_are_written_once_and_never_clobbered() {
+        let dir = std::env::temp_dir().join(format!("mochi-keys-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(".config").join("mochi").join("hotkeys");
+
+        assert!(write_default_hotkeys(&path).unwrap());
+        std::fs::write(&path, "alt + h : retile\n").unwrap();
+        assert!(!write_default_hotkeys(&path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "alt + h : retile\n"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

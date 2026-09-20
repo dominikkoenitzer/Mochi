@@ -15,7 +15,7 @@
 
 #![cfg(windows)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command as OsCommand, Stdio};
 use std::time::{Duration, Instant};
 
@@ -87,12 +87,21 @@ struct Daemon {
 }
 
 impl Daemon {
+    /// Starts the daemon with no hotkeys bound.
+    ///
+    /// Every test but the hotkey one wants this: a daemon that installed a
+    /// keyboard hook and read the user's own hotkey file would fight whatever
+    /// is already binding those keys on the desktop the tests run on.
+    fn start(tag: &str) -> Daemon {
+        Daemon::start_with(tag, &["--no-hotkeys"])
+    }
+
     /// Starts the daemon against the test config, managing only the testbed
     /// class, with `RUST_LOG=debug` going to a log file under `%TEMP%`.
-    fn start(tag: &str) -> Daemon {
+    fn start_with(tag: &str, extra: &[&str]) -> Daemon {
         // A daemon left over from an earlier run would take the single
         // instance mutex and the new one would exit at once.
-        let _ = send(&Command::Stop { whkd: false });
+        let _ = send(&Command::Stop);
         wait_for(STEP, || !mochi_client::is_running()).expect("an old daemon refused to stop");
 
         let dir = temp_dir();
@@ -105,6 +114,7 @@ impl Daemon {
             .arg(mochi_testbed::TEST_WINDOW_CLASS)
             .arg("--config")
             .arg(config_path())
+            .args(extra)
             .env("RUST_LOG", "debug")
             .stdin(Stdio::null())
             .stdout(Stdio::from(file))
@@ -126,7 +136,7 @@ impl Daemon {
     /// Asks the daemon to stop and waits for the pipe to go away.
     fn stop(&mut self) {
         if mochi_client::is_running() {
-            let _ = send(&Command::Stop { whkd: false });
+            let _ = send(&Command::Stop);
         }
         let _ = wait_for(Duration::from_secs(10), || !mochi_client::is_running());
         let _ = self.child.wait();
@@ -1300,66 +1310,70 @@ fn a_window_that_defends_a_minimum_size_does_not_make_the_daemon_thrash() {
 }
 
 // ---------------------------------------------------------------------------
-// test six: the game mode script, which is the one part of Mochi that is not
-// Rust and had never been run
+// test six: the hotkeys, the one part of the daemon the pipe cannot reach.
+// Real key presses, injected into the real desktop.
 // ---------------------------------------------------------------------------
 
-/// The directory `cargo` put the binaries in, which is also where `mochic` is.
-fn bin_dir() -> Option<PathBuf> {
-    daemon_binary()?.parent().map(Path::to_path_buf)
-}
-
-/// `scripts/game-mode.ps1` in the repository this test was built from.
-fn game_mode_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("scripts")
-        .join("game-mode.ps1")
-}
-
-/// A PATH with Windows and the freshly built binaries on it and nothing else.
+/// The keys this test presses.
 ///
-/// The script stops and restarts `whkd` when it can find one. The user's own
-/// hotkey daemon is running while this test runs, so the child process gets a
-/// PATH that cannot reach any `whkd.exe` and the script takes its documented
-/// "only the tiling pause is toggled" path.
-fn sealed_path(bin: &Path) -> String {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
-    format!(r"{root}\System32;{root};{}", bin.display())
+/// F13 to F16 exist in the virtual key table and on no keyboard sold this
+/// century, and no layout produces them. Nothing else on this desktop is
+/// listening for them, which is the only reason it is safe for a test to inject
+/// key presses into a session the user is sitting in front of. No test may ever
+/// press a key a person or another program could mean.
+mod keys {
+    /// `VK_F13`.
+    pub const F13: u16 = 0x7C;
+    /// `VK_F14`.
+    pub const F14: u16 = 0x7D;
+    /// `VK_F16`.
+    pub const F16: u16 = 0x7F;
+    /// `VK_LMENU`, the left Alt key.
+    pub const LEFT_ALT: u16 = 0xA4;
 }
 
-/// Runs the script once and returns everything it printed.
-fn run_game_mode(bin: &Path, full: &Path, minimal: &Path) -> Result<String, String> {
-    let output = OsCommand::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(game_mode_script())
-        .arg("-MochiBin")
-        .arg(bin)
-        .arg("-ConfigHome")
-        .arg(full)
-        .arg("-GameModeConfigHome")
-        .arg(minimal)
-        .env("Path", sealed_path(bin))
-        .output()
-        .map_err(|e| format!("could not run the script: {e}"))?;
+/// Presses a key, with one modifier held around it, the way a person would.
+fn tap(vk: u16, modifier: Option<u16>) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+        VIRTUAL_KEY,
+    };
 
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if output.status.success() {
-        Ok(text)
-    } else {
-        Err(format!("the script exited with {}: {text}", output.status))
+    fn event(vk: u16, up: bool) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: 0,
+                    dwFlags: if up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        KEYBD_EVENT_FLAGS(0)
+                    },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
     }
+
+    let mut inputs = Vec::with_capacity(4);
+    inputs.extend(modifier.map(|m| event(m, false)));
+    inputs.push(event(vk, false));
+    inputs.push(event(vk, true));
+    inputs.extend(modifier.map(|m| event(m, true)));
+
+    let size = std::mem::size_of::<INPUT>() as i32;
+    let sent = unsafe { SendInput(&inputs, size) } as usize;
+    assert_eq!(
+        sent,
+        inputs.len(),
+        "the desktop refused an injected key press"
+    );
+    // The press travels through the hook thread and the command loop. Nothing
+    // here polls a key, so this is the one place the test has to give it time.
+    std::thread::sleep(Duration::from_millis(150));
 }
 
 /// Whether the daemon says tiling is paused.
@@ -1367,91 +1381,179 @@ fn paused() -> Option<bool> {
     state()?["paused"].as_bool()
 }
 
-#[test]
-fn game_mode_pauses_and_resumes_tiling() {
-    skip_unless_allowed!("game_mode_pauses_and_resumes_tiling");
-    let Some(bin) = bin_dir() else {
-        eprintln!("skipping game_mode_pauses_and_resumes_tiling: no binary directory");
-        return;
-    };
-    if !bin.join("mochic.exe").exists() {
-        eprintln!("skipping game_mode_pauses_and_resumes_tiling: mochic is not built");
-        eprintln!("  build it first: cargo build --workspace");
-        return;
+/// The bindings the daemon holds, as `mochic hotkeys --json` prints them.
+fn hotkey_document() -> Option<Value> {
+    match send(&Command::Hotkeys) {
+        Ok(Response::Hotkeys { hotkeys }) => Some(hotkeys),
+        _ => None,
     }
+}
 
-    let scratch = temp_dir().join("game-mode");
+/// How many bindings are loaded.
+fn hotkey_count() -> usize {
+    hotkey_document()
+        .and_then(|d| d["bindings"].as_array().map(Vec::len))
+        .unwrap_or(0)
+}
+
+#[test]
+fn hotkeys_drive_the_daemon_and_stay_out_of_the_way() {
+    skip_unless_allowed!("hotkeys_drive_the_daemon_and_stay_out_of_the_way");
+
+    let scratch = temp_dir().join("hotkeys");
     let _ = std::fs::remove_dir_all(&scratch);
-    let full = scratch.join("full");
-    let minimal = scratch.join("minimal");
-    std::fs::create_dir_all(&full).expect("could not make the scratch config directory");
+    std::fs::create_dir_all(&scratch).expect("could not make the hotkey scratch directory");
+    let file = scratch.join("hotkeys");
+    let marker = scratch.join("shell-ran.txt");
 
-    let mut daemon = Daemon::start("game-mode");
+    let bindings = format!(
+        ".shell cmd\n\nf13             : toggle-pause\nalt + f14       : toggle-game-mode\nf16             : echo ran > \"{}\"\n",
+        marker.display()
+    );
+    std::fs::write(&file, &bindings).expect("could not write the hotkey file");
+
+    let mut daemon = Daemon::start_with("hotkeys", &["--hotkeys", &file.to_string_lossy()]);
     let log = daemon.log();
     let windows = TestWindows::spawn(2, 0).expect("could not spawn the test windows");
 
     let mut steps = Steps::default();
 
-    steps.step("the daemon starts unpaused", || {
+    steps.step("the daemon binds the file it was given", || {
         wait_for(Duration::from_secs(10), || managed_count() == 2)
             .map_err(|_| format!("state shows {} windows", managed_count()))?;
-        check(paused() == Some(false), "the daemon came up paused")
+        let document = hotkey_document().ok_or("the daemon reported no hotkeys")?;
+        check(
+            document["bindings"].as_array().map(Vec::len) == Some(3),
+            format!("expected three bindings, got {document}"),
+        )?;
+        check(
+            document["errors"].as_array().is_some_and(Vec::is_empty),
+            format!("the file did not parse cleanly: {document}"),
+        )
     });
 
-    steps.step("the script turns game mode on", || {
-        let text = run_game_mode(&bin, &full, &minimal)?;
-        check(
-            text.contains("game mode: ON"),
-            format!("the script said: {text}"),
-        )?;
-        check(
-            text.contains("whkd.exe not found"),
-            "the script found a whkd and this test must never let it".to_owned(),
-        )?;
+    steps.step("a bound key runs its command", || {
+        check(paused() == Some(false), "the daemon came up paused")?;
+        tap(keys::F13, None);
         check(
             paused() == Some(true),
-            "tiling is not paused after game mode on".to_owned(),
-        )
-    });
-
-    steps.step(
-        "it wrote a minimal hotkey config with only the toggle",
-        || {
-            let file = minimal.join("whkdrc");
-            let text = std::fs::read_to_string(&file)
-                .map_err(|e| format!("{} is not readable: {e}", file.display()))?;
-            check(
-                text.contains("alt + shift + g"),
-                format!("no toggle binding in {}", file.display()),
-            )?;
-            check(
-                text.lines().filter(|l| l.contains(" : ")).count() == 1,
-                format!("more than the toggle survived game mode:\n{text}"),
-            )
-        },
-    );
-
-    steps.step("a paused daemon leaves the windows alone", || {
-        let before: Vec<_> = infos(&windows).iter().map(|w| (w.hwnd, w.frame)).collect();
-        command(&Command::Retile)?;
-        std::thread::sleep(Duration::from_millis(300));
-        let after: Vec<_> = infos(&windows).iter().map(|w| (w.hwnd, w.frame)).collect();
-        check(before == after, "a paused daemon moved a window".to_owned())
-    });
-
-    steps.step("the same key turns game mode off again", || {
-        let text = run_game_mode(&bin, &full, &minimal)?;
-        check(
-            text.contains("game mode: OFF"),
-            format!("the script said: {text}"),
+            "F13 did not reach toggle-pause".to_owned(),
         )?;
+        tap(keys::F13, None);
         check(
             paused() == Some(false),
-            "tiling is still paused after game mode off".to_owned(),
+            "the second F13 did not resume tiling".to_owned(),
         )
     });
 
-    steps.step("tiling works again", || {
+    steps.step("the modifiers are part of the trigger", || {
+        // Alt+F14 is bound; F14 alone is not, and neither is Alt+F13.
+        tap(keys::F14, None);
+        check(
+            paused() == Some(false),
+            "an unbound key acted anyway".to_owned(),
+        )?;
+        tap(keys::F13, Some(keys::LEFT_ALT));
+        check(
+            paused() == Some(false),
+            "a bound key with an extra modifier acted anyway".to_owned(),
+        )
+    });
+
+    steps.step("game mode suspends every binding but its own", || {
+        tap(keys::F14, Some(keys::LEFT_ALT));
+        check(
+            paused() == Some(true),
+            "game mode did not pause tiling".to_owned(),
+        )?;
+        check(
+            hotkey_document().is_some_and(|d| d["gate"] == "game-mode"),
+            "the daemon does not report itself in game mode".to_owned(),
+        )?;
+
+        // In game mode this key belongs to the game, not to Mochi.
+        tap(keys::F13, None);
+        check(
+            paused() == Some(true),
+            "a suspended binding fired during game mode".to_owned(),
+        )
+    });
+
+    steps.step("the same key leaves game mode again", || {
+        tap(keys::F14, Some(keys::LEFT_ALT));
+        check(
+            paused() == Some(false),
+            "game mode did not resume tiling".to_owned(),
+        )?;
+        check(
+            hotkey_document().is_some_and(|d| d["gate"] == "all"),
+            "the bindings did not come back".to_owned(),
+        )?;
+        tap(keys::F13, None);
+        let acted = paused() == Some(true);
+        tap(keys::F13, None);
+        check(acted, "the bindings are still suspended".to_owned())
+    });
+
+    steps.step("a shell binding starts its program", || {
+        let _ = std::fs::remove_file(&marker);
+        tap(keys::F16, None);
+        wait_for(Duration::from_secs(5), || marker.exists())
+            .map_err(|_| format!("{} was never written", marker.display()))
+    });
+
+    steps.step("saving the file rebinds the keys", || {
+        std::fs::write(&file, ".shell cmd\n\nf13 : retile\n")
+            .map_err(|e| format!("could not rewrite the hotkey file: {e}"))?;
+        wait_for(Duration::from_secs(10), || hotkey_count() == 1)
+            .map_err(|_| format!("the daemon still holds {} bindings", hotkey_count()))?;
+        // F13 retiles now instead of pausing, so the pause state must not move.
+        tap(keys::F13, None);
+        check(
+            paused() == Some(false),
+            "the old binding fired after a reload".to_owned(),
+        )
+    });
+
+    steps.step("a broken line costs only itself", || {
+        std::fs::write(
+            &file,
+            ".shell cmd\n\nf13 : toggle-pause\nalt + nosuchkey : retile\n",
+        )
+        .map_err(|e| format!("could not rewrite the hotkey file: {e}"))?;
+        wait_for(Duration::from_secs(10), || {
+            hotkey_document().is_some_and(|d| {
+                d["bindings"].as_array().map(Vec::len) == Some(1)
+                    && d["errors"].as_array().map(Vec::len) == Some(1)
+            })
+        })
+        .map_err(|_| format!("the daemon reports {:?}", hotkey_document()))?;
+        tap(keys::F13, None);
+        let acted = paused() == Some(true);
+        tap(keys::F13, None);
+        check(acted, "the good line stopped working too".to_owned())
+    });
+
+    steps.step("hotkeys can be turned off and on again", || {
+        command(&Command::SetHotkeys {
+            state: mochi_client::BooleanState::Disable,
+        })?;
+        tap(keys::F13, None);
+        check(
+            paused() == Some(false),
+            "a key fired while hotkeys were off".to_owned(),
+        )?;
+
+        command(&Command::SetHotkeys {
+            state: mochi_client::BooleanState::Enable,
+        })?;
+        tap(keys::F13, None);
+        let acted = paused() == Some(true);
+        tap(keys::F13, None);
+        check(acted, "hotkeys did not come back".to_owned())
+    });
+
+    steps.step("tiling still works", || {
         wait_for_tiling(&windows, 2).map(|_| ())
     });
 

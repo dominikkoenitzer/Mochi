@@ -1,9 +1,10 @@
 //! Everything that can wake the window manager loop.
 //!
-//! Three producers feed one `std::sync::mpsc` channel:
+//! Four producers feed one `std::sync::mpsc` channel:
 //!
 //! * [`winevent`] installs `SetWinEventHook` hooks on their own thread,
 //! * [`message_window`] owns a hidden window for display, DPI and session news,
+//! * [`hotkey`] holds a low-level keyboard hook and reports bound key presses,
 //! * [`crate::ipc`] turns pipe traffic into [`Event::Command`].
 //!
 //! Nothing else is allowed to touch the state, which is why there is not a
@@ -16,6 +17,7 @@ use mochi_client::{Command, Response, SessionChangeKind};
 
 use crate::platform::Hwnd;
 
+pub mod hotkey;
 pub mod message_window;
 pub mod mouse;
 pub mod winevent;
@@ -214,6 +216,14 @@ pub enum Event {
     },
     /// The configuration file on disk changed.
     ConfigChanged(PathBuf),
+    /// A bound key was pressed. The press was swallowed before it reached the
+    /// desktop, so this event is the only thing that still knows about it.
+    Hotkey {
+        /// The keys that were held, for the log.
+        trigger: mochi_hotkey::Trigger,
+        /// What the user bound them to.
+        action: Box<mochi_hotkey::Action>,
+    },
     /// A client sent a command and is waiting for the answer.
     Command {
         /// What was asked.

@@ -36,6 +36,7 @@ use mochi_core::rules::{
 use mochi_core::{Changes, Rect, State as CoreState};
 
 use crate::config;
+use crate::events::hotkey::{Gate, HotkeyDaemon};
 use crate::events::{Event, EventReceiver, EventSender, MonitorEventKind, WindowEventKind};
 use crate::ipc::Subscribers;
 use crate::platform::types::FRAME_WINDOW_CLASS;
@@ -44,6 +45,17 @@ use crate::platform::{
     CloakUnsupported, Hwnd, MonitorInfo, Platform, ShowState, WindowInfo, is_manageable_with,
 };
 use crate::state::{State, snapshot};
+
+/// What a command that needs the keyboard hook answers without one.
+const NO_HOTKEYS: &str = "this daemon binds no keys, it was started with --no-hotkeys";
+
+/// The `mochic hotkeys` rows of a set of bindings, in file order.
+fn rows_of(bindings: &mochi_hotkey::Bindings) -> Vec<(String, String)> {
+    bindings
+        .iter()
+        .map(|binding| (binding.trigger.to_string(), binding.source.clone()))
+        .collect()
+}
 
 /// Whether the loop keeps going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +260,16 @@ pub struct WindowManager {
     /// Borders, transparency and animation. Optional in every part; a
     /// setting that is off means the matching manager does not exist.
     visuals: crate::visuals::Visuals,
+    /// The keyboard hook, when this daemon binds keys at all.
+    hotkeys: Option<HotkeyDaemon>,
+    /// The hotkey file, for a reload and for `mochic hotkeys`.
+    hotkey_path: Option<PathBuf>,
+    /// One row per binding, the way `mochic hotkeys` prints them. Kept here
+    /// rather than read back from the hook thread, which owns the bindings and
+    /// must not be asked questions while it is matching key presses.
+    hotkey_rows: Vec<(String, String)>,
+    /// The lines of the hotkey file that did not parse.
+    hotkey_errors: Vec<String>,
 }
 
 impl WindowManager {
@@ -300,6 +322,10 @@ impl WindowManager {
             foreground: None,
             visual_config: Config::default(),
             visuals,
+            hotkeys: None,
+            hotkey_path: None,
+            hotkey_rows: Vec::new(),
+            hotkey_errors: Vec::new(),
         };
 
         wm.refresh_monitors();
@@ -314,6 +340,52 @@ impl WindowManager {
     pub fn attach_mouse_tracker(&mut self, tracker: crate::events::mouse::MouseTracker) {
         tracker.set_enabled(self.core.focus_follows_mouse.is_some());
         self.mouse = Some(tracker);
+    }
+
+    /// Reads the hotkey file and installs the keyboard hook.
+    ///
+    /// Failing to install the hook is not fatal. A window manager that refuses
+    /// to start because a key could not be bound would leave the user with an
+    /// untiled desktop over something `mochic` can still do by hand.
+    pub fn start_hotkeys(&mut self, path: PathBuf) {
+        let (bindings, errors) = config::load_hotkeys(&path);
+        self.hotkey_rows = rows_of(&bindings);
+        self.hotkey_errors = errors;
+        self.hotkey_path = Some(path);
+
+        match HotkeyDaemon::start(self.tx.clone(), bindings) {
+            Ok(daemon) => self.hotkeys = Some(daemon),
+            Err(e) => tracing::error!(error = %e, "no keyboard hook, Mochi binds no keys"),
+        }
+    }
+
+    /// Re-reads the hotkey file and hands the bindings to the hook thread.
+    pub fn reload_hotkeys(&mut self) {
+        let Some(path) = self.hotkey_path.clone() else {
+            return;
+        };
+        let (bindings, errors) = config::load_hotkeys(&path);
+        self.hotkey_rows = rows_of(&bindings);
+        self.hotkey_errors = errors;
+        if let Some(hotkeys) = self.hotkeys.as_mut() {
+            hotkeys.replace(bindings);
+        }
+    }
+
+    /// The hotkey file this daemon watches, if it binds keys at all.
+    pub fn hotkey_path(&self) -> Option<&std::path::Path> {
+        self.hotkey_path.as_deref()
+    }
+
+    /// Removes the keyboard hook.
+    ///
+    /// Called the moment the loop stops rather than left to the drop at the end
+    /// of `main`: between those two points nothing reads the channel, and a
+    /// bound key would be swallowed for a shutdown that can no longer act on it.
+    pub fn stop_hotkeys(&mut self) {
+        if let Some(mut hotkeys) = self.hotkeys.take() {
+            hotkeys.stop();
+        }
     }
 
     /// A sender for producers that are created after the manager.
@@ -923,10 +995,16 @@ impl WindowManager {
                 Flow::Continue
             }
             Event::ConfigChanged(path) => {
-                tracing::info!(path = %path.display(), "the configuration changed on disk");
-                self.reload_config();
+                if self.hotkey_path.as_deref() == Some(path.as_path()) {
+                    tracing::info!(path = %path.display(), "the hotkey file changed on disk");
+                    self.reload_hotkeys();
+                } else {
+                    tracing::info!(path = %path.display(), "the configuration changed on disk");
+                    self.reload_config();
+                }
                 Flow::Continue
             }
+            Event::Hotkey { trigger, action } => self.on_hotkey(trigger, *action),
             Event::Command { command, reply } => {
                 let name = command.name();
                 let (response, flow) = self.handle_command(*command);
@@ -937,6 +1015,31 @@ impl WindowManager {
             Event::Shutdown(reason) => {
                 tracing::info!(?reason, "shutting down");
                 Flow::Stop
+            }
+        }
+    }
+
+    /// Runs what a bound key press asked for.
+    ///
+    /// The press never reached the desktop, so a command that fails has to say
+    /// so in the log: there is no shell to print an error to and no window that
+    /// saw the key.
+    fn on_hotkey(&mut self, trigger: mochi_hotkey::Trigger, action: mochi_hotkey::Action) -> Flow {
+        match action {
+            mochi_hotkey::Action::Command(command) => {
+                let name = command.name();
+                let (response, flow) = self.handle_command(command);
+                match response.error_message() {
+                    Some(message) => {
+                        tracing::warn!(%trigger, command = name, message, "hotkey was refused");
+                    }
+                    None => tracing::info!(%trigger, command = name, "hotkey"),
+                }
+                flow
+            }
+            mochi_hotkey::Action::Shell { shell, line } => {
+                crate::events::hotkey::run_shell(shell, &line);
+                Flow::Continue
             }
         }
     }
@@ -1296,11 +1399,11 @@ impl WindowManager {
                 state: snapshot(&self.session, &self.core, self.foreground),
             },
             Command::Query { target } => self.query(target),
-            Command::Stop { whkd } => {
-                tracing::info!(whkd, "stop requested");
+            Command::Stop => {
+                tracing::info!("stop requested");
                 return (Response::Ok, Flow::Stop);
             }
-            Command::Start { .. } => Response::Ok,
+            Command::Start => Response::Ok,
             Command::Quickstart => self.quickstart(),
 
             // --- lifecycle ---------------------------------------------
@@ -1487,9 +1590,66 @@ impl WindowManager {
                 self.session.settings.animation_style = style;
                 self.apply_visuals("animation-style")
             }
+
+            // --- hotkeys -----------------------------------------------
+            Command::Hotkeys => Response::Hotkeys {
+                hotkeys: self.hotkey_document(),
+            },
+            Command::SetHotkeys { state } => self.set_hotkeys(boolean(state)),
+            Command::ToggleGameMode => self.toggle_game_mode(),
         };
 
         (response, Flow::Continue)
+    }
+
+    /// What `mochic hotkeys` prints: the file, the gate, the bindings and the
+    /// lines that did not parse.
+    fn hotkey_document(&self) -> serde_json::Value {
+        let bindings: Vec<_> = self
+            .hotkey_rows
+            .iter()
+            .map(|(keys, command)| serde_json::json!({ "keys": keys, "command": command }))
+            .collect();
+        serde_json::json!({
+            "path": self.hotkey_path.as_ref().map(|p| p.display().to_string()),
+            "gate": self.hotkeys.as_ref().map_or("off", |h| h.gate().as_str()),
+            "bindings": bindings,
+            "errors": self.hotkey_errors,
+        })
+    }
+
+    /// `set-hotkeys`: bind keys, or stop binding them without stopping tiling.
+    fn set_hotkeys(&mut self, enable: bool) -> Response {
+        let Some(hotkeys) = self.hotkeys.as_mut() else {
+            return Response::error(NO_HOTKEYS);
+        };
+        hotkeys.set_gate(if enable { Gate::All } else { Gate::Off });
+        Response::Ok
+    }
+
+    /// `toggle-game-mode`: the game in front gets every key but this one, and
+    /// tiling stops until it is pressed again.
+    ///
+    /// The gate is the whole state. Nothing is written down and nothing is
+    /// restarted, so a daemon that is killed in game mode comes back normal
+    /// rather than in a half-suspended state nobody can leave.
+    fn toggle_game_mode(&mut self) -> Response {
+        let Some(hotkeys) = self.hotkeys.as_mut() else {
+            return Response::error(NO_HOTKEYS);
+        };
+        let entering = hotkeys.gate() != Gate::GameMode;
+        hotkeys.set_gate(if entering { Gate::GameMode } else { Gate::All });
+
+        // Tiling follows the keys. Going through the command keeps the pause
+        // notification, the visuals and the model in step with `toggle-pause`.
+        if self.core.is_paused != entering {
+            let (response, _) = self.handle_command(Command::TogglePause);
+            if !response.is_ok() {
+                return response;
+            }
+        }
+        tracing::info!(game_mode = entering, "game mode");
+        Response::Ok
     }
 
     /// `manage`: take the foreground window whatever the heuristics think.
@@ -1708,9 +1868,14 @@ impl WindowManager {
     }
 
     /// Re-reads the configuration file and applies it to the model.
+    ///
+    /// The hotkey file goes with it: a user who presses reload after editing
+    /// their setup means both files, and saving either one is noticed on its
+    /// own anyway.
     pub fn reload_config(&mut self) {
         let path = self.session.config_path().to_path_buf();
         self.load_config();
+        self.reload_hotkeys();
         self.notify(NotificationEvent::Reload {
             path: path.display().to_string(),
         });
@@ -2416,7 +2581,7 @@ mod tests {
     #[test]
     fn stop_ends_the_loop_and_answers_ok() {
         let (mut wm, _) = manager(vec![]);
-        let (response, flow) = wm.handle_command(Command::Stop { whkd: false });
+        let (response, flow) = wm.handle_command(Command::Stop);
         assert_eq!(response, Response::Ok);
         assert_eq!(flow, Flow::Stop);
     }
