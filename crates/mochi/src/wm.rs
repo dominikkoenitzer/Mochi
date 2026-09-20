@@ -1708,14 +1708,42 @@ impl WindowManager {
             previous.push(monitor);
         }
 
+        // How many workspaces the screens that are staying have, so a new one
+        // is never the odd screen out with a single empty workspace.
+        let usual_workspaces = previous
+            .iter()
+            .map(|monitor| monitor.workspaces().len())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+
+        let mut fresh = Vec::new();
         for info in infos {
             let carried = same_panel(&previous, info);
             let mut monitor = match carried {
                 Some(idx) => previous.remove(idx),
-                None => Monitor::new(info.id.0, info.size, info.work_area),
+                None => {
+                    fresh.push(self.core.monitors().len());
+                    Monitor::new(info.id.0, info.size, info.work_area)
+                }
             };
             apply_monitor_info(&mut monitor, info);
             self.core.add_monitor(monitor);
+        }
+
+        // A display that has just been attached has never been configured. Only
+        // that one: shaping every monitor here would put the workspaces of the
+        // screens that never moved back to their configured layout and padding,
+        // throwing away whatever a command had set on them.
+        for idx in fresh {
+            let config = self.visual_config.clone();
+            if !config.apply_to_monitor(&mut self.core, idx) {
+                // No entry configures it, so match the screens it joined
+                // rather than coming up with one workspace.
+                if let Some(monitor) = self.core.monitors_mut().get_mut(idx) {
+                    monitor.ensure_workspaces(usual_workspaces);
+                }
+            }
         }
 
         // Whatever was left behind on a monitor that is gone.
@@ -3091,7 +3119,7 @@ mod tests {
     ) -> (WindowManager, Arc<FakePlatform>) {
         let platform = Arc::new(FakePlatform::with_monitors(windows, monitors));
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut session = State::new(PathBuf::from(r"C:\nowhere\mochi.json"), true);
+        let mut session = State::new(PathBuf::from(r"C: owhere\mochi.json"), true);
         session.settings = Settings::default();
         let wm = WindowManager::new(Arc::clone(&platform) as Arc<dyn Platform>, tx, rx, session)
             .unwrap();
@@ -3135,7 +3163,7 @@ mod tests {
 
         let platform = Arc::new(FakePlatform::new(vec![tool]));
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut session = State::new(PathBuf::from(r"C:\nowhere\mochi.json"), true);
+        let mut session = State::new(PathBuf::from(r"C: owhere\mochi.json"), true);
         session.manage_classes = vec!["MochiTestWindow".into()];
         let wm = WindowManager::new(platform, tx, rx, session).unwrap();
         assert_eq!(wm.state().all_window_ids().count(), 1, "managed by class");
@@ -3153,7 +3181,7 @@ mod tests {
             window(2, "The user's browser"),
         ]));
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut session = State::new(PathBuf::from(r"C:\nowhere\mochi.json"), true);
+        let mut session = State::new(PathBuf::from(r"C: owhere\mochi.json"), true);
         session.manage_classes = vec!["MochiTestWindow".into()];
         let wm = WindowManager::new(platform, tx, rx, session).unwrap();
 
@@ -3740,6 +3768,71 @@ mod tests {
         // file the user did not ask for.
         let named = std::path::PathBuf::from(r"D:\somewhere\keys");
         assert_eq!(hotkey_file_now(&named, &[]), named);
+    }
+
+    #[test]
+    fn a_screen_plugged_in_after_startup_gets_the_workspaces_its_entry_describes() {
+        // One screen at startup, exactly as his desk was: the daemon comes up
+        // with the 4K and the portrait panel still unplugged.
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        let json = r#"{
+            "monitors": [
+                { "workspaces": [ {"name":"1"}, {"name":"2"}, {"name":"3"} ] },
+                { "workspaces": [ {"name":"a","layout":"Columns"}, {"name":"b"} ] }
+            ]
+        }"#;
+        wm.visual_config = serde_json::from_str(json).unwrap();
+        wm.refresh_monitors();
+        assert_eq!(wm.state().monitors().len(), 1);
+
+        // The second panel arrives.
+        platform.set_monitors(vec![main_screen(), portrait_screen()]);
+        wm.refresh_monitors();
+        assert_eq!(wm.state().monitors().len(), 2);
+
+        let fresh = wm.state().monitors().get(1).unwrap();
+        assert_eq!(
+            fresh.workspaces().len(),
+            2,
+            "a screen attached after startup came up with its own defaults              instead of the entry that describes it"
+        );
+        assert_eq!(
+            fresh.workspaces().get(0).unwrap().name.as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            fresh.workspaces().get(0).unwrap().layout,
+            mochi_core::layout::Layout::Columns
+        );
+    }
+
+    #[test]
+    fn plugging_a_screen_in_leaves_the_other_screens_workspaces_alone() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        let json = r#"{ "monitors": [ { "workspaces": [ {"name":"1","layout":"BSP"} ] },
+                                      { "workspaces": [ {"name":"a"} ] } ] }"#;
+        wm.visual_config = serde_json::from_str(json).unwrap();
+        wm.refresh_monitors();
+
+        // Something a command changed on the screen that is staying put.
+        wm.handle_command(Command::ChangeLayout {
+            layout: mochi_client::Layout::Columns,
+        });
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().layout,
+            mochi_core::layout::Layout::Columns
+        );
+
+        platform.set_monitors(vec![main_screen(), portrait_screen()]);
+        wm.refresh_monitors();
+
+        // Configuring every monitor on a display change would have put this
+        // back to BSP, which is the file's answer, not the one in force.
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().layout,
+            mochi_core::layout::Layout::Columns,
+            "a display change reset a layout that a command had set"
+        );
     }
 
     #[test]
