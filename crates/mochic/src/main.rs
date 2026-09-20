@@ -24,17 +24,19 @@ use mochi_core::rules::{
 };
 
 fn main() -> std::process::ExitCode {
-    // `check` is taken off the argument list before the grammar sees it. That
-    // grammar lives in `mochi_client::cli` because the hotkey daemon binds keys
-    // to the same words, and a key bound to "read a file and print what is
-    // wrong with it" would do nothing useful on a keyboard. It also never
-    // touches the pipe, so it is the one command that works while the desktop
-    // is broken, which is the only moment anybody runs it.
-    if let Some(code) = check_from_args() {
-        return code;
+    let cli = Cli::parse();
+
+    // `check` answers with an exit code rather than a message, because a file
+    // that does not check is not this program failing, it is the answer. It is
+    // also the one command that never touches the pipe, so it still works when
+    // the desktop is broken, which is the only moment anybody runs it. The
+    // shared grammar refuses to bind it to a key, along with the other
+    // commands that never reach the daemon.
+    if let Cmd::Check { ref path } = cli.command {
+        return check(path.as_deref());
     }
 
-    match run() {
+    match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mochic: {e:#}");
@@ -43,9 +45,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-
+fn run(cli: Cli) -> Result<()> {
     // Three subcommands do not travel over the pipe.
     match cli.command {
         Cmd::Start {
@@ -383,57 +383,6 @@ fn subscribe(name: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 // check
 // ---------------------------------------------------------------------------
-
-/// What `mochic check --help` prints.
-const CHECK_USAGE: &str = "\
-Check a configuration file without starting the daemon and without applying it.
-
-Usage: mochic check [PATH]
-
-Arguments:
-  [PATH]  The file to check. Defaults to the file the daemon would load:
-          $MOCHI_CONFIG, or %USERPROFILE%\\mochi.json.
-
-Options:
-  -h, --help  Print this help
-
-Exits 0 when the file is usable and 1 when it is not. Warnings do not fail.";
-
-/// Handles `mochic check` before [`Cli::parse`] sees the arguments.
-///
-/// Answers `None` for every other command line, which then goes to the shared
-/// grammar untouched.
-fn check_from_args() -> Option<std::process::ExitCode> {
-    let mut args = std::env::args_os().skip(1);
-    if args.next()?.to_str() != Some("check") {
-        return None;
-    }
-
-    let mut path: Option<PathBuf> = None;
-    for arg in args {
-        let text = arg.to_str();
-        if text == Some("-h") || text == Some("--help") {
-            println!("{CHECK_USAGE}");
-            return Some(std::process::ExitCode::SUCCESS);
-        }
-        // Exit 2 for a bad command line, the code `docs/cli.md` already
-        // promises for an argument the parser rejects before anything is read.
-        if text.is_some_and(|t| t.starts_with('-')) {
-            eprintln!(
-                "mochic: check has no option {}\n\n{CHECK_USAGE}",
-                arg.to_string_lossy()
-            );
-            return Some(std::process::ExitCode::from(2));
-        }
-        if path.is_some() {
-            eprintln!("mochic: check takes at most one path\n\n{CHECK_USAGE}");
-            return Some(std::process::ExitCode::from(2));
-        }
-        path = Some(PathBuf::from(arg));
-    }
-
-    Some(check(path.as_deref()))
-}
 
 /// Everything one file's check produced, in the order it should be printed.
 #[derive(Debug, Default)]

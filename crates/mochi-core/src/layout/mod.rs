@@ -385,7 +385,13 @@ impl std::str::FromStr for Layout {
 
 fn columns(area: Rect, len: usize, resize: &[Option<Rect>], min: MinSize) -> Vec<Rect> {
     let deltas = boundary_deltas(resize, 0, len, Axis::Horizontal);
-    let slices = divide(area.left, area.right, len, &deltas, min.along(Axis::Horizontal));
+    let slices = divide(
+        area.left,
+        area.right,
+        len,
+        &deltas,
+        min.along(Axis::Horizontal),
+    );
     let mut rects = Vec::with_capacity(len);
     extend_with_rects(&mut rects, area, Axis::Horizontal, &slices);
     rects
@@ -393,7 +399,13 @@ fn columns(area: Rect, len: usize, resize: &[Option<Rect>], min: MinSize) -> Vec
 
 fn rows(area: Rect, len: usize, resize: &[Option<Rect>], min: MinSize) -> Vec<Rect> {
     let deltas = boundary_deltas(resize, 0, len, Axis::Vertical);
-    let slices = divide(area.top, area.bottom, len, &deltas, min.along(Axis::Vertical));
+    let slices = divide(
+        area.top,
+        area.bottom,
+        len,
+        &deltas,
+        min.along(Axis::Vertical),
+    );
     let mut rects = Vec::with_capacity(len);
     extend_with_rects(&mut rects, area, Axis::Vertical, &slices);
     rects
@@ -524,7 +536,13 @@ fn grid(area: Rect, len: usize, resize: &[Option<Rect>], min: MinSize) -> Vec<Re
             )
         })
         .collect();
-    let column_slices = divide(area.left, area.right, columns_count, &column_deltas, min.width);
+    let column_slices = divide(
+        area.left,
+        area.right,
+        columns_count,
+        &column_deltas,
+        min.width,
+    );
     let column_rects = slices_to_rects(area, Axis::Horizontal, &column_slices);
 
     let mut rects = Vec::with_capacity(len);
