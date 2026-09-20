@@ -205,6 +205,24 @@
         "$ref": "#/$defs/MatchingRule"
       }
     },
+    "minimum_window_height": {
+      "description": "The height below which a tile is not allowed to shrink. The\ncounterpart of `minimum_window_width`, in the same units.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32",
+      "default": null
+    },
+    "minimum_window_width": {
+      "description": "The width below which a tile is not allowed to shrink.\n\nIn logical pixels, the same units as `default_workspace_padding` and\nscaled the same way: the number in the file is the value at 100\npercent, and it is multiplied by the scale factor of the monitor the\nworkspace lands on, so a floor of `300` is 450 physical pixels on a\ndisplay at 150 percent. Defaults to\n[`MIN_TILE_SIZE`](crate::layout::MIN_TILE_SIZE), which is what every\nlayout used before this key existed.\n\nThe layouts take one minimum per cut, not one per axis, so the floor\nthat binds on both axes is the larger of this and\n`minimum_window_height`. A value too large for the screen is not an\nerror: the layouts scale a minimum that cannot fit back down, so the\ntiles still cover the area exactly.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int32",
+      "default": null
+    },
     "monitor_index_preferences": {
       "description": "Pins a `monitors` entry to the display that covers exactly this\nrectangle of the virtual desktop.\n\nThe key is the index of the entry, the value its display's full\nrectangle, the `size` that `mochic state` reports for that monitor.\nSee [`Config::monitor_assignments`] for how the two preference keys\nand the positional fallback interact.",
       "type": [

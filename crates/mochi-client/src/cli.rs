@@ -54,6 +54,11 @@ pub enum Cmd {
     Stop,
     /// Write a starting mochi.json and hotkey file, if there is none
     Quickstart,
+    /// Check a configuration file and report what is wrong with it
+    Check {
+        /// File to check. Defaults to the one the daemon would load.
+        path: Option<PathBuf>,
+    },
     /// Print the JSON schema of the configuration file
     Schema,
     /// Pause and resume window management
@@ -379,7 +384,9 @@ impl Cmd {
         let command = match self {
             // These three never reach a daemon: two of them run before one
             // exists, the third only prints a file.
-            Cmd::Start { .. } | Cmd::Quickstart | Cmd::Schema => return None,
+            Cmd::Start { .. } | Cmd::Quickstart | Cmd::Schema | Cmd::Check { .. } => {
+                return None;
+            }
 
             // `subscribe` is not one command either. It creates its own pipe
             // first and only then registers it, so answering `subscribe-pipe`
