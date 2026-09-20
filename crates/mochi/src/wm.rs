@@ -375,8 +375,6 @@ pub struct WindowManager {
     routed: HashSet<Hwnd>,
     /// Windows Mochi dropped from the model because the user minimized them.
     minimized: HashSet<Hwnd>,
-    /// The window the user is dragging right now.
-    dragging: Option<Hwnd>,
     /// The foreground window, as far as Mochi knows.
     foreground: Option<Hwnd>,
     /// The configuration the visuals were built from. Every tiling key ends
@@ -456,7 +454,6 @@ impl WindowManager {
             workspace_rules: Vec::new(),
             routed: HashSet::new(),
             minimized: HashSet::new(),
-            dragging: None,
             foreground: None,
             visual_config: Config::default(),
             visuals,
@@ -896,6 +893,15 @@ impl WindowManager {
     /// Drops a window from the model, whatever the reason.
     fn unmanage(&mut self, hwnd: Hwnd, why: &str) {
         let id = window_id(hwnd);
+        // Before the lookup, because the foreground is cached for every window
+        // that takes it, managed or not. A window Mochi never managed can be
+        // the foreground, and when it died the lookup below returned early and
+        // left its handle here for good: Windows reuses handle values, and
+        // `focus_hwnd` refuses a handle it believes is already focused, so the
+        // next window to inherit it could never be given the foreground.
+        if self.foreground == Some(hwnd) {
+            self.foreground = None;
+        }
         let Some(window) = self.core.window(id).cloned() else {
             return;
         };
@@ -929,13 +935,6 @@ impl WindowManager {
         }
         if let Ok(mut hidden) = self.hidden.lock() {
             hidden.show(hwnd);
-        }
-        // Whatever the reason, this window is not the foreground any more. A
-        // stale handle here is worse than none: Windows reuses handle values,
-        // and `focus_hwnd` refuses a handle it believes is already focused, so
-        // the next window to inherit it would never be given the foreground.
-        if self.foreground == Some(hwnd) {
-            self.foreground = None;
         }
         // The routing ledger is deliberately *not* cleared here. A user
         // minimize, a virtual desktop cloak and a rule change all end up in
@@ -1434,7 +1433,7 @@ impl WindowManager {
                 self.window_appeared(hwnd);
             }
             WindowEventKind::Foreground => self.window_focused(hwnd),
-            WindowEventKind::MoveSizeStart => self.dragging = Some(hwnd),
+            WindowEventKind::MoveSizeStart => {}
             WindowEventKind::MoveSizeEnd => self.window_dropped(hwnd),
             WindowEventKind::NameChange => self.window_renamed(hwnd),
         }
@@ -1512,7 +1511,6 @@ impl WindowManager {
     /// dragged onto another monitor moves there, and anything else snaps back
     /// to where the layout wants it.
     fn window_dropped(&mut self, hwnd: Hwnd) {
-        self.dragging = None;
         let id = window_id(hwnd);
         let Some((monitor, workspace)) = self.core.locate_window(id) else {
             return;
@@ -2897,7 +2895,7 @@ fn border_style_of(style: mochi_client::BorderStyle) -> mochi_core::config::Bord
     }
 }
 
-fn animation_style_of(
+pub(crate) fn animation_style_of(
     style: mochi_client::AnimationStyle,
 ) -> mochi_core::animation::AnimationStyle {
     use mochi_client::AnimationStyle as Wire;
@@ -3822,6 +3820,30 @@ mod tests {
         // file the user did not ask for.
         let named = std::path::PathBuf::from(r"D:\somewhere\keys");
         assert_eq!(hotkey_file_now(&named, &[]), named);
+    }
+
+    #[test]
+    fn a_window_mochi_never_managed_does_not_keep_the_foreground_when_it_dies() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+
+        // A window Mochi does not manage can still take the foreground, and
+        // the cache is written for every window, managed or not.
+        let mut stray = window(9, "A dialog");
+        stray.ex_style = crate::platform::types::ex_style::WS_EX_TOOLWINDOW;
+        platform.windows.lock().unwrap().push(stray);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(9));
+        assert_eq!(wm.foreground, Some(Hwnd(9)));
+
+        wm.on_window_event(WindowEventKind::Destroyed, Hwnd(9));
+
+        // It died unmanaged, so the lookup in `unmanage` returned early. The
+        // handle used to stay cached for good, and Windows reuses handle
+        // values: the next window to inherit 9 could never be focused, because
+        // `focus_hwnd` refuses a handle it believes already has the foreground.
+        assert_eq!(
+            wm.foreground, None,
+            "a dead unmanaged window kept the foreground"
+        );
     }
 
     #[test]
