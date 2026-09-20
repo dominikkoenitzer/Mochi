@@ -125,11 +125,34 @@ function Show-LineDiff {
     if ($shown -eq 0) { Write-Detail 'no lines changed' }
 }
 
+function Resolve-FullPath {
+    param([Parameter(Mandatory)][string] $Path)
+    try {
+        $text = $Path
+        if (-not [System.IO.Path]::IsPathRooted($text)) {
+            $text = Join-Path (Get-Location -PSProvider FileSystem).ProviderPath $text
+        }
+        return [System.IO.Path]::GetFullPath($text)
+    } catch {
+        return $Path
+    }
+}
+
 function Write-Target {
     param(
         [Parameter(Mandatory)][string] $Path,
-        [Parameter(Mandatory)][AllowEmptyString()][string] $Content
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Content,
+        [string] $Source
     )
+
+    # -HotkeyDir can point at the directory the source file already lives in,
+    # and then the target is the source. This script promises the original is
+    # never touched, so it is not written over, not even with -Force.
+    if ($Source -and ((Resolve-FullPath -Path $Path) -ieq (Resolve-FullPath -Path $Source))) {
+        Write-Detail "$Path is the source file itself, refusing to write it"
+        Write-Detail 'point -HotkeyDir somewhere else, the original is left as it is'
+        return
+    }
 
     if ((Test-Path $Path) -and -not $Force) {
         Write-Detail "$Path exists, not overwriting it (use -Force)"
@@ -175,26 +198,41 @@ function Convert-Config {
     Write-Detail "$Config -> $MochiConfig"
     Show-LineDiff -Before $before -After $after
 
-    $json = $raw | ConvertFrom-Json
-    if ($null -eq $json) {
-        Write-Detail "$Config holds no JSON object, skipping the configuration"
-        return
-    }
-    $keys = @($json.PSObject.Properties.Name)
-    $unknown = @($keys | Where-Object { $script:KnownKeys -notcontains $_ })
-    if ($unknown.Count -gt 0) {
-        Write-Detail "carried over but not read by Mochi yet: $($unknown -join ', ')"
+    # Advisory only: this parse decides what gets said about the keys, it does
+    # not decide what gets written. Windows PowerShell 5.1 tolerates neither a
+    # comment nor a trailing comma in ConvertFrom-Json, and every tiling window
+    # manager config in the wild has one or the other, so under
+    # $ErrorActionPreference = 'Stop' the run would end here: after the diff
+    # was printed and before the hotkeys were written. A warning is the right
+    # size for it.
+    $json = $null
+    try {
+        $json = $raw | ConvertFrom-Json
+    } catch {
+        $reason = @($_.Exception.Message -split "`r?`n")[0]
+        Write-Detail "could not read $Config as JSON: $reason"
+        Write-Detail 'the key check is skipped, the file itself is copied unchanged'
     }
 
-    if ($keys -contains 'app_specific_configuration_path') {
-        $asc = $json.app_specific_configuration_path
-        Write-Detail "app_specific_configuration_path kept: $asc"
-        $expanded = $asc -replace '\$Env:USERPROFILE', $env:USERPROFILE -replace '/', '\'
-        if (Test-Path $expanded) {
-            Write-Detail "   the file is there, the applications.json format is read as is"
-        } else {
-            Write-Detail "   the file is missing, drop the key or fix the path"
+    if ($json -is [System.Management.Automation.PSCustomObject]) {
+        $keys = @($json.PSObject.Properties.Name)
+        $unknown = @($keys | Where-Object { $script:KnownKeys -notcontains $_ })
+        if ($unknown.Count -gt 0) {
+            Write-Detail "carried over but not read by Mochi yet: $($unknown -join ', ')"
         }
+
+        if ($keys -contains 'app_specific_configuration_path') {
+            $asc = $json.app_specific_configuration_path
+            Write-Detail "app_specific_configuration_path kept: $asc"
+            $expanded = $asc -replace '\$Env:USERPROFILE', $env:USERPROFILE -replace '/', '\'
+            if (Test-Path $expanded) {
+                Write-Detail "   the file is there, the applications.json format is read as is"
+            } else {
+                Write-Detail "   the file is missing, drop the key or fix the path"
+            }
+        }
+    } elseif ($null -ne $json) {
+        Write-Detail "$Config holds no JSON object, the key check is skipped"
     }
 
     Write-Target -Path $MochiConfig -Content ($after -join $newline)
@@ -252,7 +290,7 @@ function Convert-Hotkeys {
         foreach ($line in $leftovers) { Write-Output "      $($line.Trim())" }
     }
 
-    Write-Target -Path $target -Content ($after -join $newline)
+    Write-Target -Path $target -Content ($after -join $newline) -Source $Hotkeys
 }
 
 function Show-SwitchCommands {
