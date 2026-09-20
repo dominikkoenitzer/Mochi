@@ -297,7 +297,10 @@ pub fn expand_env(raw: &str) -> String {
             // work too. It did not, and the whole path came back unexpanded:
             // the application rule file was simply not found, and that is only
             // a warning, so 363 rules went missing without an error.
-            let (tail, marker) = if tail.len() >= 4 && tail[..4].eq_ignore_ascii_case("env:") {
+            let (tail, marker) = if tail
+                .get(..4)
+                .is_some_and(|head| head.eq_ignore_ascii_case("env:"))
+            {
                 (&tail[4..], 5)
             } else {
                 (tail, 1)
@@ -550,6 +553,16 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         assert!(load(&path).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_variable_name_that_is_not_ascii_does_not_panic() {
+        // `$` then three ASCII bytes then a multi-byte character put the
+        // fourth byte inside that character, and slicing there panics — at
+        // daemon start and again on every config reload.
+        for raw in ["$MY_ÖRDNER/x", "$abcä", "$USR😀", "$Zürich", "$"] {
+            let _ = expand_env(raw);
+        }
     }
 
     #[test]

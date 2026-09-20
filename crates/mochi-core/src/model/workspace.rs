@@ -690,6 +690,12 @@ impl Workspace {
     pub fn absorb(&mut self, other: Workspace) {
         let restore = self.containers.focused_idx();
         let had_containers = !self.containers.is_empty();
+        // Saved because `insert_container` clears it, and the promise above is
+        // that taking in a dead display's windows does not steal the focus. It
+        // did: the focus silently moved off a floating window onto a tiled one
+        // while the real foreground stayed put, so the border jumped and the
+        // next command acted on a window the user was not looking at.
+        let was_floating = self.focus_is_floating;
 
         let mut incoming: Vec<Container> = other.containers.into_vec();
         if let Some(container) = other.monocle_container {
@@ -715,6 +721,7 @@ impl Workspace {
         } else {
             self.containers.focus(0);
         }
+        self.focus_is_floating = was_floating;
     }
 
     // -- modes --------------------------------------------------------------

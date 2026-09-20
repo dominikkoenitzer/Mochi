@@ -512,7 +512,17 @@ fn report(label: &str, found: Findings) -> std::process::ExitCode {
 /// the application rule reader turned into rules, is an application rule file.
 /// Nothing else can be true of both at once.
 fn looks_like_app_rules(text: &str) -> bool {
-    Config::from_json(text).is_ok_and(|config| config == Config::default())
+    // An application file is either a map of applications or, in its older
+    // shape, a list of them. A configuration file is always an object, and
+    // since that became an error rather than a silent default, the list form
+    // made `Config::from_json` fail and this answer `false` — so a perfectly
+    // good rules file was checked as a configuration and reported unusable.
+    let shape_allows_it = match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Array(_)) => true,
+        Ok(_) => Config::from_json(text).is_ok_and(|config| config == Config::default()),
+        Err(_) => false,
+    };
+    shape_allows_it
         && load_app_specific_configuration_reporting_unknown_keys(text)
             .is_ok_and(|(sets, _)| !sets.is_empty())
 }
@@ -941,7 +951,10 @@ fn expand_env(raw: &str) -> String {
             // work too. It did not, and the whole path came back unexpanded:
             // the application rule file was simply not found, and that is only
             // a warning, so 363 rules went missing without an error.
-            let (tail, marker) = if tail.len() >= 4 && tail[..4].eq_ignore_ascii_case("env:") {
+            let (tail, marker) = if tail
+                .get(..4)
+                .is_some_and(|head| head.eq_ignore_ascii_case("env:"))
+            {
                 (&tail[4..], 5)
             } else {
                 (tail, 1)
