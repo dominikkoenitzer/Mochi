@@ -748,6 +748,16 @@ impl Workspace {
             self.insert_container(at, container);
             false
         } else {
+            // The mirror of the guard in `toggle_maximize`. Maximize is the
+            // other mode that lifts a window out of the ring, so while it is on
+            // the ring's focused container is not the window the user is
+            // looking at: monocling it would lift a hidden window out, leave
+            // the workspace in two exclusive modes at once, and the follow-up
+            // un-maximize would then send its restore to the monocled window
+            // instead, stranding the maximized one at full size for good.
+            if self.is_maximized() {
+                return false;
+            }
             let anchor = self.anchor_before(self.containers.focused_idx());
             if let Some(container) = self.remove_focused_container() {
                 self.monocle_container = Some(container);

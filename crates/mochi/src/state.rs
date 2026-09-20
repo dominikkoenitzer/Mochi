@@ -117,8 +117,28 @@ impl Settings {
             if let Some(value) = animation.fps {
                 self.animation_fps = value;
             }
+            // The fourth key. Without it `mochic state` reported the default
+            // curve for the whole session while the renderer eased with the
+            // one from the file, and a file that set a style could never undo
+            // an `animation-style` command the way every other visual key can.
+            if let Some(value) = animation.style {
+                self.animation_style = client_animation_style(value);
+            }
         }
     }
+}
+
+/// The wire spelling of a configuration file's easing curve.
+///
+/// Derived by inverting [`crate::wm::animation_style_of`] rather than written
+/// out a second time, so the two mappings cannot drift apart. A curve the wire
+/// has no name for falls back to the default instead of failing a reload.
+fn client_animation_style(style: mochi_core::animation::AnimationStyle) -> AnimationStyle {
+    AnimationStyle::ALL
+        .iter()
+        .copied()
+        .find(|&candidate| crate::wm::animation_style_of(candidate) == style)
+        .unwrap_or(AnimationStyle::Linear)
 }
 
 /// The facts about this daemon process that the tiling model does not carry.

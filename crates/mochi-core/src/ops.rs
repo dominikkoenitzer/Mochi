@@ -486,6 +486,14 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        // The same guard `stack` and `unstack` use. With a floating, monocled
+        // or maximized window focused, the focus is not in the container ring
+        // at all, so rebuilding the ring cannot keep it: the promise that the
+        // window you were looking at stays in front silently became "the focus
+        // moves to a tiled window you did not point at".
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
         if !target.stack_all() {
@@ -508,6 +516,14 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        // The same guard `stack` and `unstack` use. With a floating, monocled
+        // or maximized window focused, the focus is not in the container ring
+        // at all, so rebuilding the ring cannot keep it: the promise that the
+        // window you were looking at stays in front silently became "the focus
+        // moves to a tiled window you did not point at".
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
         if !target.unstack_all() {
@@ -535,9 +551,19 @@ impl State {
         let (monitor, workspace) = self.focused_indices()?;
         let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
+        // Floating drops the maximized state from the model, and the real
+        // window then stays SW_SHOWMAXIMIZED and ignores every rectangle the
+        // layout gives it. `float_window` has always restored it here; this
+        // path is the one a key is bound to and did not.
+        let maximized = target.maximized_window().map(|window| window.id);
         target.toggle_float();
         let id = target.focused_window_id();
         let mut changes = self.retiled(monitor, workspace);
+        if let Some(maximized) = maximized
+            && !self.workspace(monitor, workspace)?.is_maximized()
+        {
+            changes.restore.push(maximized);
+        }
         changes.merge(self.focus_changes(id));
         self.visibility_delta(&before, &mut changes);
         Ok(changes)
@@ -1871,6 +1897,46 @@ mod tests {
         let changes = state.unstack().unwrap();
         assert_eq!(state.workspace(0, 0).unwrap().containers().len(), 2);
         assert!(changes.show.contains(&WindowId(2)));
+    }
+
+    #[test]
+    fn floating_a_maximized_window_puts_the_real_window_back_to_its_size() {
+        let mut state = with_windows(2);
+        state.toggle_maximize().unwrap();
+        let id = focused(&state).unwrap();
+
+        let changes = state.toggle_float().unwrap();
+        assert!(!state.workspace(0, 0).unwrap().is_maximized());
+        // The model drops the maximize; without this the real window stays
+        // SW_SHOWMAXIMIZED and ignores every rectangle the layout gives it.
+        assert!(
+            changes.restore.contains(&id),
+            "the window was left maximized on screen: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn monocle_and_maximize_are_exclusive_in_both_directions() {
+        let mut state = with_windows(3);
+        // One direction was already refused.
+        state.toggle_monocle().unwrap();
+        state.toggle_maximize().unwrap();
+        assert!(!state.workspace(0, 0).unwrap().is_maximized());
+        state.toggle_monocle().unwrap();
+
+        // The other was not. Monocling while maximized lifted a window the
+        // user could not see out of the ring, left both modes on at once, and
+        // the next un-maximize sent its restore to the monocled window, so the
+        // maximized one stayed full size with nothing left to put it back.
+        state.toggle_maximize().unwrap();
+        assert!(state.workspace(0, 0).unwrap().is_maximized());
+        state.toggle_monocle().unwrap();
+        let workspace = state.workspace(0, 0).unwrap();
+        assert!(
+            !workspace.is_monocle(),
+            "monocle was allowed on top of a maximized window"
+        );
+        assert!(workspace.is_maximized());
     }
 
     #[test]
