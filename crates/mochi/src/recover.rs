@@ -129,18 +129,32 @@ fn still_the_same_window(entry: &Entry, info: &crate::platform::WindowInfo) -> b
     anonymous || (info.pid == entry.pid && info.class == entry.class)
 }
 
-/// Puts back everything a previous session left off screen, then forgets it.
+/// What a recovery pass managed, and what it did not.
 ///
-/// Returns the handles it brought back.
-pub fn recover(platform: &dyn Platform, path: &Path) -> Vec<Hwnd> {
+/// The leftovers matter as much as the successes: they are still off screen,
+/// and the session starting now has to take them into its own record. A record
+/// that starts empty rewrites the file on its first hide and erases the only
+/// trace of them.
+#[derive(Debug, Default)]
+pub struct Recovered {
+    /// Windows that were put back on screen.
+    pub back: Vec<Hwnd>,
+    /// Entries that are still owed to the user.
+    pub unfinished: Vec<Entry>,
+}
+
+/// Puts back everything a previous session left off screen.
+///
+/// Returns what came back and what is still owed.
+pub fn recover(platform: &dyn Platform, path: &Path) -> Recovered {
     let Some(entries) = load(path) else {
         // Unreadable. It stays on disk: the next save overwrites it, and until
         // then it is the only sign that something may be hidden.
-        return Vec::new();
+        return Recovered::default();
     };
     if entries.is_empty() {
         let _ = std::fs::remove_file(path);
-        return Vec::new();
+        return Recovered::default();
     }
     let mut back = Vec::new();
     let mut unfinished = Vec::new();
@@ -198,10 +212,20 @@ pub fn recover(platform: &dyn Platform, path: &Path) -> Vec<Hwnd> {
             tracing::debug!(%hwnd, error = %e, "could not clear the alpha");
             alpha_cleared = false;
         }
-        // A window that was only faded has nothing else to it, so a failed
-        // alpha clear is the whole failure and the entry has to survive.
-        if !restored || (entry.behaviour.is_none() && !alpha_cleared) {
-            unfinished.push(entry);
+        // Either failure keeps the entry. Gating the alpha half on "this
+        // window was only faded" meant a window that was both cloaked and
+        // faded, uncloaked successfully and then failed to go opaque, was
+        // forgotten while still translucent: at a low alpha that is a window
+        // on screen, in Alt-Tab, focusable and impossible to see, with nothing
+        // anywhere recording that Mochi did it.
+        if !restored || !alpha_cleared {
+            unfinished.push(Entry {
+                // Narrowed to the half still owed, so a successful uncloak is
+                // not attempted a second time on the next start.
+                behaviour: if restored { None } else { entry.behaviour },
+                faded: !alpha_cleared,
+                ..entry
+            });
         }
     }
 
@@ -214,7 +238,7 @@ pub fn recover(platform: &dyn Platform, path: &Path) -> Vec<Hwnd> {
             "some windows could not be put back yet, keeping them in the record"
         );
     }
-    back
+    Recovered { back, unfinished }
 }
 
 #[cfg(test)]
@@ -268,7 +292,7 @@ mod tests {
         assert_eq!(load(&path), None);
 
         let platform = crate::platform::new(true);
-        assert!(recover(platform.as_ref(), &path).is_empty());
+        assert!(recover(platform.as_ref(), &path).back.is_empty());
         assert!(
             path.exists(),
             "recover deleted a record it could not read, which is the only \
@@ -354,12 +378,63 @@ mod tests {
         save(&path, &[entry(4242, HidingBehaviour::Cloak)]);
 
         let platform = crate::platform::new(true);
-        assert!(recover(platform.as_ref(), &path).is_empty());
+        assert!(recover(platform.as_ref(), &path).back.is_empty());
         assert_eq!(
             load(&path).unwrap().len(),
             1,
             "an entry this run could not deal with was thrown away"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn what_this_run_could_not_put_back_is_handed_to_the_next_session() {
+        // The handover. `recover` keeps what it could not finish, and the
+        // session starting now has to take those entries into its own record:
+        // a record that starts empty rewrites the file on its very first hide,
+        // and these entries were the only thing that knew those windows are
+        // off screen. They are not in the model and a cloaked window cannot be
+        // enumerated, so erasing them loses the window for good.
+        let path = temp("handover");
+        save(&path, &[entry(4242, HidingBehaviour::Cloak)]);
+
+        let platform = crate::platform::new(true);
+        let recovered = recover(platform.as_ref(), &path);
+        assert!(recovered.back.is_empty());
+        assert_eq!(
+            recovered.unfinished.len(),
+            1,
+            "the entry it could not deal with was not reported to the caller"
+        );
+        assert_eq!(recovered.unfinished[0].hwnd, 4242);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_window_that_uncloaked_but_stayed_translucent_is_still_owed() {
+        // Both halves are undone separately, and either failure has to keep
+        // the entry. Keeping it only when the window was faded *and nothing
+        // else* meant a window that was cloaked and faded, uncloaked fine and
+        // then refused to go opaque, was forgotten while still translucent —
+        // at a low alpha that is a window on screen, in Alt-Tab, focusable and
+        // impossible to see, with nothing recording that Mochi did it.
+        let path = temp("still-faded");
+        let mut e = entry(4243, HidingBehaviour::Cloak);
+        e.faded = true;
+        save(&path, &[e]);
+
+        // The dry-run platform cannot read the window, so the uncloak is not
+        // even attempted and the whole entry survives; that much the sibling
+        // test already covers. What matters here is the shape of what is kept.
+        let platform = crate::platform::new(true);
+        let recovered = recover(platform.as_ref(), &path);
+        assert_eq!(recovered.unfinished.len(), 1);
+        assert!(
+            recovered.unfinished[0].faded,
+            "the alpha half of the entry was dropped"
+        );
+
         let _ = std::fs::remove_file(&path);
     }
 }
