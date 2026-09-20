@@ -3,13 +3,13 @@
     Turns Mochi's autostart on and off, and another program's autostart with it.
 
 .DESCRIPTION
-    -Enable writes a HKCU Run value called Mochi that runs
-    `mochic start --whkd` at login. A program that starts from a shortcut in
-    the Startup folder is moved aside by -DisableStartupItem <name>, which
-    renames <name>.lnk to <name>.lnk.disabled, and put back by
-    -EnableStartupItem <name>. A HKCU Run value of the same name is backed up
-    and removed the same way, and restored on the way back. Nothing else is
-    touched.
+    -Enable writes a HKCU Run value called Mochi that runs `mochic start` at
+    login, which brings the hotkeys up with the daemon. A program that starts
+    from a shortcut in the Startup folder is moved aside by
+    -DisableStartupItem <name>, which renames <name>.lnk to <name>.lnk.disabled,
+    and put back by -EnableStartupItem <name>. A HKCU Run value of the same name
+    is backed up and removed the same way, and restored on the way back. Nothing
+    else is touched.
 
     Without a switch the script only reports the current state.
 
@@ -38,10 +38,6 @@
 .PARAMETER MochicPath
     mochic.exe to start. Default %LOCALAPPDATA%\Programs\Mochi\bin\mochic.exe.
 
-.PARAMETER WhkdConfigHome
-    Directory whose whkdrc whkd should load. Default %USERPROFILE%\.config\mochi
-    when it exists, otherwise whkd's own default is used.
-
 .PARAMETER ShowConsole
     Start mochic directly instead of through a hidden launcher. Simpler, but a
     console window flashes at login until mochic ships a no-console build.
@@ -62,7 +58,6 @@ param(
     [string] $DisableStartupItem,
     [string] $EnableStartupItem,
     [string] $MochicPath = (Join-Path $env:LOCALAPPDATA 'Programs\Mochi\bin\mochic.exe'),
-    [string] $WhkdConfigHome = (Join-Path $env:USERPROFILE '.config\mochi'),
     [switch] $ShowConsole
 )
 
@@ -107,14 +102,10 @@ function Get-StartupLink {
 
 function Get-MochiCommand {
     if ($ShowConsole) {
-        return "`"$MochicPath`" start --whkd"
+        return "`"$MochicPath`" start"
     }
 
-    $prelude = ''
-    if (Test-Path $WhkdConfigHome) {
-        $prelude = "`$env:WHKD_CONFIG_HOME='$WhkdConfigHome'; "
-    }
-    $inner = "$prelude" + "Start-Process -FilePath '$MochicPath' -ArgumentList 'start','--whkd' -WindowStyle Hidden"
+    $inner = "Start-Process -FilePath '$MochicPath' -ArgumentList 'start' -WindowStyle Hidden"
     return "powershell.exe -NoProfile -WindowStyle Hidden -Command `"$inner`""
 }
 

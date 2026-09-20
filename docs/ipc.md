@@ -34,9 +34,8 @@ and the arguments sit next to it:
 {"cmd":"state"}
 ```
 
-Fields with a sensible default may be left out: `{"cmd":"stop"}` is
-`{"cmd":"stop","whkd":false}`, and a rule without `matching_strategy` uses
-`equals`.
+Fields with a sensible default may be left out: a rule without
+`matching_strategy` uses `equals`.
 
 The exchange is one round trip:
 
@@ -58,6 +57,7 @@ Exactly one response per command, tagged by a `response` field:
 {"response":"error","message":"no such monitor"}
 {"response":"state","state":{ ... }}
 {"response":"query","answer":2}
+{"response":"hotkeys","hotkeys":{ ... }}
 ```
 
 `mochic` exits non-zero and prints `message` on `error`.
@@ -114,15 +114,18 @@ $reader.ReadLine()
 
 ## Command reference
 
-Names match the commands a whkdrc hotkey file uses, so an existing `whkdrc` imports
+Names match the commands a hotkey file uses, so an existing `whkdrc` imports
 with a search and replace.
 
 | Command | Arguments |
 |---|---|
-| `start` | `whkd` |
-| `stop` | `whkd` |
+| `start` | |
+| `stop` | |
 | `quickstart` | |
 | `toggle-pause`, `reload-configuration`, `retile` | |
+| `hotkeys` | |
+| `set-hotkeys` | `state`: `enable` `disable` |
+| `toggle-game-mode` | |
 | `state` | |
 | `query` | `target` |
 | `focus`, `move` | `direction`: `left` `right` `up` `down` |
@@ -200,3 +203,35 @@ The visual commands (`border*`, `animation*`, `toggle-transparency`) change the
 live configuration, reach the border, transparency and animation managers and
 redraw the workspace before the response comes back. `settings` reports the
 result, so a command and the document never disagree.
+
+## What `hotkeys` answers with
+
+`{"cmd":"hotkeys"}` hands back what the daemon made of the hotkey file, which is
+also what `mochic hotkeys` renders as a table:
+
+```json
+{
+  "path": "C:\\Users\\you\\.config\\mochi\\hotkeys",
+  "gate": "all",
+  "bindings": [
+    {"keys":"alt + h","command":"focus left"},
+    {"keys":"alt + shift + g","command":"toggle-game-mode"}
+  ],
+  "errors": ["line 12: `pgup` is not a key"]
+}
+```
+
+`path` is the file that was loaded, picked the way
+[hotkeys.md](hotkeys.md) describes. `keys` is the chord as Mochi normalised it,
+so a binding written `Shift+ALT+H` comes back as `alt + shift + h` and a typo in
+a modifier is visible. `command` is the right hand side of the line, a Mochi
+command or a shell line.
+
+`gate` says which bindings fire: `all` normally, `game-mode` while
+`{"cmd":"toggle-game-mode"}` is holding everything but its own key for a game,
+and `off` after `{"cmd":"set-hotkeys","state":"disable"}`. Only `all` means the
+document and the keyboard agree.
+
+`errors` holds one string per line that did not parse, each one starting with
+its line number. Those lines are the only ones lost: the rest of the file is
+bound, so a broken line never costs the whole keyboard.
