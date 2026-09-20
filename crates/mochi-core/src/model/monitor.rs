@@ -38,13 +38,13 @@ pub struct Monitor {
     /// The display's model name, from `EnumDisplayDevicesW`'s `DeviceString`.
     ///
     /// This is the identifier `display_index_preferences` pins a `monitors`
-    /// entry to, and the first one [`State::reconcile_monitors`] recognises a
-    /// display by. It is stable across a reboot, a cable swap and a
+    /// entry to. It is stable across a reboot, a cable swap and a
     /// `DisplayPort` renegotiation, but it is a model name such as `Odyssey G8`
     /// or `Generic PnP Monitor`, never a serial number, so two panels of the
     /// same model carry the same string and nothing here can tell them apart.
     ///
-    /// [`State::reconcile_monitors`]: crate::model::State::reconcile_monitors
+    /// That last part is why the daemon does not carry monitors across a
+    /// display change by this field: it would match both panels at once.
     pub device_id: String,
     /// The full display rectangle in virtual desktop coordinates.
     pub size: Rect,
