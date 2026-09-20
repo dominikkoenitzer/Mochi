@@ -263,10 +263,13 @@ fn workspace_json(
     let work_area = core
         .work_area_for(monitor_idx, index)
         .unwrap_or(monitor.work_area);
-    let full = workspace.full_rect(
+    // The same scale the daemon actually applies, so the reported rectangle is
+    // the one on screen rather than the one a 96 DPI screen would have got.
+    let full = workspace.full_rect_scaled(
         work_area,
         core.default_workspace_padding,
         core.default_container_padding,
+        core.padding_scale(monitor_idx),
     );
     let layout = workspace.latest_layout();
 
