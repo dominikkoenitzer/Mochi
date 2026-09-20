@@ -388,6 +388,8 @@ pub struct WindowManager {
     hotkeys: Option<HotkeyDaemon>,
     /// The hotkey file, for a reload and for `mochic hotkeys`.
     hotkey_path: Option<PathBuf>,
+    /// The gate and the pause to put back when game mode ends.
+    before_game_mode: Option<(Gate, bool)>,
     /// Every name the hotkey file is accepted under, in preference order.
     ///
     /// Empty when the path was named on the command line or in the
@@ -459,6 +461,7 @@ impl WindowManager {
             visuals,
             hotkeys: None,
             hotkey_path: None,
+            before_game_mode: None,
             hotkey_candidates: Vec::new(),
             hotkey_rows: Vec::new(),
             hotkey_errors: Vec::new(),
@@ -1086,6 +1089,18 @@ impl WindowManager {
         };
         if let Err(e) = result {
             tracing::error!(%hwnd, error = %e, "could not show a window");
+            // Write it back down. The record was cleared before the call, so a
+            // window that refused to come back was off screen with nothing
+            // holding it: not in the restore hook, not in the crash mirror,
+            // not reachable by `restore-windows`. Invisible and unrecoverable
+            // without another window manager, which is the one failure this
+            // record exists to prevent. `restore` already settles failures
+            // back the same way.
+            if let Some(behaviour) = previous
+                && let Ok(mut hidden) = self.hidden.lock()
+            {
+                hidden.hide(hwnd, behaviour);
+            }
         }
     }
 
@@ -2277,15 +2292,31 @@ impl WindowManager {
     /// restarted, so a daemon that is killed in game mode comes back normal
     /// rather than in a half-suspended state nobody can leave.
     fn toggle_game_mode(&mut self) -> Response {
-        let Some(hotkeys) = self.hotkeys.as_mut() else {
+        let Some(hotkeys) = self.hotkeys.as_ref() else {
             return Response::error(NO_HOTKEYS);
         };
         let entering = hotkeys.gate() != Gate::GameMode;
-        hotkeys.set_gate(if entering { Gate::GameMode } else { Gate::All });
+
+        // What to put back, remembered rather than assumed. Leaving used to
+        // set the gate to `All` and derive the pause from "we must be leaving",
+        // so it handed back a keyboard the user had switched off with
+        // `set-hotkeys disable` and resumed tiling they had paused themselves.
+        // Neither was game mode's to give back.
+        let (gate, paused) = if entering {
+            let remembered = (hotkeys.gate(), self.core.is_paused);
+            self.before_game_mode = Some(remembered);
+            (Gate::GameMode, true)
+        } else {
+            self.before_game_mode.take().unwrap_or((Gate::All, false))
+        };
+
+        if let Some(hotkeys) = self.hotkeys.as_mut() {
+            hotkeys.set_gate(gate);
+        }
 
         // Tiling follows the keys. Going through the command keeps the pause
         // notification, the visuals and the model in step with `toggle-pause`.
-        if self.core.is_paused != entering {
+        if self.core.is_paused != paused {
             let (response, _) = self.handle_command(Command::TogglePause);
             if !response.is_ok() {
                 return response;
@@ -3836,6 +3867,57 @@ mod tests {
         // file the user did not ask for.
         let named = std::path::PathBuf::from(r"D:\somewhere\keys");
         assert_eq!(hotkey_file_now(&named, &[]), named);
+    }
+
+    #[test]
+    fn game_mode_gives_back_the_keyboard_and_the_pause_it_found() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        wm.start_hotkeys(std::env::temp_dir().join("no-such-hotkeys"), Vec::new());
+
+        // The user switched the keyboard off and paused tiling themselves.
+        wm.handle_command(Command::SetHotkeys {
+            state: mochi_client::BooleanState::Disable,
+        });
+        wm.handle_command(Command::TogglePause);
+        assert!(wm.state().is_paused);
+
+        wm.handle_command(Command::ToggleGameMode);
+        wm.handle_command(Command::ToggleGameMode);
+
+        // Leaving used to hand back every binding and resume tiling, neither of
+        // which game mode had taken away. It also made game mode a back door
+        // around `set-hotkeys disable`.
+        assert_eq!(
+            wm.hotkeys.as_ref().map(HotkeyDaemon::gate),
+            Some(Gate::Off),
+            "game mode re-armed a keyboard the user had switched off"
+        );
+        assert!(
+            wm.state().is_paused,
+            "game mode resumed a pause the user set themselves"
+        );
+    }
+
+    #[test]
+    fn a_window_that_refuses_to_come_back_stays_in_the_record() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        // Off screen, by Mochi, recorded.
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert!(wm.hidden.lock().unwrap().contains(Hwnd(1)));
+
+        // Now it cannot be uncloaked: an elevated window, a dead shell proxy,
+        // a window with no application view.
+        platform.cannot_be_restored(Hwnd(1));
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+
+        // The record was cleared before the call, so the window used to end up
+        // still cloaked and in no list at all: out of the restore hook, out of
+        // the crash mirror, out of reach of `restore-windows`. Unrecoverable
+        // without another window manager.
+        assert!(
+            wm.hidden.lock().unwrap().contains(Hwnd(1)),
+            "a window that refused to come back was forgotten while still hidden"
+        );
     }
 
     #[test]
