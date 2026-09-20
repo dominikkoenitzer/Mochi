@@ -34,10 +34,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
     GetClientRect, GetMessageW, GetWindowLongPtrW, HICON, HMENU, IDC_ARROW, IsIconic, LoadCursorW,
     MF_POPUP, MF_STRING, MINMAXINFO, MSG, PostQuitMessage, RegisterClassW, SW_SHOWNA, SWP_NOSIZE,
-    SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WINDOWPOS, WM_CLOSE,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY,
-    WM_PAINT, WM_SETTEXT, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WNDCLASSW, WS_EX_TOOLWINDOW,
-    WS_OVERLAPPEDWINDOW,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_LONG_PTR_INDEX,
+    WINDOWPOS, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE,
+    WM_NCDESTROY, WM_PAINT, WM_SETTEXT, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::PCWSTR;
 
@@ -128,6 +128,20 @@ pub struct SpawnOptions {
     /// application in menu mode needs a window that has a menu to enter.
     /// [`crate::in_menu_mode`] is how that is read back.
     pub menu_bar: bool,
+    /// Create the windows without `WS_EX_TOOLWINDOW`, so they are ordinary
+    /// taskbar windows.
+    ///
+    /// Off by default, and the default is the safe one: the tool window bit is
+    /// what keeps every *other* window manager off these windows, so a test
+    /// that turns it off must only run where nothing else is managing the
+    /// desktop.
+    ///
+    /// It exists because the shell only hands an `IApplicationView` to a real
+    /// application window, and that view is the only way one process can cloak
+    /// another's window. With the bit set, every cloak in every test falls back
+    /// to `ShowWindow(SW_HIDE)`, so the path a real application actually takes
+    /// when a workspace is switched has no coverage at all.
+    pub taskbar: bool,
 }
 
 impl Default for SpawnOptions {
@@ -143,6 +157,7 @@ impl Default for SpawnOptions {
             owned: false,
             no_title: false,
             menu_bar: false,
+            taskbar: false,
         }
     }
 }
@@ -234,6 +249,7 @@ impl TestWindows {
                 enforce_min: options.min_size.is_some(),
                 owned: options.owned,
                 menu_bar: options.menu_bar,
+                taskbar: options.taskbar,
             };
 
             let (tx, rx) = mpsc::channel::<std::result::Result<i64, String>>();
@@ -460,6 +476,7 @@ struct WindowSpec {
     enforce_min: bool,
     owned: bool,
     menu_bar: bool,
+    taskbar: bool,
 }
 
 /// Per-window state, owned by the window: created before `CreateWindowExW`,
@@ -628,7 +645,13 @@ unsafe fn create_window(spec: &WindowSpec) -> Result<HWND> {
     let hwnd = unsafe {
         CreateWindowExW(
             // The bit that keeps every other window manager off these windows.
-            WS_EX_TOOLWINDOW,
+            // A spawn that asked for a taskbar window gives it up deliberately,
+            // to be cloakable by the shell; see `SpawnOptions::taskbar`.
+            if spec.taskbar {
+                WINDOW_EX_STYLE(0)
+            } else {
+                WS_EX_TOOLWINDOW
+            },
             PCWSTR(class_name_wide().as_ptr()),
             PCWSTR(title_wide.as_ptr()),
             // A normal frame, so DWM draws the Windows 11 caption, the rounded
