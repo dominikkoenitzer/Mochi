@@ -44,8 +44,9 @@ pub mod security;
 mod subscribe;
 
 pub use command::{
-    AnimationStyle, Axis, BooleanState, BorderStyle, Command, CycleDirection, Direction, Layout,
-    MatchingStrategy, ParseEnumError, QueryTarget, RuleIdentifier, Sizing, WindowKind,
+    AnimationStyle, Axis, BooleanState, BorderStyle, Command, ContainerBehaviour, CycleDirection,
+    Direction, HidingBehaviour, Layout, MatchingStrategy, MoveBehaviour, OperationBehaviour,
+    ParseEnumError, QueryTarget, RuleIdentifier, Sizing, WindowKind,
 };
 pub use notification::{Notification, NotificationEvent, SessionChangeKind, WindowRef};
 pub use response::Response;

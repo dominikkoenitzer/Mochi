@@ -247,6 +247,40 @@ impl State {
         Ok(changes)
     }
 
+    /// Focuses the window at `index` inside the focused container.
+    ///
+    /// What [`State::cycle_stack`] does one step at a time, in one step. The
+    /// pair it exists for is `stack-all` on a hotkey and a row of keys that go
+    /// straight to a window, which is the reason to collapse a workspace into
+    /// a stack at all.
+    ///
+    /// An index past the end of the stack does nothing rather than wrapping:
+    /// the point of asking for a position is to land on it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when there is no focused workspace.
+    pub fn focus_stack_window(&mut self, index: usize) -> Result<Changes> {
+        if self.is_paused {
+            return Ok(Changes::none());
+        }
+        let (monitor, workspace) = self.focused_indices()?;
+        let before = self.visible_window_ids();
+        let target = self.workspace_mut(monitor, workspace)?;
+        let Some(container) = target.focused_container_mut() else {
+            return Ok(Changes::none());
+        };
+        if index >= container.len() || container.windows().focused_idx() == index {
+            return Ok(Changes::none());
+        }
+        container.windows_mut().focus(index);
+        let id = container.focused_window_id();
+        let mut changes = self.retiled(monitor, workspace);
+        changes.merge(self.focus_changes(id));
+        self.visibility_delta(&before, &mut changes);
+        Ok(changes)
+    }
+
     /// Focuses a window the daemon saw take the foreground.
     ///
     /// A no-op while paused, like every other mutating command: this one moves
@@ -1837,6 +1871,25 @@ mod tests {
         let changes = state.unstack().unwrap();
         assert_eq!(state.workspace(0, 0).unwrap().containers().len(), 2);
         assert!(changes.show.contains(&WindowId(2)));
+    }
+
+    #[test]
+    fn a_stacked_window_can_be_focused_by_its_position() {
+        let mut state = with_windows(3);
+        state.stack_all().unwrap();
+
+        state.focus_stack_window(0).unwrap();
+        assert_eq!(focused(&state), Some(WindowId(1)));
+        state.focus_stack_window(2).unwrap();
+        assert_eq!(focused(&state), Some(WindowId(3)));
+
+        // Past the end does nothing, rather than wrapping round to a window
+        // that is not the one the key was asking for.
+        assert!(state.focus_stack_window(7).unwrap().is_empty());
+        assert_eq!(focused(&state), Some(WindowId(3)));
+
+        // And asking for the one already in front is not a change either.
+        assert!(state.focus_stack_window(2).unwrap().is_empty());
     }
 
     #[test]

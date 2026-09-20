@@ -1890,6 +1890,9 @@ impl WindowManager {
             Command::Stack { direction } => self.run_op(|core| core.stack(direction_of(direction))),
             Command::Unstack => self.run_op(CoreState::unstack),
             Command::StackAll => self.run_op(CoreState::stack_all),
+            Command::FocusStackWindow { index } => {
+                self.run_op(|core| core.focus_stack_window(index))
+            }
             Command::UnstackAll => self.run_op(CoreState::unstack_all),
             Command::CycleStack { direction } => {
                 self.run_op(|core| core.cycle_stack(cycle_of(direction)))
@@ -1965,6 +1968,36 @@ impl WindowManager {
             }
             Command::MouseFollowsFocus { state } => {
                 self.core.mouse_follows_focus = state.is_enabled();
+                Response::Ok
+            }
+            Command::WindowContainerBehaviour { behaviour } => {
+                self.core.window_container_behaviour = container_behaviour_of(behaviour);
+                Response::Ok
+            }
+            Command::ToggleWindowContainerBehaviour => {
+                self.core.window_container_behaviour = match self.core.window_container_behaviour {
+                    mochi_core::model::WindowContainerBehaviour::Create => {
+                        mochi_core::model::WindowContainerBehaviour::Append
+                    }
+                    mochi_core::model::WindowContainerBehaviour::Append => {
+                        mochi_core::model::WindowContainerBehaviour::Create
+                    }
+                };
+                Response::Ok
+            }
+            Command::CrossMonitorMoveBehaviour { behaviour } => {
+                self.core.cross_monitor_move_behaviour = move_behaviour_of(behaviour);
+                Response::Ok
+            }
+            Command::WindowHidingBehaviour { behaviour } => {
+                // Windows already off screen keep the method they were hidden
+                // with: the record stores it per window, and restoring one with
+                // the wrong call would leave it invisible for good.
+                self.core.window_hiding_behaviour = hiding_behaviour_of(behaviour);
+                Response::Ok
+            }
+            Command::UnmanagedWindowOperationBehaviour { behaviour } => {
+                self.core.unmanaged_window_operation_behaviour = operation_behaviour_of(behaviour);
                 Response::Ok
             }
 
@@ -2696,6 +2729,46 @@ fn strategy_of(strategy: mochi_client::MatchingStrategy) -> MatchingStrategy {
         mochi_client::MatchingStrategy::StartsWith => MatchingStrategy::StartsWith,
         mochi_client::MatchingStrategy::EndsWith => MatchingStrategy::EndsWith,
         mochi_client::MatchingStrategy::Regex => MatchingStrategy::Regex,
+    }
+}
+
+fn container_behaviour_of(
+    behaviour: mochi_client::ContainerBehaviour,
+) -> mochi_core::model::WindowContainerBehaviour {
+    match behaviour {
+        mochi_client::ContainerBehaviour::Create => {
+            mochi_core::model::WindowContainerBehaviour::Create
+        }
+        mochi_client::ContainerBehaviour::Append => {
+            mochi_core::model::WindowContainerBehaviour::Append
+        }
+    }
+}
+
+fn move_behaviour_of(behaviour: mochi_client::MoveBehaviour) -> mochi_core::model::MoveBehaviour {
+    match behaviour {
+        mochi_client::MoveBehaviour::Swap => mochi_core::model::MoveBehaviour::Swap,
+        mochi_client::MoveBehaviour::Insert => mochi_core::model::MoveBehaviour::Insert,
+        mochi_client::MoveBehaviour::NoOp => mochi_core::model::MoveBehaviour::NoOp,
+    }
+}
+
+fn hiding_behaviour_of(
+    behaviour: mochi_client::HidingBehaviour,
+) -> mochi_core::model::HidingBehaviour {
+    match behaviour {
+        mochi_client::HidingBehaviour::Hide => mochi_core::model::HidingBehaviour::Hide,
+        mochi_client::HidingBehaviour::Minimize => mochi_core::model::HidingBehaviour::Minimize,
+        mochi_client::HidingBehaviour::Cloak => mochi_core::model::HidingBehaviour::Cloak,
+    }
+}
+
+fn operation_behaviour_of(
+    behaviour: mochi_client::OperationBehaviour,
+) -> mochi_core::model::OperationBehaviour {
+    match behaviour {
+        mochi_client::OperationBehaviour::Op => mochi_core::model::OperationBehaviour::Op,
+        mochi_client::OperationBehaviour::NoOp => mochi_core::model::OperationBehaviour::NoOp,
     }
 }
 
@@ -3588,6 +3661,64 @@ mod tests {
         });
         assert_eq!(response, Response::Ok);
         assert_eq!(wm.state().all_window_ids().count(), 0);
+    }
+
+    #[test]
+    fn the_container_behaviour_can_be_switched_without_touching_the_file() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        assert_eq!(
+            wm.state().window_container_behaviour,
+            mochi_core::model::WindowContainerBehaviour::Create
+        );
+
+        let (response, _) = wm.handle_command(Command::ToggleWindowContainerBehaviour);
+        assert_eq!(response, Response::Ok);
+        assert_eq!(
+            wm.state().window_container_behaviour,
+            mochi_core::model::WindowContainerBehaviour::Append
+        );
+
+        // And it takes effect on the next window, not on the next reload.
+        wm.manage(&window(2, "Browser"));
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().containers().len(),
+            1,
+            "the new window should have joined the focused container"
+        );
+
+        wm.handle_command(Command::WindowContainerBehaviour {
+            behaviour: mochi_client::ContainerBehaviour::Create,
+        });
+        wm.manage(&window(3, "Terminal"));
+        assert_eq!(wm.state().workspace(0, 0).unwrap().containers().len(), 2);
+    }
+
+    #[test]
+    fn the_three_other_behaviours_reach_the_model() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+
+        wm.handle_command(Command::CrossMonitorMoveBehaviour {
+            behaviour: mochi_client::MoveBehaviour::Insert,
+        });
+        wm.handle_command(Command::WindowHidingBehaviour {
+            behaviour: mochi_client::HidingBehaviour::Minimize,
+        });
+        wm.handle_command(Command::UnmanagedWindowOperationBehaviour {
+            behaviour: mochi_client::OperationBehaviour::NoOp,
+        });
+
+        assert_eq!(
+            wm.state().cross_monitor_move_behaviour,
+            mochi_core::model::MoveBehaviour::Insert
+        );
+        assert_eq!(
+            wm.state().window_hiding_behaviour,
+            mochi_core::model::HidingBehaviour::Minimize
+        );
+        assert_eq!(
+            wm.state().unmanaged_window_operation_behaviour,
+            mochi_core::model::OperationBehaviour::NoOp
+        );
     }
 
     #[test]

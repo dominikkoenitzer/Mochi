@@ -136,6 +136,40 @@ wire_enum! {
 }
 
 wire_enum! {
+    /// Whether a new window joins the focused container or gets one of its own.
+    pub enum ContainerBehaviour {
+        Create => "create",
+        Append => "append",
+    }
+}
+
+wire_enum! {
+    /// What moving a container past a monitor edge does.
+    pub enum MoveBehaviour {
+        Swap => "swap",
+        Insert => "insert",
+        NoOp => "no-op",
+    }
+}
+
+wire_enum! {
+    /// How a window on an inactive workspace is taken off screen.
+    pub enum HidingBehaviour {
+        Hide => "hide",
+        Minimize => "minimize",
+        Cloak => "cloak",
+    }
+}
+
+wire_enum! {
+    /// What a command aimed at a window Mochi does not manage does.
+    pub enum OperationBehaviour {
+        Op => "op",
+        NoOp => "no-op",
+    }
+}
+
+wire_enum! {
     /// Border shape.
     pub enum BorderStyle {
         System => "system",
@@ -314,6 +348,11 @@ pub enum Command {
     Unstack,
     /// Collapse every container in the workspace into one stack.
     StackAll,
+    /// Focus one window of the focused stack by its position in it.
+    FocusStackWindow {
+        /// Zero-based index into the stack.
+        index: usize,
+    },
     /// Give every stacked window in the workspace its own container.
     UnstackAll,
     /// Step through the windows of the focused stack.
@@ -426,6 +465,28 @@ pub enum Command {
     FocusFollowsMouse {
         /// Turn it on or off.
         state: BooleanState,
+    },
+    /// Decide whether a new window stacks onto the focused container.
+    WindowContainerBehaviour {
+        /// Create a container, or append to the focused one.
+        behaviour: ContainerBehaviour,
+    },
+    /// Switch between creating a container and appending to the focused one.
+    ToggleWindowContainerBehaviour,
+    /// Decide what moving a container past a monitor edge does.
+    CrossMonitorMoveBehaviour {
+        /// Swap, insert or do nothing.
+        behaviour: MoveBehaviour,
+    },
+    /// Decide how a window on an inactive workspace is taken off screen.
+    WindowHidingBehaviour {
+        /// Hide, minimize or cloak.
+        behaviour: HidingBehaviour,
+    },
+    /// Decide what a command aimed at an unmanaged window does.
+    UnmanagedWindowOperationBehaviour {
+        /// Run it anyway, or refuse it.
+        behaviour: OperationBehaviour,
     },
     /// Warp the mouse to the centre of a newly focused window.
     MouseFollowsFocus {
@@ -600,6 +661,7 @@ impl Command {
             Self::Stack { .. } => "stack",
             Self::Unstack => "unstack",
             Self::StackAll => "stack-all",
+            Self::FocusStackWindow { .. } => "focus-stack-window",
             Self::UnstackAll => "unstack-all",
             Self::CycleStack { .. } => "cycle-stack",
             Self::CycleLayout { .. } => "cycle-layout",
@@ -622,6 +684,13 @@ impl Command {
             Self::CycleMonitor { .. } => "cycle-monitor",
             Self::FocusFollowsMouse { .. } => "focus-follows-mouse",
             Self::MouseFollowsFocus { .. } => "mouse-follows-focus",
+            Self::WindowContainerBehaviour { .. } => "window-container-behaviour",
+            Self::ToggleWindowContainerBehaviour => "toggle-window-container-behaviour",
+            Self::CrossMonitorMoveBehaviour { .. } => "cross-monitor-move-behaviour",
+            Self::WindowHidingBehaviour { .. } => "window-hiding-behaviour",
+            Self::UnmanagedWindowOperationBehaviour { .. } => {
+                "unmanaged-window-operation-behaviour"
+            }
             Self::SetHotkeys { .. } => "set-hotkeys",
             Self::ToggleTransparency => "toggle-transparency",
             Self::Border { .. } => "border",
