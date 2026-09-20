@@ -38,6 +38,10 @@ pub enum Error {
         workspace: usize,
     },
 
+    /// No workspace anywhere carries that name.
+    #[error("no workspace is named {0:?}")]
+    WorkspaceNameNotFound(String),
+
     /// The window is not managed by any workspace.
     #[error("window {0} is not managed")]
     WindowNotFound(WindowId),

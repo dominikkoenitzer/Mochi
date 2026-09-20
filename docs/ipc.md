@@ -145,12 +145,14 @@ with a search and replace.
 | `manage`, `unmanage` | |
 | `stack` | `direction` |
 | `unstack` | |
+| `stack-all`, `unstack-all` | |
 | `cycle-focus`, `cycle-move`, `cycle-stack`, `cycle-layout`, `cycle-workspace`, `cycle-monitor` | `direction`: `next` `previous` |
 | `change-layout` | `layout`: `bsp` `columns` `rows` `vertical-stack` `horizontal-stack` `ultrawide-vertical-stack` `grid` |
 | `flip-layout` | `axis` |
 | `toggle-tiling` | |
 | `focus-workspace`, `move-to-workspace`, `send-to-workspace` | `index` |
 | `focus-last-workspace` | |
+| `focus-named-workspace`, `move-to-named-workspace`, `send-to-named-workspace` | `name` |
 | `workspace-padding`, `container-padding` | `monitor`, `workspace`, `size` |
 | `focus-monitor`, `move-to-monitor`, `send-to-monitor` | `index` |
 | `focus-follows-mouse`, `mouse-follows-focus`, `border`, `animation` | `state`: `enable` `disable` |
@@ -162,7 +164,9 @@ with a search and replace.
 | `animation-duration` | `duration` in ms |
 | `animation-style` | `style` |
 | `animation-fps` | `fps` |
-| `float-rule`, `ignore-rule` | `identifier`: `exe` `class` `title` `path`, `id`, `matching_strategy`: `equals` `contains` `starts-with` `ends-with` `regex` |
+| `float-rule`, `ignore-rule`, `manage-rule` | `identifier`: `exe` `class` `title` `path`, `id`, `matching_strategy`: `equals` `contains` `starts-with` `ends-with` `regex` |
+| `workspace-rule` | the same three, plus `monitor`, `workspace` and `initial_only` |
+| `restore-windows` | |
 | `subscribe-pipe`, `unsubscribe-pipe` | `name` |
 
 `query` targets: `focused-monitor-index`, `focused-workspace-index`,
