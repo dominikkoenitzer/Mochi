@@ -920,6 +920,10 @@ impl Workspace {
 
     /// Moves the focused container to the front of the ring.
     ///
+    /// Resize deltas stay with the position, not with the container, the same
+    /// rule [`Workspace::swap_focused_container`] follows: rearranging windows
+    /// does not drag the layout's proportions along with them.
+    ///
     /// Returns `false` when there is nothing to promote.
     pub fn promote_focused_container(&mut self) -> bool {
         let from = self.containers.focused_idx();
@@ -929,10 +933,15 @@ impl Workspace {
         let Some(container) = self.containers.remove(from) else {
             return false;
         };
-        if from < self.resize_dimensions.len() {
-            self.resize_dimensions.remove(from);
-        }
+        // Held aside across the remove and the insert. Letting those two touch
+        // the deltas dropped the promoted container's own resize and shifted
+        // every other one along by a place, so promoting a window you had just
+        // resized threw that resize away and quietly restyled the rest of the
+        // workspace.
+        let deltas = std::mem::take(&mut self.resize_dimensions);
         self.insert_container(0, container);
+        self.resize_dimensions = deltas;
+        self.resize_dimensions.resize(self.containers.len(), None);
         true
     }
 
@@ -1101,6 +1110,27 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn promoting_a_container_leaves_the_resize_deltas_where_they_are() {
+        let mut ws = Workspace::new();
+        for id in 1..=4 {
+            ws.add_window(Window::new(id));
+        }
+        let delta = Rect::new(0, 0, 40, 0);
+        ws.set_resize_dimension(2, Some(delta));
+        ws.set_resize_dimension(0, Some(Rect::new(0, 0, 10, 0)));
+
+        ws.containers_mut().focus(2);
+        assert!(ws.promote_focused_container());
+
+        // Deltas belong to positions, which is the rule `swap_focused_container`
+        // documents. Removing one and inserting a blank threw away the resize
+        // of the very container being promoted and slid every other one along.
+        assert_eq!(ws.resize_dimension(0), Some(Rect::new(0, 0, 10, 0)));
+        assert_eq!(ws.resize_dimension(2), Some(delta));
+        assert_eq!(ws.containers().len(), 4);
+    }
     use super::*;
 
     const WORK_AREA: Rect = Rect::new(0, 0, 1920, 1080);
