@@ -115,9 +115,11 @@ alt + shift + g : toggle-game-mode
   as a parse error with its line number.
 - The log at `%LOCALAPPDATA%\mochi\mochi.log` records every hotkey that fired
   and every shell command that failed to start.
-- Another program may own the key. A low-level hook sees keys before almost
-  everything, but not before another process that installed its hook first; if
-  an old hotkey daemon is still running it is fighting Mochi for the key.
+- Another program may own the key. Windows calls the most recently installed
+  keyboard hook first, so between Mochi and another hotkey daemon on the same
+  key, whichever started last wins and the other one never sees the press. Two
+  of them running is not a crash, it is a coin toss decided at startup: stop the
+  old one.
 - Windows drops a hook whose callback is too slow. Mochi's does a hash lookup
   and nothing else, but a machine that was frozen long enough (a debugger on the
   daemon, for instance) can still lose it. Reloading the file installs it again.
