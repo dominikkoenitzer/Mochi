@@ -94,6 +94,24 @@ fn keeping_visuals(mut loaded: Config, live: &Config) -> Config {
     loaded
 }
 
+/// The hotkey file to read on a reload.
+///
+/// The file is accepted under two names, and renaming it from the borrowed one
+/// to Mochi's own is a thing a user does exactly once, on purpose. Re-reading
+/// whichever name happened to exist at startup would find nothing there, and a
+/// missing hotkey file is deliberately not an error, so the whole keyboard
+/// would come unbound without a word being logged.
+///
+/// `candidates` is empty when the path was named rather than found, and then
+/// the named path is the only answer: `--hotkeys` means that file.
+fn hotkey_file_now(current: &std::path::Path, candidates: &[PathBuf]) -> PathBuf {
+    candidates
+        .iter()
+        .find(|candidate| candidate.exists())
+        .cloned()
+        .unwrap_or_else(|| current.to_path_buf())
+}
+
 /// Which of the monitors we already had is the one this enumeration describes.
 ///
 /// The obvious answer, the GDI device name, is the wrong one. `\\.\DISPLAY1` is
@@ -372,6 +390,11 @@ pub struct WindowManager {
     hotkeys: Option<HotkeyDaemon>,
     /// The hotkey file, for a reload and for `mochic hotkeys`.
     hotkey_path: Option<PathBuf>,
+    /// Every name the hotkey file is accepted under, in preference order.
+    ///
+    /// Empty when the path was named on the command line or in the
+    /// environment: that names one file and nothing else counts.
+    hotkey_candidates: Vec<PathBuf>,
     /// One row per binding, the way `mochic hotkeys` prints them. Kept here
     /// rather than read back from the hook thread, which owns the bindings and
     /// must not be asked questions while it is matching key presses.
@@ -439,6 +462,7 @@ impl WindowManager {
             visuals,
             hotkeys: None,
             hotkey_path: None,
+            hotkey_candidates: Vec::new(),
             hotkey_rows: Vec::new(),
             hotkey_errors: Vec::new(),
             #[cfg(test)]
@@ -464,11 +488,12 @@ impl WindowManager {
     /// Failing to install the hook is not fatal. A window manager that refuses
     /// to start because a key could not be bound would leave the user with an
     /// untiled desktop over something `mochic` can still do by hand.
-    pub fn start_hotkeys(&mut self, path: PathBuf) {
+    pub fn start_hotkeys(&mut self, path: PathBuf, candidates: Vec<PathBuf>) {
         let (bindings, errors) = config::load_hotkeys(&path);
         self.hotkey_rows = rows_of(&bindings);
         self.hotkey_errors = errors;
         self.hotkey_path = Some(path);
+        self.hotkey_candidates = candidates;
 
         match HotkeyDaemon::start(self.tx.clone(), bindings) {
             Ok(daemon) => self.hotkeys = Some(daemon),
@@ -478,9 +503,19 @@ impl WindowManager {
 
     /// Re-reads the hotkey file and hands the bindings to the hook thread.
     pub fn reload_hotkeys(&mut self) {
-        let Some(path) = self.hotkey_path.clone() else {
+        let Some(mut path) = self.hotkey_path.clone() else {
             return;
         };
+        let found = hotkey_file_now(&path, &self.hotkey_candidates);
+        if found != path {
+            tracing::info!(
+                from = %path.display(),
+                to = %found.display(),
+                "the hotkey file is under its other name now"
+            );
+            path = found;
+            self.hotkey_path = Some(path.clone());
+        }
         let (bindings, errors) = config::load_hotkeys(&path);
         self.hotkey_rows = rows_of(&bindings);
         self.hotkey_errors = errors;
@@ -3661,6 +3696,50 @@ mod tests {
         });
         assert_eq!(response, Response::Ok);
         assert_eq!(wm.state().all_window_ids().count(), 0);
+    }
+
+    #[test]
+    fn renaming_the_hotkey_file_to_mochis_own_name_does_not_unbind_the_keyboard() {
+        let dir = std::env::temp_dir().join(format!("mochi-keyname-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let preferred = dir.join("hotkeys");
+        let legacy = dir.join("whkdrc");
+        let candidates = vec![preferred.clone(), legacy.clone()];
+
+        // The state a migrated desktop starts in: only the borrowed name is
+        // there, and that is what startup resolved to.
+        std::fs::write(
+            &legacy,
+            "alt + h : focus left
+",
+        )
+        .unwrap();
+        assert_eq!(hotkey_file_now(&legacy, &candidates), legacy);
+
+        // The user renames it to Mochi's own name. Before the fix the reload
+        // re-read the path from startup, found nothing, and silently dropped
+        // every binding, because a missing hotkey file is not an error.
+        std::fs::rename(&legacy, &preferred).unwrap();
+        assert_eq!(
+            hotkey_file_now(&legacy, &candidates),
+            preferred,
+            "a reload after the rename would have read the file that is gone"
+        );
+
+        // With neither there, the path stays put so the watcher keeps waiting
+        // on something rather than on nothing.
+        std::fs::remove_file(&preferred).unwrap();
+        assert_eq!(hotkey_file_now(&legacy, &candidates), legacy);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hotkey_path_that_was_named_is_never_second_guessed() {
+        // `--hotkeys` names one file. Looking for another would quietly read a
+        // file the user did not ask for.
+        let named = std::path::PathBuf::from(r"D:\somewhere\keys");
+        assert_eq!(hotkey_file_now(&named, &[]), named);
     }
 
     #[test]
