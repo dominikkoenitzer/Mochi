@@ -69,41 +69,6 @@ pub fn start_daemon(args: &[String]) -> Result<()> {
     )
 }
 
-/// Starts whkd if it is on `PATH`. A missing whkd is reported, not fatal.
-pub fn start_whkd() -> Result<()> {
-    let Some(exe) = find_executable("whkd") else {
-        bail!("whkd is not on PATH, hotkeys will not work");
-    };
-    let pid = spawn_detached(&exe, &[])?;
-    println!("started {} (pid {pid})", exe.display());
-    Ok(())
-}
-
-/// Stops whkd.
-///
-/// whkd has no control channel, so there is nothing to ask politely and
-/// `taskkill` is the only way to bring it down.
-pub fn stop_whkd() -> Result<()> {
-    let status = Command::new("taskkill")
-        .args(["/F", "/IM", "whkd.exe"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .context("could not run taskkill")?;
-    match status.code() {
-        Some(0) => {
-            println!("stopped whkd");
-            Ok(())
-        }
-        // 128 is taskkill's "no such process", which is not a failure here.
-        Some(128) => {
-            println!("whkd was not running");
-            Ok(())
-        }
-        other => bail!("taskkill exited with {other:?}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

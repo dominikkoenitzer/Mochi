@@ -32,6 +32,10 @@ mod response;
 
 pub mod protocol;
 
+/// The `mochic` grammar, shared so a hotkey binding parses exactly like the CLI.
+#[cfg(feature = "clap")]
+pub mod cli;
+
 #[cfg(windows)]
 mod client;
 #[cfg(windows)]
@@ -110,7 +114,7 @@ mod tests {
             Command::TogglePause,
             Command::ReloadConfiguration,
             Command::Retile,
-            Command::Stop { whkd: true },
+            Command::Stop,
         ];
         for cmd in commands {
             round_trip(cmd);
@@ -143,7 +147,7 @@ mod tests {
     #[test]
     fn optional_fields_have_defaults() {
         let cmd: Command = serde_json::from_str(r#"{"cmd":"stop"}"#).unwrap();
-        assert_eq!(cmd, Command::Stop { whkd: false });
+        assert_eq!(cmd, Command::Stop);
 
         let cmd: Command =
             serde_json::from_str(r#"{"cmd":"float-rule","identifier":"exe","id":"wt.exe"}"#)
@@ -174,16 +178,18 @@ mod tests {
     fn every_command_name_matches_its_tag() {
         // A representative value for every variant, so `name()` cannot drift.
         let all = [
-            Command::Start { whkd: false },
-            Command::Stop { whkd: false },
+            Command::Start,
+            Command::Stop,
             Command::Quickstart,
             Command::TogglePause,
+            Command::ToggleGameMode,
             Command::ReloadConfiguration,
             Command::Retile,
             Command::State,
             Command::Query {
                 target: QueryTarget::MonitorCount,
             },
+            Command::Hotkeys,
             Command::Focus {
                 direction: Direction::Up,
             },
@@ -245,6 +251,9 @@ mod tests {
             Command::MouseFollowsFocus {
                 state: BooleanState::Disable,
             },
+            Command::SetHotkeys {
+                state: BooleanState::Enable,
+            },
             Command::ToggleTransparency,
             Command::Border {
                 state: BooleanState::Enable,
@@ -282,7 +291,7 @@ mod tests {
             Command::UnsubscribePipe { name: "bar".into() },
         ];
 
-        assert_eq!(all.len(), 50, "add new variants to this list");
+        assert_eq!(all.len(), 53, "add new variants to this list");
         let mut seen = std::collections::HashSet::new();
         for cmd in &all {
             let json: serde_json::Value = serde_json::to_value(cmd).unwrap();
@@ -326,6 +335,9 @@ mod tests {
             },
             Response::Query {
                 answer: serde_json::json!(2),
+            },
+            Response::Hotkeys {
+                hotkeys: serde_json::json!([{"keys": "alt + h", "command": "focus left"}]),
             },
         ];
         for case in cases {

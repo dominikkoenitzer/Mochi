@@ -4,6 +4,7 @@
 //! See `docs/ipc.md` for the protocol and `crates/mochi/README.md` for the
 //! module map and the hook points the tiling model plugs into.
 
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result};
@@ -115,13 +116,31 @@ fn main() -> Result<()> {
     manager.attach_mouse_tracker(mouse);
     let config_watcher = config::ConfigWatcher::start(config_path, tx.clone())?;
     tracing::debug!(watching = %config_watcher.path().display(), "configuration watcher");
+
+    // The keyboard hook comes up after the desktop is tiled, so the first key
+    // press cannot arrive before there is a model for it to act on.
+    if args.no_hotkeys {
+        tracing::info!("--no-hotkeys: this daemon binds no keys");
+    } else {
+        manager.start_hotkeys(config::resolve_hotkeys_path(args.hotkeys.as_deref())?);
+    }
+    let hotkey_watcher = manager
+        .hotkey_path()
+        .map(Path::to_path_buf)
+        .map(|path| config::ConfigWatcher::start(path, tx.clone()))
+        .transpose()?;
+    if let Some(watcher) = hotkey_watcher.as_ref() {
+        tracing::debug!(watching = %watcher.path().display(), "hotkey watcher");
+    }
     let mut pipe = ipc::PipeServer::start(tx.clone())?;
 
     // The loop owns the state until something asks it to stop.
     let result = manager.run();
 
     tracing::info!("stopping the producers");
+    manager.stop_hotkeys();
     pipe.stop();
+    drop(hotkey_watcher);
     drop(config_watcher);
     hooks.stop();
     message_window.stop();

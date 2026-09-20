@@ -215,21 +215,16 @@ wire_enum! {
 pub enum Command {
     // --- lifecycle -------------------------------------------------------
     /// Start the daemon. Only meaningful to `mochic`; a running daemon answers Ok.
-    Start {
-        /// Start whkd alongside the daemon.
-        #[serde(default)]
-        whkd: bool,
-    },
+    Start,
     /// Exit cleanly, restoring every managed window first.
-    Stop {
-        /// Also stop whkd. Acted on by `mochic`, not by the daemon.
-        #[serde(default)]
-        whkd: bool,
-    },
+    Stop,
     /// Write a default mochi.json to `%USERPROFILE%` if there is none.
     Quickstart,
     /// Stop and resume management without exiting.
     TogglePause,
+    /// Hand the whole keyboard to a game: pause tiling and suspend every
+    /// hotkey except the one bound to this command, so it can be undone.
+    ToggleGameMode,
     /// Re-read the configuration file.
     ReloadConfiguration,
     /// Recompute and re-apply every layout.
@@ -243,6 +238,8 @@ pub enum Command {
         /// What to answer.
         target: QueryTarget,
     },
+    /// Ask for the bindings the hotkey daemon currently holds.
+    Hotkeys,
 
     // --- focus and movement ----------------------------------------------
     /// Move focus in a direction.
@@ -377,6 +374,11 @@ pub enum Command {
         /// Turn it on or off.
         state: BooleanState,
     },
+    /// Turn the hotkey daemon on or off without stopping Mochi.
+    SetHotkeys {
+        /// Turn it on or off.
+        state: BooleanState,
+    },
 
     // --- visuals ----------------------------------------------------------
     /// Toggle transparency for unfocused windows.
@@ -487,10 +489,12 @@ impl Command {
             Self::Stop { .. } => "stop",
             Self::Quickstart => "quickstart",
             Self::TogglePause => "toggle-pause",
+            Self::ToggleGameMode => "toggle-game-mode",
             Self::ReloadConfiguration => "reload-configuration",
             Self::Retile => "retile",
             Self::State => "state",
             Self::Query { .. } => "query",
+            Self::Hotkeys => "hotkeys",
             Self::Focus { .. } => "focus",
             Self::Move { .. } => "move",
             Self::ResizeAxis { .. } => "resize-axis",
@@ -519,6 +523,7 @@ impl Command {
             Self::CycleMonitor { .. } => "cycle-monitor",
             Self::FocusFollowsMouse { .. } => "focus-follows-mouse",
             Self::MouseFollowsFocus { .. } => "mouse-follows-focus",
+            Self::SetHotkeys { .. } => "set-hotkeys",
             Self::ToggleTransparency => "toggle-transparency",
             Self::Border { .. } => "border",
             Self::BorderWidth { .. } => "border-width",

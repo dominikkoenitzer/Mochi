@@ -101,7 +101,7 @@ mod tests {
     fn write_then_read_round_trips() {
         let mut buf = Vec::new();
         write_message(&mut buf, &Command::State).unwrap();
-        write_message(&mut buf, &Command::Stop { whkd: true }).unwrap();
+        write_message(&mut buf, &Command::Stop).unwrap();
 
         let mut reader = std::io::BufReader::new(buf.as_slice());
         assert_eq!(
@@ -110,7 +110,7 @@ mod tests {
         );
         assert_eq!(
             read_message::<_, Command>(&mut reader).unwrap(),
-            Some(Command::Stop { whkd: true })
+            Some(Command::Stop)
         );
         assert_eq!(read_message::<_, Command>(&mut reader).unwrap(), None);
     }

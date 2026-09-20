@@ -27,6 +27,20 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
+    /// Hotkey file to bind.
+    ///
+    /// Defaults to $MOCHI_HOTKEYS, then %USERPROFILE%\.config\mochi\hotkeys,
+    /// then a whkdrc in that same directory.
+    #[arg(long, value_name = "PATH")]
+    pub hotkeys: Option<PathBuf>,
+
+    /// Bind no keys at all.
+    ///
+    /// For a desktop that drives Mochi from a separate hotkey daemon, and for
+    /// a second Mochi started to look at something while the real one runs.
+    #[arg(long, conflicts_with = "hotkeys")]
+    pub no_hotkeys: bool,
+
     /// Manage only windows of this class, and manage them even though they
     /// are tool windows.
     ///
@@ -66,6 +80,21 @@ mod tests {
         assert!(!args.dry_run);
         assert!(args.config.is_none());
         assert!(args.manage_class.is_empty());
+    }
+
+    #[test]
+    fn the_hotkey_file_can_be_named_or_turned_off() {
+        let args = Args::try_parse_from(["mochi", "--hotkeys", r"D:\keys"]).unwrap();
+        assert_eq!(args.hotkeys.unwrap(), PathBuf::from(r"D:\keys"));
+        assert!(!args.no_hotkeys);
+
+        let args = Args::try_parse_from(["mochi", "--no-hotkeys"]).unwrap();
+        assert!(args.no_hotkeys);
+        assert!(args.hotkeys.is_none());
+
+        // Naming a file and refusing to bind keys at the same time is a
+        // contradiction, and clap says so rather than picking one.
+        assert!(Args::try_parse_from(["mochi", "--no-hotkeys", "--hotkeys", r"D:\keys"]).is_err());
     }
 
     #[test]
