@@ -68,6 +68,14 @@ pub enum Error {
         message: String,
     },
 
+    /// A rule carried an empty identifier, which names no window and would be
+    /// a wildcard for the substring strategies.
+    #[error("a {kind} rule has an empty id, which would match every window")]
+    EmptyRuleId {
+        /// The piece of window metadata the rule looks at.
+        kind: crate::rules::ApplicationIdentifier,
+    },
+
     /// JSON could not be turned into a config or a rule set.
     #[error("invalid json: {0}")]
     Json(String),
