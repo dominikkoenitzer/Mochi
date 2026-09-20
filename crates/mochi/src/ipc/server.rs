@@ -29,7 +29,7 @@ use windows::Win32::System::Pipes::{
 };
 use windows::core::HSTRING;
 
-use crate::events::{Event, EventSender, Reply};
+use crate::events::{Event, EventSender, Reply, ShutdownReason};
 
 /// Read and write buffer size for a pipe instance.
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
@@ -358,6 +358,13 @@ fn accept_loop(
                 let _ = unsafe { DisconnectNamedPipe(raw(&instance)) };
                 if failures >= MAX_CONSECUTIVE_ACCEPT_FAILURES {
                     tracing::error!(failures, "the IPC acceptor gave up");
+                    // Tell the loop, do not just stop listening. Breaking on
+                    // its own left the daemon alive and tiling with no pipe,
+                    // so every `mochic` call answered "mochi is not running"
+                    // and the restore path was unreachable: the user's only
+                    // way out was Task Manager, which skips the restore
+                    // entirely and leaves every hidden window hidden.
+                    let _ = tx.send(Event::Shutdown(ShutdownReason::IpcLost));
                     break;
                 }
                 continue;
@@ -378,6 +385,9 @@ fn accept_loop(
             Err(e) => {
                 tracing::error!(error = %e, "could not create the next pipe instance");
                 serve(&connected, tx.clone(), stop);
+                // Same reasoning as the give-up above: the pipe name is gone
+                // the moment this thread returns, so the loop has to be told.
+                let _ = tx.send(Event::Shutdown(ShutdownReason::IpcLost));
                 break;
             }
         }

@@ -257,6 +257,7 @@ pub enum Cmd {
         name: String,
     },
     /// Set the outer padding of one workspace
+    #[command(allow_negative_numbers = true)]
     WorkspacePadding {
         /// Zero-based monitor index
         monitor: usize,
@@ -266,6 +267,7 @@ pub enum Cmd {
         size: i32,
     },
     /// Set the padding between containers of one workspace
+    #[command(allow_negative_numbers = true)]
     ContainerPadding {
         /// Zero-based monitor index
         monitor: usize,
@@ -359,6 +361,12 @@ pub enum Cmd {
         width: i32,
     },
     /// Set how far the border sits outside the window frame
+    // Negative values are the point of this one, so clap must not read a
+    // leading minus as a flag. Without this the value the daemon ships with
+    // cannot be typed or bound at all: `border-offset -1` was rejected as an
+    // unknown argument, and a hotkey line carrying it silently became a shell
+    // command instead of a mochic one.
+    #[command(allow_negative_numbers = true)]
     BorderOffset {
         /// Offset in logical pixels, negative pulls it inwards
         offset: i32,
@@ -708,6 +716,34 @@ fn one_line(error: &clap::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_values_that_are_meant_to_be_negative_can_be_typed() {
+        // `-1` is the daemon's own default border offset and the value in the
+        // user's configuration. clap read the leading minus as a flag, so the
+        // command could not set the value the program ships with, and a hotkey
+        // line carrying it was quietly demoted to a shell command.
+        assert_eq!(
+            Cli::try_parse_from(["mochic", "border-offset", "-1"])
+                .unwrap()
+                .command
+                .to_command(),
+            Some(Command::BorderOffset { offset: -1 })
+        );
+        assert_eq!(
+            Cli::try_parse_from(["mochic", "workspace-padding", "0", "0", "-5"])
+                .unwrap()
+                .command
+                .to_command(),
+            Some(Command::WorkspacePadding {
+                monitor: 0,
+                workspace: 0,
+                size: -5
+            })
+        );
+        // An index is still not allowed to be negative.
+        assert!(Cli::try_parse_from(["mochic", "focus-workspace", "-1"]).is_err());
+    }
     use super::*;
     use clap::CommandFactory;
 
