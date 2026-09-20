@@ -40,6 +40,12 @@ pub enum Cmd {
         /// Pass a configuration file to the daemon
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
+        /// Pass a hotkey file to the daemon
+        #[arg(long, value_name = "PATH")]
+        hotkeys: Option<PathBuf>,
+        /// Start the daemon with no keys bound
+        #[arg(long, conflicts_with = "hotkeys")]
+        no_hotkeys: bool,
         /// Start the daemon in dry-run mode, which moves nothing
         #[arg(long)]
         dry_run: bool,
@@ -330,16 +336,18 @@ pub enum Cmd {
 
 impl Cmd {
     /// The protocol command this subcommand sends, or `None` for the ones
-    /// `mochic` handles by itself (`start`, `quickstart`, `schema`).
+    /// `mochic` handles by itself (`start`, `quickstart`, `schema`,
+    /// `subscribe`).
     pub fn to_command(&self) -> Option<Command> {
         let command = match self {
             // These three never reach a daemon: two of them run before one
             // exists, the third only prints a file.
             Cmd::Start { .. } | Cmd::Quickstart | Cmd::Schema => return None,
 
-            // `subscribe` creates its own pipe first and then registers it the
-            // way any other subscriber would.
-            Cmd::Subscribe { name } => Command::SubscribePipe { name: name.clone() },
+            // `subscribe` is not one command either. It creates its own pipe
+            // first and only then registers it, so answering `subscribe-pipe`
+            // here would let a key register a pipe that nobody ever created.
+            Cmd::Subscribe { .. } => return None,
 
             Cmd::Stop => Command::Stop,
             Cmd::TogglePause => Command::TogglePause,
@@ -475,9 +483,9 @@ pub fn command_from_args(args: &[String]) -> Result<Command, String> {
     let cli =
         Cli::try_parse_from(argv).map_err(|e| format!("`{}`: {}", args.join(" "), one_line(&e)))?;
 
-    cli.command.to_command().ok_or_else(|| {
-        format!("`{first}` cannot be bound to a key, `mochic` runs it without the daemon")
-    })
+    cli.command
+        .to_command()
+        .ok_or_else(|| format!("`{first}` cannot be bound to a key, `mochic` runs it itself"))
 }
 
 /// Squashes a clap error, a paragraph with a usage block and a help hint, into
@@ -776,7 +784,10 @@ mod tests {
 
     #[test]
     fn the_client_side_subcommands_cannot_be_bound_to_a_key() {
-        for line in ["start", "quickstart", "schema"] {
+        // `subscribe` is in the list because `mochic` creates the pipe before
+        // it registers it; bound to a key it would register a pipe that does
+        // not exist, which is not what typing the same words does.
+        for line in ["start", "quickstart", "schema", "subscribe bar"] {
             let message = binding(line).unwrap_err();
             assert!(
                 message.contains("cannot be bound to a key"),

@@ -36,8 +36,10 @@ fn run() -> Result<()> {
     match cli.command {
         Cmd::Start {
             ref config,
+            ref hotkeys,
+            no_hotkeys,
             dry_run,
-        } => return start(config.as_deref(), dry_run),
+        } => return start(config.as_deref(), hotkeys.as_deref(), no_hotkeys, dry_run),
         Cmd::Quickstart => return quickstart(),
         Cmd::Schema => {
             println!("{}", mochi_core::config::json_schema());
@@ -182,7 +184,18 @@ fn binding_rows(hotkeys: &serde_json::Value) -> Option<Vec<(String, String)>> {
         .collect()
 }
 
-fn start(config: Option<&std::path::Path>, dry_run: bool) -> Result<()> {
+/// Starts the daemon, handing it the switches it would have taken directly.
+///
+/// Every one of these has to be passed through rather than left to the daemon's
+/// own defaults: `mochic start` is what an autostart entry runs, and a user
+/// whose hotkey file is not in the usual place would otherwise have no way to
+/// say so from there.
+fn start(
+    config: Option<&std::path::Path>,
+    hotkeys: Option<&std::path::Path>,
+    no_hotkeys: bool,
+    dry_run: bool,
+) -> Result<()> {
     if mochi_client::is_running() {
         println!("mochi is already running");
     } else {
@@ -193,6 +206,13 @@ fn start(config: Option<&std::path::Path>, dry_run: bool) -> Result<()> {
         if let Some(path) = config {
             args.push("--config".to_owned());
             args.push(path.display().to_string());
+        }
+        if let Some(path) = hotkeys {
+            args.push("--hotkeys".to_owned());
+            args.push(path.display().to_string());
+        }
+        if no_hotkeys {
+            args.push("--no-hotkeys".to_owned());
         }
         process::start_daemon(&args)?;
     }

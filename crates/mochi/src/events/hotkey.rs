@@ -17,6 +17,15 @@
 //! including every key that merely starts with the right modifiers, is passed
 //! straight on. If Mochi dies the hook dies with the process and the keyboard is
 //! the system's again, which is why there is no state to repair after a crash.
+//!
+//! **Leave no menu open.** Swallowing the key but not the modifier leaves the
+//! application in front with Alt going down and coming back up and nothing in
+//! between, which `DefWindowProc` reads as "activate the menu bar". Measured on
+//! a real window with a real menu bar, by
+//! `an_alt_binding_does_not_leave_the_application_in_menu_mode` in
+//! `crates/mochi/tests/e2e_testbed.rs`: every `alt + key` binding used to leave
+//! the window sitting in its File menu. A swallowed press under Alt or Win now
+//! injects one masking keystroke, so the modifier is no longer a bare press.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,8 +38,9 @@ use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU,
-    VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+    KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LWIN, VK_MENU,
+    VK_RCONTROL, VK_RMENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PostThreadMessageW,
@@ -166,16 +176,22 @@ const fn is_modifier(vk: u16) -> bool {
     )
 }
 
-fn remember_swallowed(vk: u16) {
+/// Records a swallowed press. True when this key was not already down, which
+/// is how auto-repeat is told apart from a fresh press.
+fn remember_swallowed(vk: u16) -> bool {
     SWALLOWED.with(|cell| {
         let mut keys = cell.borrow_mut();
         if keys.contains(&vk) {
-            return;
+            return false;
         }
-        if let Some(slot) = keys.iter_mut().find(|slot| **slot == 0) {
-            *slot = vk;
+        match keys.iter_mut().find(|slot| **slot == 0) {
+            Some(slot) => {
+                *slot = vk;
+                true
+            }
+            None => false,
         }
-    });
+    })
 }
 
 /// Whether this release belongs to a press that was swallowed, clearing it.
@@ -192,14 +208,46 @@ fn take_swallowed(vk: u16) -> bool {
     })
 }
 
+/// The mark on every key event Mochi injects itself, read back out of
+/// `KBDLLHOOKSTRUCT::dwExtraInfo`. "MOCH" as four bytes.
+///
+/// This is what stops the mask below from feeding itself back: the hook hands
+/// a marked event straight to the next hook without looking at it, so it can
+/// never match a binding, never be swallowed, and never produce a mask of its
+/// own. One integer compare, at the top of the callback.
+const MASK_TAG: usize = 0x4D4F_4348;
+
+/// The key the mask presses: plain Ctrl.
+///
+/// It has to be a key that does nothing on its own in any application, and
+/// Ctrl is the one key that is *defined* to do nothing on its own: it only ever
+/// qualifies something else. It is also a modifier, and a modifier is never a
+/// trigger here, so even without the tag above it could not match a binding or
+/// be swallowed. Everything else considered was worse: a function key can be
+/// bound by the application in front, `VK_NONCONVERT` does something real under
+/// a Japanese IME, and a character key would type.
+const MASK_KEY: u16 = 0x11;
+
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION {
-        let vk = (unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) }).vkCode as u16;
+        let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+        // Mochi's own mask, on its way out. Never looked at twice.
+        if event.dwExtraInfo == MASK_TAG {
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        }
+
+        let vk = event.vkCode as u16;
         let message = wparam.0 as u32;
 
         if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
-            if !is_modifier(vk) && press(vk) {
-                remember_swallowed(vk);
+            if !is_modifier(vk)
+                && let Some(modifiers) = press(vk)
+            {
+                // Only the first press of a held key masks: auto-repeat is
+                // still inside the same Alt, which is already masked.
+                if remember_swallowed(vk) && opens_a_menu(modifiers) {
+                    mask_the_modifier();
+                }
                 return LRESULT(1);
             }
         } else if matches!(message, WM_KEYUP | WM_SYSKEYUP) && take_swallowed(vk) {
@@ -210,8 +258,55 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// Matches one key press and reports it. True when the press was ours.
-fn press(vk: u16) -> bool {
+/// Whether these modifiers open a menu when they go down and come up again
+/// with nothing in between.
+///
+/// Alt is the measured one: on a window with a menu bar, `DefWindowProc` reads
+/// that sequence as "activate the menu bar", and since the key in the middle
+/// was swallowed the application never saw anything in between. The Win key is
+/// the same sequence with the Start menu. Ctrl and Shift open nothing.
+const fn opens_a_menu(modifiers: Modifiers) -> bool {
+    modifiers.alt || modifiers.win
+}
+
+/// Gives the application in front one keystroke to see between the modifier
+/// going down and coming up, so that the modifier no longer reads as a bare
+/// press.
+///
+/// Costs one `SendInput` of two events inside the hook callback, which is a few
+/// microseconds and only on a press that was Mochi's anyway. The events are
+/// tagged, so when they come back through this hook they are passed on at the
+/// first line; nothing can loop here.
+fn mask_the_modifier() {
+    let event = |up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(MASK_KEY),
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+                time: 0,
+                dwExtraInfo: MASK_TAG,
+            },
+        },
+    };
+
+    let inputs = [event(false), event(true)];
+    let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+    if sent as usize != inputs.len() {
+        // Nothing to repair: the worst case is the menu bar the mask was
+        // meant to prevent, which is what the desktop did before it existed.
+        tracing::debug!("the desktop refused the masking keystroke");
+    }
+}
+
+/// Matches one key press and reports it. The modifiers that were held when it
+/// matched, or `None` when the press was not ours.
+fn press(vk: u16) -> Option<Modifiers> {
     let trigger = Trigger {
         modifiers: current_modifiers(),
         key: Key::new(vk),
@@ -224,9 +319,7 @@ fn press(vk: u16) -> bool {
         gate.admits(&binding.action).then(|| binding.action.clone())
     });
 
-    let Some(action) = action else {
-        return false;
-    };
+    let action = action?;
 
     SENDER.with(|cell| {
         if let Some(tx) = cell.borrow().as_ref() {
@@ -239,7 +332,7 @@ fn press(vk: u16) -> bool {
             });
         }
     });
-    true
+    Some(trigger.modifiers)
 }
 
 /// The keyboard hook and the thread that pumps it.
@@ -537,11 +630,36 @@ mod tests {
     #[test]
     fn a_swallowed_press_swallows_its_release_exactly_once() {
         assert!(!take_swallowed(0x48));
-        remember_swallowed(0x48);
-        // Auto-repeat presses the same key again before it comes up.
-        remember_swallowed(0x48);
+        assert!(remember_swallowed(0x48));
+        // Auto-repeat presses the same key again before it comes up, and only
+        // the first of those is a new press.
+        assert!(!remember_swallowed(0x48));
         assert!(take_swallowed(0x48));
         assert!(!take_swallowed(0x48));
+    }
+
+    #[test]
+    fn only_the_modifiers_that_open_a_menu_are_masked() {
+        let none = Modifiers::default();
+        assert!(!opens_a_menu(none));
+        assert!(!opens_a_menu(Modifiers { ctrl: true, ..none }));
+        assert!(!opens_a_menu(Modifiers {
+            shift: true,
+            ..none
+        }));
+        // Alt is the measured one, Win is the Start menu.
+        assert!(opens_a_menu(Modifiers { alt: true, ..none }));
+        assert!(opens_a_menu(Modifiers { win: true, ..none }));
+    }
+
+    #[test]
+    fn the_masking_key_can_never_come_back_as_a_binding() {
+        // Two independent reasons, and either one alone would be enough.
+        // The tag: a marked event leaves the hook at the first line.
+        assert_eq!(MASK_TAG, 0x4D4F_4348);
+        // The key: a modifier is never a trigger, so it is never swallowed.
+        assert!(is_modifier(MASK_KEY));
+        assert_eq!(MASK_KEY, VK_CONTROL.0);
     }
 
     #[test]

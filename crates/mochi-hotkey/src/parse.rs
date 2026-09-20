@@ -124,6 +124,12 @@ impl Bindings {
         let mut bindings = Self::default();
         let mut errors = Vec::new();
 
+        // A file saved by a Windows editor or written by `Out-File` starts with
+        // a byte order mark. It is not whitespace, so leaving it in front of the
+        // first line would cost that line: a `.shell` directive stops being one
+        // and every shell binding under it would run in the wrong shell.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             let content = strip_comment(raw).trim();
@@ -441,37 +447,40 @@ fn split_group(side: &str) -> Result<Option<Group<'_>>, String> {
 
 /// Expands the `[a,b,c]` groups of one line into the bindings it stands for.
 ///
-/// Both sides expand together, pairwise, so `alt + [1,2] : focus-workspace
-/// [0,1]` is two bindings. A group on one side only has no partner to pair
-/// with and is an error rather than a guess.
+/// The trigger decides. `alt + [1,2] : focus-workspace [0,1]` is two bindings,
+/// paired in order, and a trigger group without a partner on the right has
+/// nothing to pair with and is an error rather than a guess.
+///
+/// Without a group on the left the right-hand side is taken exactly as written,
+/// brackets and all. It has to be: the right-hand side is a command line, and a
+/// perfectly ordinary one contains brackets. `[console]::beep(440,200)` is a
+/// PowerShell line, not a group of one, and `echo ]` is a line that prints a
+/// bracket, not a syntax error. Reading either of them as a group cost the user
+/// a binding that should simply have worked.
 fn expand(left: &str, right: &str) -> Result<Vec<(String, String)>, String> {
     let joined = |before: &str, item: &str, after: &str| format!("{before}{item}{after}");
 
-    match (split_group(left)?, split_group(right)?) {
-        (None, None) => Ok(vec![(left.to_owned(), right.to_owned())]),
-        (Some((lb, ls, la)), Some((rb, rs, ra))) => {
-            if ls.len() != rs.len() {
-                return Err(format!(
-                    "the trigger expands to {} bindings but the command expands to {}",
-                    ls.len(),
-                    rs.len()
-                ));
-            }
-            Ok(ls
-                .iter()
-                .zip(rs.iter())
-                .map(|(l, r)| (joined(lb, l, la), joined(rb, r, ra)))
-                .collect())
-        }
-        (Some((_, items, _)), None) => Err(format!(
+    let Some((lb, ls, la)) = split_group(left)? else {
+        return Ok(vec![(left.to_owned(), right.to_owned())]);
+    };
+    let Some((rb, rs, ra)) = split_group(right)? else {
+        return Err(format!(
             "the trigger expands to {} bindings but the command is a single line",
-            items.len()
-        )),
-        (None, Some((_, items, _))) => Err(format!(
-            "the command expands to {} lines but the trigger is a single key",
-            items.len()
-        )),
+            ls.len()
+        ));
+    };
+    if ls.len() != rs.len() {
+        return Err(format!(
+            "the trigger expands to {} bindings but the command expands to {}",
+            ls.len(),
+            rs.len()
+        ));
     }
+    Ok(ls
+        .iter()
+        .zip(rs.iter())
+        .map(|(l, r)| (joined(lb, l, la), joined(rb, r, ra)))
+        .collect())
 }
 
 /// Splits a command line into words, keeping double-quoted runs together.
@@ -584,6 +593,22 @@ mod tests {
             parse(".shell powershell   # the old one").shell(),
             Shell::Powershell
         );
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_cost_the_first_line() {
+        // Windows editors save UTF-8 with a BOM, and the first line of a hotkey
+        // file is usually the `.shell` directive the rest of it depends on.
+        let bindings = parse("\u{feff}.shell pwsh\nalt + g : ls");
+        assert_eq!(bindings.shell(), Shell::Pwsh);
+        assert_eq!(
+            bindings.get("alt + g".parse().unwrap()).unwrap().action,
+            Action::Shell {
+                shell: Shell::Pwsh,
+                line: "ls".to_owned(),
+            }
+        );
+        assert_eq!(parse("\u{feff}alt + h : mochic focus left").len(), 1);
     }
 
     #[test]
@@ -749,10 +774,48 @@ mod tests {
     }
 
     #[test]
-    fn a_group_on_the_command_alone_is_an_error() {
-        let found = errors("alt + h : focus-workspace [0,1]");
+    fn brackets_on_the_command_side_are_text_when_the_trigger_has_no_group() {
+        // A command line is allowed to contain brackets, and plenty do. Nothing
+        // here may read one as a group the trigger never asked for.
+        let bindings = Bindings::parse(
+            ".shell pwsh\n\
+             alt + b : [console]::beep(440,200)\n\
+             alt + g : echo ]\n",
+        )
+        .expect("a line with brackets in it is a line, not a syntax error");
+
+        let line = |text: &str| match &bindings.get(text.parse().unwrap()).unwrap().action {
+            Action::Shell { line, .. } => line.clone(),
+            other => panic!("{text} should be a shell line, got {other:?}"),
+        };
+        assert_eq!(line("alt + b"), "[console]::beep(440,200)");
+        assert_eq!(line("alt + g"), "echo ]");
+    }
+
+    #[test]
+    fn a_group_on_the_command_alone_is_taken_literally() {
+        // Written without the `mochic` prefix this is a shell line, so the
+        // brackets stay. That is the same rule as above, seen from the side
+        // where it is least expected.
+        let bindings = Bindings::parse("alt + h : focus-workspace [0,1]").unwrap();
+        assert_eq!(
+            bindings.get("alt + h".parse().unwrap()).unwrap().action,
+            Action::Shell {
+                shell: Shell::Cmd,
+                line: "focus-workspace [0,1]".to_owned(),
+            }
+        );
+
+        // With the prefix it has to be a command, and a command it is not.
+        let found = errors("alt + h : mochic focus-workspace [0,1]");
+        assert!(found[0].contains("line 1"), "{found:?}");
+    }
+
+    #[test]
+    fn a_trigger_group_still_needs_a_partner() {
+        let found = errors("alt + [1,2] : focus-workspace 0");
         assert!(
-            found[0].contains("2 lines but the trigger is a single key"),
+            found[0].contains("2 bindings but the command is a single line"),
             "{found:?}"
         );
     }
