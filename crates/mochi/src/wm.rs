@@ -716,6 +716,22 @@ impl WindowManager {
             return;
         };
         tracing::info!(%hwnd, title = %window.title, why, "unmanaging");
+
+        // A window Mochi is hiding has to be put back before it is forgotten.
+        // Dropping the record without uncloaking leaves the window invisible,
+        // out of the model and out of the restore record at the same moment:
+        // nothing is left that knows it exists, `mochic stop` cannot bring it
+        // back, and neither can the next start. Any reason at all gets here
+        // while a workspace is hidden, a minimize the user made, a cloak from
+        // a virtual desktop switch, a rule that changed under it.
+        //
+        // A window that is gone is the one exception: there is nothing to
+        // uncloak and the call would only fail loudly.
+        if self.we_hid(hwnd) && self.platform.window_info(hwnd).is_ok() {
+            tracing::debug!(%hwnd, "putting a hidden window back before letting go of it");
+            self.show_window(hwnd);
+        }
+
         let before = self.focus();
         match self.core.remove_window(id) {
             Ok(changes) => {
@@ -855,6 +871,12 @@ impl WindowManager {
                         hidden.identify(hwnd, info.pid, &info.class);
                     }
                     hidden.hide(hwnd, behaviour);
+                    tracing::debug!(
+                        %hwnd,
+                        ?behaviour,
+                        off_screen = hidden.len(),
+                        "took a window off screen and recorded it"
+                    );
                 }
             }
             Err(e) => tracing::error!(%hwnd, ?behaviour, error = %e, "could not hide a window"),
@@ -1175,7 +1197,16 @@ impl WindowManager {
             WindowEventKind::Hidden | WindowEventKind::Cloaked => {
                 // Mochi's own cloak comes back as an event; ignoring it is what
                 // keeps a workspace switch from unmanaging everything it hid.
-                if !self.we_hid(hwnd) {
+                let ours = self.we_hid(hwnd);
+                tracing::debug!(
+                    %hwnd,
+                    kind = kind.as_str(),
+                    ours,
+                    off_screen = self.hidden.lock().map(|h| h.len()).unwrap_or(0),
+                    managed = self.core.is_managed(window_id(hwnd)),
+                    "a window went off screen"
+                );
+                if !ours {
                     self.unmanage(hwnd, kind.as_str());
                 }
             }
@@ -1188,7 +1219,16 @@ impl WindowManager {
                 // the workspace switch had just hidden, and `unmanage` clears
                 // the hidden record as it goes, so nothing would be left that
                 // knows those windows are off screen and owed back.
-                if self.we_hid(hwnd) || self.minimized.contains(&hwnd) {
+                let ours = self.we_hid(hwnd);
+                tracing::debug!(
+                    %hwnd,
+                    ours,
+                    already_minimized = self.minimized.contains(&hwnd),
+                    off_screen = self.hidden.lock().map(|h| h.len()).unwrap_or(0),
+                    managed = self.core.is_managed(window_id(hwnd)),
+                    "a window reported itself minimized"
+                );
+                if ours || self.minimized.contains(&hwnd) {
                     tracing::debug!(%hwnd, "our own minimize, leaving the window managed");
                 } else if self.core.is_managed(window_id(hwnd)) {
                     self.minimized.insert(hwnd);
@@ -2640,6 +2680,71 @@ mod tests {
             direction: mochi_client::Direction::Right,
         });
         assert_eq!(wm.state().focused_window_id(), Some(WindowId(2)));
+    }
+
+    #[test]
+    fn a_hidden_window_is_put_back_before_it_is_ever_let_go_of() {
+        // The worst thing this daemon can do is forget a window it is hiding.
+        // Every reason to unmanage can arrive while a workspace is off screen:
+        // the user minimizes something, a virtual desktop switch cloaks it, a
+        // rule changes under it. Dropping the record without uncloaking leaves
+        // the window invisible, out of the model and out of the restore
+        // record at once, and nothing that is left knows it exists.
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+
+        // Put both off screen, the way a workspace switch does.
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert_eq!(wm.hidden().lock().unwrap().len(), 2, "both are hidden");
+        platform.cloaks.lock().unwrap().clear();
+
+        // Now something else takes one of them away while it is still hidden.
+        wm.unmanage(Hwnd(1), "minimized");
+
+        let uncloaked: Vec<_> = platform
+            .cloaks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, on)| !*on)
+            .map(|(h, _)| *h)
+            .collect();
+        assert!(
+            uncloaked.contains(&Hwnd(1)),
+            "the window was forgotten while still cloaked, so nothing can \
+             bring it back: not the model, not the restore record, not the \
+             next start"
+        );
+        assert!(
+            !wm.hidden().lock().unwrap().contains(Hwnd(1)),
+            "it was uncloaked but the record still claims to owe it back"
+        );
+        assert_eq!(
+            wm.hidden().lock().unwrap().len(),
+            1,
+            "the other hidden window was disturbed"
+        );
+    }
+
+    #[test]
+    fn a_window_that_is_gone_is_not_chased_with_an_uncloak() {
+        // A destroyed window is the one case where there is nothing to put
+        // back, and asking the platform would only fail loudly.
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        platform.cloaks.lock().unwrap().clear();
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .retain(|w| w.hwnd != Hwnd(1));
+
+        wm.unmanage(Hwnd(1), "destroyed");
+
+        assert!(
+            platform.cloaks.lock().unwrap().is_empty(),
+            "a dead window was chased with an uncloak"
+        );
+        assert!(!wm.hidden().lock().unwrap().contains(Hwnd(1)));
     }
 
     #[test]

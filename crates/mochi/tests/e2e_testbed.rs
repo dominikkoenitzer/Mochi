@@ -1357,6 +1357,104 @@ fn a_window_that_defends_a_minimum_size_does_not_make_the_daemon_thrash() {
 }
 
 // ---------------------------------------------------------------------------
+// the shell cloak, which is the path every real application takes and which no
+// other test in this file can reach
+// ---------------------------------------------------------------------------
+
+/// Whether this desktop is Mochi's alone.
+///
+/// A window without `WS_EX_TOOLWINDOW` is visible to every other window
+/// manager, so this test must not run next to one. It is opt-in for that
+/// reason, and CI sets it because a runner has nothing else managing windows.
+fn cloak_test_allowed() -> bool {
+    std::env::var("MOCHI_E2E_CLOAK").ok().as_deref() == Some("1")
+}
+
+#[test]
+fn a_real_cloak_leaves_the_window_managed_and_brings_it_back() {
+    skip_unless_allowed!("a_real_cloak_leaves_the_window_managed_and_brings_it_back");
+    if !cloak_test_allowed() {
+        eprintln!("skipping a_real_cloak_leaves_the_window_managed_and_brings_it_back:");
+        eprintln!("  MOCHI_E2E_CLOAK is not 1. This test spawns a window without the tool");
+        eprintln!("  window bit, which any other window manager on this desktop would take.");
+        return;
+    }
+
+    let mut daemon = Daemon::start("cloak");
+    let log = daemon.log();
+
+    // Without the tool window bit the shell gives the window an application
+    // view, which is the only way one process can cloak another's window.
+    // Every other test here gets a tool window, so every cloak in them falls
+    // back to ShowWindow and the path a real application takes is never run.
+    let windows = TestWindows::spawn_with(&SpawnOptions {
+        taskbar: true,
+        ..SpawnOptions::new(2, 0)
+    })
+    .expect("could not spawn the test windows");
+
+    let mut steps = Steps::default();
+
+    steps.step("both windows are managed", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} windows", managed_count()))
+    });
+
+    steps.step("a workspace switch really cloaks them", || {
+        command(&Command::FocusWorkspace { index: 1 })?;
+        wait_for(STEP, || infos(&windows).iter().all(|w| w.cloaked)).map_err(|_| {
+            let how: Vec<_> = infos(&windows)
+                .iter()
+                .map(|w| format!("cloaked={} visible={}", w.cloaked, w.visible))
+                .collect();
+            format!(
+                "the windows did not come back cloaked, so this ran the fallback \
+                 and not the shell path it exists to cover: {how:?}"
+            )
+        })
+    });
+
+    steps.step("and they are still Mochi's to give back", || {
+        // The defect this test exists for: the cloak echoes back as an event,
+        // and a daemon that does not recognise its own work unmanages the
+        // window it just hid. It is then invisible, out of the model and out
+        // of the restore record at once, and nothing left knows it exists.
+        check(
+            managed_count() == 2,
+            format!("the daemon let go of {} of them", 2 - managed_count()),
+        )
+    });
+
+    steps.step("switching back uncloaks them", || {
+        command(&Command::FocusWorkspace { index: 0 })?;
+        wait_for(STEP, || infos(&windows).iter().all(|w| !w.cloaked))
+            .map_err(|_| "a window stayed cloaked".to_owned())?;
+        check(
+            managed_count() == 2,
+            "a window was lost on the way back".to_owned(),
+        )
+    });
+
+    steps.step("stop leaves both on screen", || {
+        command(&Command::FocusWorkspace { index: 1 })?;
+        wait_for(STEP, || infos(&windows).iter().all(|w| w.cloaked))
+            .map_err(|_| "the windows never went off screen".to_owned())?;
+        daemon.stop();
+        wait_for(Duration::from_secs(10), || {
+            infos(&windows).iter().all(|w| !w.cloaked && w.visible)
+        })
+        .map_err(|_| {
+            "a window was left cloaked after stop, which is the worst thing \
+             this daemon can do"
+                .to_owned()
+        })
+    });
+
+    drop(windows);
+    steps.finish(&log);
+}
+
+// ---------------------------------------------------------------------------
 // test six: the hotkeys, the one part of the daemon the pipe cannot reach.
 // Real key presses, injected into the real desktop.
 // ---------------------------------------------------------------------------

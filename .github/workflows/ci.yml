@@ -87,6 +87,10 @@ jobs:
         shell: pwsh
         env:
           MOCHI_E2E: "1"
+          # A runner has nothing else managing its windows, so it is the one
+          # place the cloak test can safely spawn a window that any other
+          # window manager would take.
+          MOCHI_E2E_CLOAK: "1"
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Continue'
@@ -100,7 +104,7 @@ jobs:
           # requiring it is the difference between coverage and a badge.
           $ran = ([regex]::Matches($output, 'steps passed')).Count
           Write-Output "tests that really executed: $ran"
-          if ($ran -lt 8) {
+          if ($ran -lt 9) {
               throw "only $ran end-to-end tests executed; the rest skipped and reported as passed. $(
                   '')Check the runner has an interactive desktop."
           }
