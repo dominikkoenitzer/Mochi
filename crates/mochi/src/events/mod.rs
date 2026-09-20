@@ -171,6 +171,8 @@ pub enum ShutdownReason {
     Command,
     /// Ctrl-C or a console close.
     Signal,
+    /// A thread panicked, so the daemon is no longer whole.
+    Panicked,
     /// The IPC acceptor could not carry on.
     ///
     /// Without a pipe there is no `mochic stop`, and `mochic stop` is how the
