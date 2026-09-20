@@ -55,6 +55,17 @@ fn run() -> Result<()> {
     };
     let response = send(&command)?;
 
+    // A response of the wrong kind has not answered the command: an `ok` to a
+    // `query` would print nothing at all and still exit 0, which on a terminal
+    // and in a script looks exactly like a value that happens to be empty.
+    let (wanted, given) = (answer_kind(&command), response_kind(&response));
+    if given != wanted && given != "error" {
+        bail!(
+            "mochi answered `{given}` to `{}`, which has to be answered with a `{wanted}` response",
+            command.name()
+        );
+    }
+
     match response {
         Response::Ok => {}
         Response::State { state } => println!("{}", serde_json::to_string_pretty(&state)?),
@@ -70,6 +81,27 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The kind of response a command has to be answered with.
+fn answer_kind(command: &Command) -> &'static str {
+    match command {
+        Command::State => "state",
+        Command::Query { .. } => "query",
+        Command::Hotkeys => "hotkeys",
+        _ => "ok",
+    }
+}
+
+/// The kind a response is, spelled the way the wire spells it.
+fn response_kind(response: &Response) -> &'static str {
+    match response {
+        Response::Ok => "ok",
+        Response::State { .. } => "state",
+        Response::Query { .. } => "query",
+        Response::Hotkeys { .. } => "hotkeys",
+        Response::Error { .. } => "error",
+    }
 }
 
 /// Sends a command, turning "no daemon" into a message a human can act on.
@@ -271,25 +303,67 @@ const DEFAULT_CONFIG: &str = r#"{
 }
 "#;
 
+/// How often a subscription checks that the daemon is still there.
+///
+/// The read blocks inside the client crate, so a daemon that has stopped cannot
+/// be noticed from the reading side; the command pipe is polled instead.
+const SUBSCRIBE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn subscribe(name: &str) -> Result<()> {
+    // Checked here so a name the pipe namespace cannot hold is reported as the
+    // argument it is. Left to `mochi_client::subscribe` it arrives wrapped as a
+    // pipe I/O failure, though no pipe was ever touched, and anyhow then prints
+    // the same sentence a second time as the cause.
+    if let Err(e) = mochi_client::validate_pipe_name(name) {
+        match e {
+            Error::Io(io) => bail!("{io}"),
+            other => bail!("{other}"),
+        }
+    }
+
     let subscription = match mochi_client::subscribe(name) {
         Ok(s) => s,
         Err(Error::NotRunning) => {
             bail!("mochi is not running. Start it with `mochic start`.")
         }
-        Err(e) => return Err(e).context("could not subscribe"),
+        // `{e}` and not the source chain: every `Error::Io` carries the same
+        // sentence as its cause and would otherwise be printed twice.
+        Err(e) => bail!("could not subscribe: {e}"),
     };
     eprintln!(
         "subscribed on {}{name}, press Ctrl-C to stop",
         mochi_client::PIPE_PREFIX
     );
-    for notification in subscription {
-        match notification {
-            Ok(n) => println!("{}", serde_json::to_string(&n)?),
-            Err(e) => bail!("the subscriber pipe failed: {e}"),
+
+    // `next_notification` has no path that ends the iterator: when the daemon
+    // goes away it recycles the pipe and blocks again, waiting for a daemon
+    // that may never come back. Reading on its own thread leaves this one free
+    // to notice that the daemon has gone and say so.
+    let (lines, notifications) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for notification in subscription {
+            if lines.send(notification).is_err() {
+                break;
+            }
+        }
+    });
+
+    loop {
+        match notifications.recv_timeout(SUBSCRIBE_POLL) {
+            Ok(Ok(n)) => println!("{}", serde_json::to_string(&n)?),
+            Ok(Err(e)) => bail!("the subscriber pipe failed: {e}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if !mochi_client::is_running() {
+                    eprintln!("mochi has stopped, ending the subscription");
+                    return Ok(());
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("the subscriber pipe closed, ending the subscription");
+                return Ok(());
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -367,6 +441,36 @@ mod tests {
             committed.trim(),
             mochi_core::config::json_schema().trim(),
             "schema.json is out of date, regenerate it with `mochic schema > schema.json`"
+        );
+    }
+
+    /// A daemon answering the wrong kind has not run the command.
+    ///
+    /// `ok` to a `query` prints nothing and exits 0, so without this check a
+    /// query that produced no answer is indistinguishable from a success.
+    #[test]
+    fn an_answer_of_the_wrong_kind_is_not_an_answer() {
+        let query = Command::Query {
+            target: mochi_client::QueryTarget::Version,
+        };
+        assert_eq!(answer_kind(&query), "query");
+        assert_eq!(answer_kind(&Command::State), "state");
+        assert_eq!(answer_kind(&Command::Hotkeys), "hotkeys");
+        assert_eq!(answer_kind(&Command::Retile), "ok");
+
+        assert_eq!(response_kind(&Response::Ok), "ok");
+        assert_ne!(response_kind(&Response::Ok), answer_kind(&query));
+        assert_eq!(
+            response_kind(&Response::Query {
+                answer: serde_json::json!("0.1.3")
+            }),
+            answer_kind(&query)
+        );
+        assert_eq!(
+            response_kind(&Response::State {
+                state: serde_json::json!({})
+            }),
+            answer_kind(&Command::State)
         );
     }
 

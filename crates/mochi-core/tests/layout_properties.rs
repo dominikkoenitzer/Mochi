@@ -362,8 +362,13 @@ fn dedup(ids: &[WindowId]) -> Vec<WindowId> {
 fn resizing_is_reversible_and_bounded() {
     // Leaning on the resize key must not drift the layout: the same number of
     // decreases has to bring every boundary back to where it started.
-    for layout in [Layout::Bsp, Layout::Columns, Layout::Rows] {
-        for len in 2..=5 {
+    //
+    // Every container is pressed until the layout stops moving, so the run
+    // always includes the press the clamp could only half grant. That press is
+    // where the drift used to come from, and four presses on five containers
+    // never reached it.
+    for layout in Layout::ALL {
+        for len in 2..=8 {
             let mut state = two_monitors(0);
             state.change_layout(layout).unwrap();
             for id in 1..=len {
@@ -374,22 +379,91 @@ fn resizing_is_reversible_and_bounded() {
                     .focused_workspace_mut()
                     .unwrap()
                     .focus_container(container);
-                let before: Vec<Rect> = state.workspace(0, 0).unwrap().latest_layout().to_vec();
 
                 for axis in [Axis::Horizontal, Axis::Vertical] {
-                    for _ in 0..4 {
-                        state.resize_axis(axis, Sizing::Increase).ok();
-                    }
-                    for _ in 0..4 {
-                        state.resize_axis(axis, Sizing::Decrease).ok();
+                    for sizing in [Sizing::Increase, Sizing::Decrease] {
+                        let before: Vec<Rect> =
+                            state.workspace(0, 0).unwrap().latest_layout().to_vec();
+
+                        let mut presses = 0;
+                        while presses < 40 {
+                            if state.resize_axis(axis, sizing).unwrap().is_empty() {
+                                break;
+                            }
+                            presses += 1;
+                        }
+                        for _ in 0..presses {
+                            state.resize_axis(axis, sizing.opposite()).unwrap();
+                        }
+
+                        let after: Vec<Rect> =
+                            state.workspace(0, 0).unwrap().latest_layout().to_vec();
+                        assert_eq!(
+                            before, after,
+                            "{layout} with {len} containers drifted after {presses} \
+                             {sizing} presses on container {container} along {axis:?}"
+                        );
                     }
                 }
+            }
+        }
+    }
+}
 
-                let after: Vec<Rect> = state.workspace(0, 0).unwrap().latest_layout().to_vec();
-                assert_eq!(
-                    before, after,
-                    "{layout} with {len} containers drifted while resizing container {container}"
-                );
+#[test]
+fn every_window_on_a_shared_boundary_can_move_it() {
+    // A boundary several windows sit on used to take its delta from one
+    // representative pair of containers, so the resize keypress of every other
+    // window on that boundary did nothing at all.
+    //
+    // A window with an edge inside the area has a boundary to push on that
+    // side, so at least one of its two edges has to be able to move something.
+    // A window that spans the whole area along an axis has no boundary there
+    // and is skipped: Columns has nothing to resize vertically.
+    const AREA: Rect = AREAS[0];
+    const NUDGE: i32 = 200;
+
+    for layout in [
+        Layout::Grid,
+        Layout::VerticalStack,
+        Layout::HorizontalStack,
+        Layout::UltrawideVerticalStack,
+    ] {
+        for len in 1..=9 {
+            let base = layout.calculate(AREA, len, 0, Flip::NONE, &[]);
+            for window in 0..len {
+                for axis in [Axis::Horizontal, Axis::Vertical] {
+                    let touches_a_boundary = base[window].start(axis) > AREA.start(axis)
+                        || base[window].end(axis) < AREA.end(axis);
+                    if !touches_a_boundary {
+                        continue;
+                    }
+
+                    let moved = [
+                        (true, NUDGE),
+                        (true, -NUDGE),
+                        (false, NUDGE),
+                        (false, -NUDGE),
+                    ]
+                    .into_iter()
+                    .any(|(far_edge, nudge)| {
+                        let delta = match (axis, far_edge) {
+                            (Axis::Horizontal, true) => Rect::new(0, 0, nudge, 0),
+                            (Axis::Horizontal, false) => Rect::new(nudge, 0, 0, 0),
+                            (Axis::Vertical, true) => Rect::new(0, 0, 0, nudge),
+                            (Axis::Vertical, false) => Rect::new(0, nudge, 0, 0),
+                        };
+                        let mut resize = vec![None; len];
+                        resize[window] = Some(delta);
+                        layout.calculate(AREA, len, 0, Flip::NONE, &resize) != base
+                    });
+
+                    assert!(
+                        moved,
+                        "{layout} with {len} windows: no delta on either {axis:?} edge \
+                         of window {window} moves anything"
+                    );
+                }
             }
         }
     }

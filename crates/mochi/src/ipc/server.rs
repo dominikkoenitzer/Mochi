@@ -7,11 +7,12 @@
 //! reply channel, and the connection thread blocks on that until the loop
 //! answers or the timeout expires.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::os::windows::io::FromRawHandle;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
@@ -21,9 +22,10 @@ use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VA
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, PIPE_ACCESS_DUPLEX,
 };
+use windows::Win32::System::IO::CancelIoEx;
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, PeekNamedPipe,
 };
 use windows::core::HSTRING;
 
@@ -54,11 +56,126 @@ const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
 /// that a wedged daemon does not hang a hotkey.
 const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How many connections may be in flight at once.
+///
+/// One `mochic` invocation is one short lived connection, so the real number is
+/// one or two. The cap is here because a connection costs a thread and three
+/// handles and nothing else bounds it. Reaching it breaks the oldest connection
+/// rather than refusing the new one: the new one might be `mochic stop`.
+const MAX_CONNECTIONS: usize = 64;
+
+/// How long a connection may sit without sending anything before it is closed.
+///
+/// A client that has nothing to say has no reason to hold a slot, and the ones
+/// that do are answered in microseconds.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Longest nap between two checks for input on an idle connection.
+///
+/// The wait starts far shorter than this and backs off, so the usual case of a
+/// client that writes its command straight after connecting is not delayed.
+const MAX_IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// The acceptor thread.
 pub struct PipeServer {
     pipe: String,
     stop: Arc<AtomicBool>,
+    connections: Arc<Connections>,
     handle: Option<JoinHandle<()>>,
+}
+
+/// One accepted connection: the pipe instance and the thread serving it.
+struct Connection {
+    pipe: Arc<File>,
+    worker: Option<JoinHandle<()>>,
+}
+
+/// Every connection currently being served, oldest first.
+///
+/// The acceptor used to spawn a detached thread per connection and forget it,
+/// so an idle client cost a thread and three handles that nothing ever
+/// reclaimed, and `stop` joined the acceptor only. Holding them here is what
+/// makes both the cap and the reclaim at shutdown possible.
+#[derive(Default)]
+struct Connections {
+    live: Mutex<BTreeMap<u64, Connection>>,
+    next_id: AtomicU64,
+}
+
+impl Connections {
+    /// Takes ownership of a connection and returns its id.
+    ///
+    /// If that puts the server over [`MAX_CONNECTIONS`], the oldest connection
+    /// is broken so its worker winds up. The new one is always served.
+    fn register(&self, pipe: Arc<File>) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let evict = {
+            let mut live = lock(&self.live);
+            live.insert(id, Connection { pipe, worker: None });
+            if live.len() > MAX_CONNECTIONS {
+                // The new id is the largest, so this is never the new one.
+                live.keys()
+                    .next()
+                    .copied()
+                    .and_then(|oldest| live.get(&oldest).map(|c| (oldest, Arc::clone(&c.pipe))))
+            } else {
+                None
+            }
+        };
+        if let Some((oldest, pipe)) = evict {
+            tracing::debug!(
+                connection = oldest,
+                "too many connections, closing the oldest"
+            );
+            break_connection(&pipe);
+        }
+        id
+    }
+
+    /// Records the worker thread, unless it already finished.
+    fn attach(&self, id: u64, worker: JoinHandle<()>) {
+        if let Some(connection) = lock(&self.live).get_mut(&id) {
+            connection.worker = Some(worker);
+        }
+    }
+
+    /// Called by a worker on its way out.
+    fn finished(&self, id: u64) {
+        lock(&self.live).remove(&id);
+    }
+
+    /// Breaks every live connection and joins every worker.
+    fn shutdown(&self) {
+        // Drained first so the lock is free while the workers wind up: a worker
+        // needs it to take itself out of the map.
+        let drained = std::mem::take(&mut *lock(&self.live));
+        for connection in drained.values() {
+            break_connection(&connection.pipe);
+        }
+        for (id, mut connection) in drained {
+            if let Some(worker) = connection.worker.take()
+                && worker.join().is_err()
+            {
+                tracing::error!(connection = id, "a connection thread panicked");
+            }
+        }
+    }
+}
+
+fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    value
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Wakes a worker that is parked on a connection and closes the client out.
+///
+/// `CancelIoEx` is what releases a read that is already blocked; the disconnect
+/// makes sure nothing else can be read afterwards.
+fn break_connection(pipe: &File) {
+    let handle = raw(pipe);
+    let _ = unsafe { CancelIoEx(handle, None) };
+    let _ = unsafe { DisconnectNamedPipe(handle) };
 }
 
 impl PipeServer {
@@ -78,12 +195,14 @@ impl PipeServer {
         let first = create_instance(pipe, true).context("could not create the command pipe")?;
 
         let stop = Arc::new(AtomicBool::new(false));
+        let connections = Arc::new(Connections::default());
         let handle = {
             let stop = Arc::clone(&stop);
+            let connections = Arc::clone(&connections);
             let pipe = pipe.to_owned();
             std::thread::Builder::new()
                 .name("mochi-ipc".into())
-                .spawn(move || accept_loop(&pipe, first, &tx, &stop))
+                .spawn(move || accept_loop(&pipe, first, &tx, &stop, &connections))
                 .context("could not spawn the IPC thread")?
         };
 
@@ -91,6 +210,7 @@ impl PipeServer {
         Ok(Self {
             pipe: pipe.to_owned(),
             stop,
+            connections,
             handle: Some(handle),
         })
     }
@@ -123,6 +243,10 @@ impl PipeServer {
         } else {
             tracing::debug!("command pipe closed");
         }
+        // The acceptor is only half of it: every connection thread holds an
+        // `EventSender` clone, so leaving them parked would keep the event
+        // channel open and the daemon alive.
+        self.connections.shutdown();
     }
 
     /// Connects to our own pipe once so the blocking accept returns.
@@ -203,7 +327,13 @@ fn raw(file: &File) -> HANDLE {
     HANDLE(file.as_raw_handle())
 }
 
-fn accept_loop(pipe: &str, first: File, tx: &EventSender, stop: &AtomicBool) {
+fn accept_loop(
+    pipe: &str,
+    first: File,
+    tx: &EventSender,
+    stop: &Arc<AtomicBool>,
+    connections: &Arc<Connections>,
+) {
     let mut instance = first;
     // A run of failures with nothing in between would be a hot loop, so the
     // acceptor gives up after this many in a row. One success resets it.
@@ -242,28 +372,71 @@ fn accept_loop(pipe: &str, first: File, tx: &EventSender, stop: &AtomicBool) {
         // Hand the connected instance to a worker and immediately create the
         // next one, so the pipe name never disappears between clients. Only the
         // first instance may claim the name, hence `false` here.
-        let connected = instance;
+        let connected = Arc::new(instance);
         match create_instance(pipe, false) {
             Ok(next) => instance = next,
             Err(e) => {
                 tracing::error!(error = %e, "could not create the next pipe instance");
-                serve(connected, tx.clone());
+                serve(&connected, tx.clone(), stop);
                 break;
             }
         }
 
+        let id = connections.register(Arc::clone(&connected));
         let tx = tx.clone();
-        if let Err(e) = std::thread::Builder::new()
+        let stop = Arc::clone(stop);
+        let owner = Arc::clone(connections);
+        match std::thread::Builder::new()
             .name("mochi-ipc-conn".into())
-            .spawn(move || serve(connected, tx))
-        {
-            tracing::error!(error = %e, "could not spawn a connection thread");
+            .spawn(move || {
+                serve(&connected, tx, &stop);
+                owner.finished(id);
+            }) {
+            Ok(worker) => connections.attach(id, worker),
+            Err(e) => {
+                tracing::error!(error = %e, "could not spawn a connection thread");
+                connections.finished(id);
+            }
         }
     }
 }
 
-/// Serves one connection until the client hangs up.
-fn serve(pipe: File, tx: EventSender) {
+/// Waits until the connection has something to say.
+///
+/// Returns false when the server is stopping, or when the client has sat there
+/// for [`IDLE_TIMEOUT`] without writing anything: both mean the connection
+/// should be closed. Blocking straight in the read instead is what used to park
+/// a worker thread for as long as a silent client kept its handle open.
+fn wait_for_input(reader: &BufReader<File>, pipe: &File, stop: &AtomicBool) -> bool {
+    if !reader.buffer().is_empty() {
+        return true;
+    }
+    let deadline = std::time::Instant::now() + IDLE_TIMEOUT;
+    let mut nap = std::time::Duration::from_millis(1);
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let mut available = 0u32;
+        // An error means the connection is broken or already disconnected. The
+        // read reports that better than this can, so let it.
+        if unsafe { PeekNamedPipe(raw(pipe), None, 0, None, Some(&mut available), None) }.is_err() {
+            return true;
+        }
+        if available > 0 {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::debug!("closing a connection that never said anything");
+            return false;
+        }
+        std::thread::sleep(nap);
+        nap = (nap * 2).min(MAX_IDLE_POLL);
+    }
+}
+
+/// Serves one connection until the client hangs up or goes quiet.
+fn serve(pipe: &File, tx: EventSender, stop: &AtomicBool) {
     let reader_file = match pipe.try_clone() {
         Ok(f) => f,
         Err(e) => {
@@ -272,9 +445,12 @@ fn serve(pipe: File, tx: EventSender) {
         }
     };
     let mut reader = BufReader::new(reader_file);
-    let mut writer = &pipe;
+    let mut writer = pipe;
 
     loop {
+        if !wait_for_input(&reader, pipe, stop) {
+            break;
+        }
         let command = match protocol::read_message::<_, Command>(&mut reader) {
             Ok(None) => break,
             Ok(Some(c)) => c,
@@ -314,8 +490,8 @@ fn serve(pipe: File, tx: EventSender) {
     }
 
     // Let the client drain the last answer before the handle closes.
-    let _ = unsafe { FlushFileBuffers(raw(&pipe)) };
-    let _ = unsafe { DisconnectNamedPipe(raw(&pipe)) };
+    let _ = unsafe { FlushFileBuffers(raw(pipe)) };
+    let _ = unsafe { DisconnectNamedPipe(raw(pipe)) };
 }
 
 #[cfg(test)]
@@ -501,6 +677,45 @@ mod tests {
         // Not joined: a connection worker may still hold a sender clone, and
         // this test is about the server, not about the echo loop winding down.
         drop(loop_handle);
+    }
+
+    /// Idle connections must not pile up, and shutdown must take them with it.
+    ///
+    /// Every worker holds an `EventSender` clone, so the echo loop can only
+    /// finish once every worker is gone. Joining it after `stop()` is therefore
+    /// the honest measurement of whether the workers were reclaimed at all.
+    #[test]
+    fn idle_clients_are_capped_and_reclaimed_at_shutdown() {
+        let pipe = format!(r"\\.\pipe\mochi-test-idle-{}", std::process::id());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let loop_handle = echo_loop(rx);
+        let mut server = PipeServer::start_on(&pipe, tx.clone()).unwrap();
+
+        // Comfortably past the cap: connect, then never say anything.
+        let idle: Vec<File> = (0..MAX_CONNECTIONS * 2 + 16).map(|_| raw(&pipe)).collect();
+
+        // `mochic stop` has to get through no matter how many of these there
+        // are, so the control channel is checked while they all sit there.
+        assert_eq!(
+            send_to(&pipe, &mochi_client::Command::Retile).unwrap(),
+            Response::Ok,
+            "idle clients locked the control channel out"
+        );
+
+        server.stop();
+        drop(tx);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(loop_handle.join().is_ok());
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap_or(false),
+            "connection workers were never reclaimed: each one still holds an event sender"
+        );
+        drop(idle);
     }
 
     #[test]

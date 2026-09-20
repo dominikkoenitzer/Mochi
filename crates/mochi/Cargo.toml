@@ -37,6 +37,10 @@ windows = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Console",
+    # Overlapped writes to a subscriber pipe, so one bar that stops reading
+    # cannot wedge the fan-out. Declared rather than inherited: it resolves
+    # today only because mochi-client happens to enable it.
+    "Win32_System_IO",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",

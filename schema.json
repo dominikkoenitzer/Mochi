@@ -116,7 +116,7 @@
       "default": null
     },
     "display_index_preferences": {
-      "description": "Pins a monitor index to the display with that device id.",
+      "description": "Pins a `monitors` entry to one physical display.\n\nThe key is the index of the entry, the value an identifier of the\ndisplay: its [`Monitor::device_id`], its [`Monitor::name`] or its\n[`Monitor::device`]. See [`Config::monitor_assignments`], which also\nexplains why a model name cannot tell two identical panels apart.",
       "type": [
         "object",
         "null"
@@ -184,7 +184,7 @@
       }
     },
     "layered_whitelist": {
-      "description": "Layered windows that should be managed anyway.",
+      "description": "Layered windows that should be managed anyway.\n\nThe alias is the spelling a migrated file uses. Without it the list is\ndropped in silence, which is the one thing this module promises cannot\nhappen to a key that both formats have.",
       "type": [
         "array",
         "null"
@@ -206,7 +206,7 @@
       }
     },
     "monitor_index_preferences": {
-      "description": "Pins a monitor index to the display whose size matches the rectangle.",
+      "description": "Pins a `monitors` entry to the display that covers exactly this\nrectangle of the virtual desktop.\n\nThe key is the index of the entry, the value its display's full\nrectangle, the `size` that `mochic state` reports for that monitor.\nSee [`Config::monitor_assignments`] for how the two preference keys\nand the positional fallback interact.",
       "type": [
         "object",
         "null"

@@ -64,6 +64,14 @@ pub fn read_line<R: BufRead>(reader: &mut R) -> std::io::Result<Option<String>> 
             return Ok(None);
         }
         if read >= MAX_MESSAGE_BYTES && !line.ends_with('\n') {
+            // The peer is still mid-line. Everything up to the next newline is
+            // the rest of that one over-long message, so it is thrown away here
+            // rather than left in the stream: starting the next read where the
+            // limit happened to fall would frame the tail as a message of its
+            // own, and `MAX_MESSAGE_BYTES` of padding followed by
+            // `{"cmd":"stop"}` is one line on the wire that must never become a
+            // command.
+            discard_to_newline(reader)?;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "message exceeds the maximum line length",
@@ -72,6 +80,33 @@ pub fn read_line<R: BufRead>(reader: &mut R) -> std::io::Result<Option<String>> 
         let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
         if !trimmed.is_empty() {
             return Ok(Some(trimmed.to_owned()));
+        }
+    }
+}
+
+/// Throws away bytes up to and including the next `\n`.
+///
+/// Nothing is buffered, so the peer cannot make this allocate. Returns at end
+/// of stream as well, in which case the next read reports end of stream too.
+fn discard_to_newline<R: BufRead>(reader: &mut R) -> std::io::Result<()> {
+    loop {
+        let (found, used) = {
+            let buf = match reader.fill_buf() {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            if buf.is_empty() {
+                return Ok(());
+            }
+            match buf.iter().position(|b| *b == b'\n') {
+                Some(at) => (true, at + 1),
+                None => (false, buf.len()),
+            }
+        };
+        reader.consume(used);
+        if found {
+            return Ok(());
         }
     }
 }
@@ -145,15 +180,33 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("maximum line length"), "{err}");
 
-        // The rest of the oversized line is junk, then the stream resynchronises
-        // on the next newline, which is what keeps a connection usable.
-        assert_eq!(
-            read_message::<_, Command>(&mut reader).unwrap_err().kind(),
-            std::io::ErrorKind::InvalidData
-        );
+        // The rest of the oversized line went with it, so the stream is back on
+        // a message boundary and the next real message reads cleanly, which is
+        // what keeps a connection usable.
         assert_eq!(
             read_message::<_, Command>(&mut reader).unwrap(),
             Some(Command::Retile)
+        );
+    }
+
+    #[test]
+    fn the_tail_of_an_oversized_line_never_becomes_a_message() {
+        // One unterminated line on the wire: padding, then something that looks
+        // like a command, then the only newline. A reader that starts a fresh
+        // window where the size limit hit would hand the second half to its
+        // caller as a message the peer never framed, which on the command pipe
+        // means stopping the window manager.
+        let mut raw = vec![b'x'; MAX_MESSAGE_BYTES];
+        raw.extend_from_slice(br#"{"cmd":"stop"}"#);
+        raw.push(b'\n');
+        let mut reader = std::io::BufReader::new(raw.as_slice());
+
+        let err = read_message::<_, Command>(&mut reader).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            read_message::<_, Command>(&mut reader).unwrap(),
+            None,
+            "the tail of an over-long line was framed as a command"
         );
     }
 

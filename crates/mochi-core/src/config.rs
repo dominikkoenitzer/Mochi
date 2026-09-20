@@ -16,8 +16,8 @@ use crate::error::{Error, Result};
 use crate::geometry::{Offset, Rect};
 use crate::layout::Layout;
 use crate::model::{
-    FocusFollowsMouseImplementation, HidingBehaviour, MoveBehaviour, OperationBehaviour, State,
-    WindowContainerBehaviour, Workspace,
+    FocusFollowsMouseImplementation, HidingBehaviour, Monitor, MoveBehaviour, OperationBehaviour,
+    State, WindowContainerBehaviour, Workspace,
 };
 use crate::rules::{MatchingRule, RuleSets};
 
@@ -434,6 +434,11 @@ pub struct Config {
     /// Applications whose border sits outside the window rectangle.
     pub border_overflow_applications: Option<Vec<MatchingRule>>,
     /// Layered windows that should be managed anyway.
+    ///
+    /// The alias is the spelling a migrated file uses. Without it the list is
+    /// dropped in silence, which is the one thing this module promises cannot
+    /// happen to a key that both formats have.
+    #[serde(alias = "layered_applications")]
     pub layered_whitelist: Option<Vec<MatchingRule>>,
     /// Windows that must never be made transparent.
     pub transparency_ignore_rules: Option<Vec<MatchingRule>>,
@@ -442,9 +447,20 @@ pub struct Config {
 
     /// The monitors, in the order they should be indexed.
     pub monitors: Option<Vec<MonitorConfig>>,
-    /// Pins a monitor index to the display whose size matches the rectangle.
+    /// Pins a `monitors` entry to the display that covers exactly this
+    /// rectangle of the virtual desktop.
+    ///
+    /// The key is the index of the entry, the value its display's full
+    /// rectangle, the `size` that `mochic state` reports for that monitor.
+    /// See [`Config::monitor_assignments`] for how the two preference keys
+    /// and the positional fallback interact.
     pub monitor_index_preferences: Option<BTreeMap<usize, Rect>>,
-    /// Pins a monitor index to the display with that device id.
+    /// Pins a `monitors` entry to one physical display.
+    ///
+    /// The key is the index of the entry, the value an identifier of the
+    /// display: its [`Monitor::device_id`], its [`Monitor::name`] or its
+    /// [`Monitor::device`]. See [`Config::monitor_assignments`], which also
+    /// explains why a model name cannot tell two identical panels apart.
     pub display_index_preferences: Option<BTreeMap<usize, String>>,
 }
 
@@ -509,7 +525,11 @@ impl Config {
 
     /// The rules that decide which workspace a window opens on.
     ///
-    /// Returns one entry per rule as `(monitor, workspace, rule, initial_only)`.
+    /// Returns one entry per rule as `(monitor, workspace, rule, initial_only)`,
+    /// where `monitor` is the index of the `monitors` entry the rule was
+    /// written under. That is the index of the monitor it configures only when
+    /// the entry has no preference pinning it elsewhere; see
+    /// [`Config::monitor_assignments`].
     #[must_use]
     pub fn workspace_rules(&self) -> Vec<(usize, usize, MatchingRule, bool)> {
         let mut rules = Vec::new();
@@ -529,8 +549,11 @@ impl Config {
     /// Copies the global settings and the rules onto a state, and configures
     /// the workspaces of every monitor that already exists.
     ///
-    /// Monitors are matched by position: the first `monitors` entry configures
-    /// the first monitor in the state. Workspaces are created on demand.
+    /// Which monitor an entry configures is decided by
+    /// [`Config::monitor_assignments`]: a display or rectangle preference
+    /// where the entry has one, its position otherwise. An entry pinned to a
+    /// display that is not attached configures nothing. Workspaces are
+    /// created on demand.
     pub fn apply_to(&self, state: &mut State) {
         if let Some(value) = self.window_hiding_behaviour {
             state.window_hiding_behaviour = value;
@@ -568,8 +591,14 @@ impl Config {
 
         state.rules = self.rule_sets();
 
+        let assignments = self.monitor_assignments(state);
         for (idx, monitor_config) in self.monitors.iter().flatten().enumerate() {
-            let Some(monitor) = state.monitors_mut().get_mut(idx) else {
+            // `None` is an entry that is held back: pinned to a display that
+            // is not attached, or with no monitor left to fall back to.
+            let Some(monitor_idx) = assignments.get(idx).copied().flatten() else {
+                continue;
+            };
+            let Some(monitor) = state.monitors_mut().get_mut(monitor_idx) else {
                 continue;
             };
             if monitor_config.work_area_offset.is_some() {
@@ -590,6 +619,114 @@ impl Config {
             }
         }
     }
+
+    /// Resolves which monitor of `state` each `monitors` entry configures.
+    ///
+    /// The result has one slot per entry, holding the index of the monitor
+    /// that entry configures, or `None` when the entry is held back and
+    /// configures nothing at all this time. No monitor is ever assigned twice.
+    ///
+    /// An entry is matched by `display_index_preferences` first, then by
+    /// `monitor_index_preferences`, then by its own position, because that is
+    /// the order from the most stable identifier to the least stable one. A
+    /// display id survives a reboot, a cable swap and a `DisplayPort`
+    /// renegotiation. A rectangle survives those too, but not moving a display
+    /// around the virtual desktop or changing its resolution. The position
+    /// survives nothing: Windows hands the monitors out in the order it
+    /// enumerated them, and a renegotiation can reverse that order, which is
+    /// how a portrait panel's workspaces, layouts and padding end up on a 4K
+    /// screen.
+    ///
+    /// An entry that names a display or a rectangle which is not attached is
+    /// held back rather than falling through to the positional match: applying
+    /// a portrait panel's nine workspaces to a 4K screen is the failure this
+    /// key exists to prevent, and a monitor that is configured by nothing
+    /// simply keeps the workspaces it already has until its display is back.
+    /// An entry that names both keys is decided by the display id alone, the
+    /// stronger of the two statements, and held when that display is missing.
+    ///
+    /// An entry that names neither key takes the monitor at its own position
+    /// when no pinned entry claimed it, and the first monitor still unclaimed
+    /// otherwise. In a file with no preferences at all that is exactly the
+    /// positional match this always did: entry `n` configures monitor `n`.
+    ///
+    /// # What a display preference is compared against
+    ///
+    /// The value is compared against [`Monitor::device_id`], then
+    /// [`Monitor::name`], then [`Monitor::device`]. Those are the identifiers
+    /// the model already recognises a display by, in the order
+    /// [`State::reconcile_monitors`] prefers them, so a pin cannot name a
+    /// different display than the one the daemon carried across a
+    /// reconfiguration.
+    ///
+    /// [`Monitor::device_id`] is `EnumDisplayDevicesW`'s `DeviceString`, which
+    /// is a model name such as `Odyssey G8` or `Generic PnP Monitor` and never
+    /// a serial number. Two panels of the same model therefore carry the same
+    /// id, and this key cannot tell them apart: the first unclaimed one wins,
+    /// and the other entry falls back to the monitor left over. Pin at least
+    /// one of two identical panels by rectangle instead.
+    #[must_use]
+    pub fn monitor_assignments(&self, state: &State) -> Vec<Option<usize>> {
+        let count = self.monitors.as_ref().map_or(0, Vec::len);
+        let monitors = state.monitors();
+        let mut assigned = vec![None; count];
+        let mut claimed = vec![false; monitors.len()];
+        let mut pinned = vec![false; count];
+
+        for (idx, slot) in assigned.iter_mut().enumerate() {
+            let display = self
+                .display_index_preferences
+                .as_ref()
+                .and_then(|prefs| prefs.get(&idx));
+            let rect = self
+                .monitor_index_preferences
+                .as_ref()
+                .and_then(|prefs| prefs.get(&idx));
+            if display.is_none() && rect.is_none() {
+                continue;
+            }
+            pinned[idx] = true;
+            let found = monitors.iter().enumerate().position(|(at, monitor)| {
+                !claimed[at]
+                    && match display {
+                        Some(id) => names_display(monitor, id),
+                        // Only reached when the entry named no display.
+                        None => rect.is_some_and(|rect| monitor.size == *rect),
+                    }
+            });
+            if let Some(at) = found {
+                claimed[at] = true;
+                *slot = Some(at);
+            }
+        }
+
+        for (idx, slot) in assigned.iter_mut().enumerate() {
+            if pinned[idx] {
+                continue;
+            }
+            let at = if claimed.get(idx).is_some_and(|taken| !taken) {
+                Some(idx)
+            } else {
+                claimed.iter().position(|taken| !taken)
+            };
+            if let Some(at) = at {
+                claimed[at] = true;
+                *slot = Some(at);
+            }
+        }
+
+        assigned
+    }
+}
+
+/// `true` when a `display_index_preferences` value names this display.
+///
+/// See [`Config::monitor_assignments`] for why these three fields and in this
+/// order.
+fn names_display(monitor: &Monitor, id: &str) -> bool {
+    (!monitor.device_id.is_empty() && monitor.device_id == id)
+        || (!monitor.name.is_empty() && monitor.name == id)
+        || (!monitor.device.is_empty() && monitor.device == id)
 }
 
 /// The JSON schema for [`Config`], pretty printed.
@@ -673,6 +810,54 @@ mod tests {
         { "name": "7", "layout": "BSP" },
         { "name": "8", "layout": "BSP" },
         { "name": "9", "layout": "BSP" }
+      ]
+    }
+  ]
+}"##;
+
+    /// His file again, with the two keys this whole feature exists for.
+    ///
+    /// The first entry is pinned to the 4K main screen, the second to the
+    /// portrait panel. The portrait entry carries marks that say which entry
+    /// it is, a portrait layout and its own padding, because that is exactly
+    /// what must never end up on the 4K screen.
+    const PINNED_CONFIG: &str = r##"{
+  "$schema": "https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/schema.json",
+  "app_specific_configuration_path": "$Env:USERPROFILE/applications.json",
+  "window_hiding_behaviour": "Cloak",
+  "cross_monitor_move_behaviour": "Insert",
+  "mouse_follows_focus": false,
+  "default_workspace_padding": 14,
+  "default_container_padding": 10,
+  "display_index_preferences": {
+    "0": "Odyssey G8",
+    "1": "AW2521HF"
+  },
+  "monitors": [
+    {
+      "workspaces": [
+        { "name": "1", "layout": "BSP" },
+        { "name": "2", "layout": "BSP" },
+        { "name": "3", "layout": "BSP" },
+        { "name": "4", "layout": "BSP" },
+        { "name": "5", "layout": "BSP" },
+        { "name": "6", "layout": "BSP" },
+        { "name": "7", "layout": "BSP" },
+        { "name": "8", "layout": "BSP" },
+        { "name": "9", "layout": "BSP" }
+      ]
+    },
+    {
+      "workspaces": [
+        { "name": "1", "layout": "Rows", "workspace_padding": 6 },
+        { "name": "2", "layout": "Rows", "workspace_padding": 6 },
+        { "name": "3", "layout": "Rows", "workspace_padding": 6 },
+        { "name": "4", "layout": "Rows", "workspace_padding": 6 },
+        { "name": "5", "layout": "Rows", "workspace_padding": 6 },
+        { "name": "6", "layout": "Rows", "workspace_padding": 6 },
+        { "name": "7", "layout": "Rows", "workspace_padding": 6 },
+        { "name": "8", "layout": "Rows", "workspace_padding": 6 },
+        { "name": "9", "layout": "Rows", "workspace_padding": 6 }
       ]
     }
   ]
@@ -965,8 +1150,6 @@ mod tests {
 
     #[test]
     fn applying_the_real_config_configures_a_live_state() {
-        use crate::model::Monitor;
-
         let config = Config::from_json(REAL_CONFIG).unwrap();
         let mut state = State::new();
         state.add_monitor(Monitor::new(
@@ -1003,6 +1186,269 @@ mod tests {
         }
     }
 
+    /// His 4K main screen, as the platform reports it. `gdi` is the GDI device
+    /// name, the thing that can swap when `DisplayPort` renegotiates.
+    fn odyssey_4k(id: isize, gdi: &str) -> Monitor {
+        Monitor::new(id, Rect::new(0, 0, 3840, 2160), Rect::new(0, 0, 3840, 2120))
+            .with_name(gdi.trim_start_matches(r"\\.\"))
+            .with_device(gdi, "Odyssey G8")
+    }
+
+    /// His 1080p secondary, rotated into portrait, to the right of the 4K one.
+    fn aw2521hf_portrait(id: isize, gdi: &str) -> Monitor {
+        Monitor::new(
+            id,
+            Rect::new(3840, 0, 4920, 1920),
+            Rect::new(3840, 0, 4920, 1880),
+        )
+        .with_name(gdi.trim_start_matches(r"\\.\"))
+        .with_device(gdi, "AW2521HF")
+    }
+
+    /// The marks that say a monitor got the portrait entry of [`PINNED_CONFIG`].
+    fn is_portrait_entry(monitor: &Monitor) -> bool {
+        monitor.workspaces().len() == 9
+            && monitor
+                .workspaces()
+                .iter()
+                .all(|w| w.layout == Layout::Rows && w.workspace_padding == Some(6))
+    }
+
+    /// The marks that say a monitor got the 4K entry of [`PINNED_CONFIG`].
+    fn is_main_entry(monitor: &Monitor) -> bool {
+        monitor.workspaces().len() == 9
+            && monitor
+                .workspaces()
+                .iter()
+                .all(|w| w.layout == Layout::Bsp && w.workspace_padding.is_none())
+    }
+
+    /// The name of the first workspace on a monitor, which is how the smaller
+    /// tests below say which entry that monitor got.
+    fn first_workspace_name(state: &State, monitor: usize) -> Option<String> {
+        state
+            .monitors()
+            .get(monitor)
+            .unwrap()
+            .workspaces()
+            .get(0)
+            .unwrap()
+            .name
+            .clone()
+    }
+
+    #[test]
+    fn his_displays_in_the_enumeration_order_windows_usually_reports() {
+        let config = Config::from_json(PINNED_CONFIG).unwrap();
+        let mut state = State::new();
+        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY2"));
+
+        config.apply_to(&mut state);
+
+        assert!(is_main_entry(state.monitors().get(0).unwrap()));
+        assert!(is_portrait_entry(state.monitors().get(1).unwrap()));
+    }
+
+    #[test]
+    fn his_displays_in_the_other_order_still_get_the_entries_meant_for_them() {
+        // The DisplayPort renegotiation case: Windows enumerates the portrait
+        // panel first, so a positional match puts its nine workspaces, its
+        // layout and its padding on the 4K screen.
+        let config = Config::from_json(PINNED_CONFIG).unwrap();
+        let mut state = State::new();
+        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY1"));
+        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY2"));
+
+        config.apply_to(&mut state);
+
+        let portrait = state.monitors().get(0).unwrap();
+        let main = state.monitors().get(1).unwrap();
+        assert_eq!(portrait.device_id, "AW2521HF");
+        assert_eq!(main.device_id, "Odyssey G8");
+        assert!(
+            is_portrait_entry(portrait),
+            "the portrait panel got the wrong entry"
+        );
+        assert!(is_main_entry(main), "the 4K screen got the portrait entry");
+    }
+
+    #[test]
+    fn an_entry_pinned_to_a_display_that_is_not_attached_is_held() {
+        // Only the portrait panel is plugged in. The entry for the 4K screen
+        // has to wait for the 4K screen rather than land on the panel.
+        let config = Config::from_json(PINNED_CONFIG).unwrap();
+        let mut state = State::new();
+        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY1"));
+
+        config.apply_to(&mut state);
+
+        assert!(
+            is_portrait_entry(state.monitors().get(0).unwrap()),
+            "the only attached display got the entry for the one that is not"
+        );
+    }
+
+    #[test]
+    fn a_rectangle_preference_pins_an_entry_to_the_display_at_that_position() {
+        let config = Config::from_json(
+            r#"{
+                "monitor_index_preferences": {
+                    "0": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 },
+                    "1": { "left": 3840, "top": 0, "right": 4920, "bottom": 1920 }
+                },
+                "monitors": [
+                    { "workspaces": [{ "name": "main", "layout": "BSP" }] },
+                    { "workspaces": [{ "name": "side", "layout": "Rows" }] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY1"));
+        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY2"));
+
+        config.apply_to(&mut state);
+
+        assert_eq!(first_workspace_name(&state, 0).as_deref(), Some("side"));
+        assert_eq!(first_workspace_name(&state, 1).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_rectangle_that_matches_no_attached_display_holds_the_entry() {
+        let config = Config::from_json(
+            r#"{
+                "monitor_index_preferences": {
+                    "0": { "left": 0, "top": 0, "right": 1280, "bottom": 1024 }
+                },
+                "monitors": [
+                    { "workspaces": [{ "name": "elsewhere", "layout": "BSP" }] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
+
+        config.apply_to(&mut state);
+
+        assert_eq!(
+            first_workspace_name(&state, 0),
+            None,
+            "an entry pinned to a display that is not attached was applied anyway"
+        );
+    }
+
+    #[test]
+    fn a_display_preference_beats_a_rectangle_preference_for_the_same_entry() {
+        let config = Config::from_json(
+            r#"{
+                "monitor_index_preferences": {
+                    "0": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 }
+                },
+                "display_index_preferences": { "0": "AW2521HF" },
+                "monitors": [
+                    { "workspaces": [{ "name": "pinned", "layout": "BSP" }] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY2"));
+
+        config.apply_to(&mut state);
+
+        assert_eq!(
+            first_workspace_name(&state, 1).as_deref(),
+            Some("pinned"),
+            "the display id has to win over the rectangle"
+        );
+        assert_eq!(first_workspace_name(&state, 0), None);
+    }
+
+    #[test]
+    fn an_entry_that_names_neither_key_still_matches_by_position() {
+        // The behaviour every config without a preference relies on.
+        let config = Config::from_json(
+            r#"{
+                "monitors": [
+                    { "workspaces": [{ "name": "first", "layout": "BSP" }] },
+                    { "workspaces": [{ "name": "second", "layout": "Rows" }] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY1"));
+        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY2"));
+
+        config.apply_to(&mut state);
+
+        assert_eq!(first_workspace_name(&state, 0).as_deref(), Some("first"));
+        assert_eq!(first_workspace_name(&state, 1).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn an_unpinned_entry_takes_a_monitor_no_pin_claimed() {
+        // One entry pinned, one not. The unpinned one fills what is left
+        // rather than fighting the pin for the same display.
+        let config = Config::from_json(
+            r#"{
+                "display_index_preferences": { "0": "AW2521HF" },
+                "monitors": [
+                    { "workspaces": [{ "name": "pinned", "layout": "BSP" }] },
+                    { "workspaces": [{ "name": "rest", "layout": "Rows" }] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY2"));
+
+        config.apply_to(&mut state);
+
+        assert_eq!(first_workspace_name(&state, 1).as_deref(), Some("pinned"));
+        assert_eq!(first_workspace_name(&state, 0).as_deref(), Some("rest"));
+    }
+
+    #[test]
+    fn two_panels_of_the_same_model_share_one_device_id() {
+        // `device_id` is the model name from `EnumDisplayDevicesW`, not a
+        // serial, so this key cannot tell two identical panels apart: the
+        // first unclaimed one wins and the other entry falls back to the
+        // monitor left over. Pin one of them by rectangle instead.
+        let config = Config::from_json(
+            r#"{
+                "display_index_preferences": { "0": "Generic PnP Monitor" },
+                "monitors": [
+                    { "workspaces": [{ "name": "one", "layout": "BSP" }] },
+                    { "workspaces": [{ "name": "two", "layout": "Rows" }] }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut state = State::new();
+        state.add_monitor(
+            Monitor::new(1, Rect::new(0, 0, 1920, 1080), Rect::new(0, 0, 1920, 1040))
+                .with_device(r"\\.\DISPLAY1", "Generic PnP Monitor"),
+        );
+        state.add_monitor(
+            Monitor::new(
+                2,
+                Rect::new(1920, 0, 3840, 1080),
+                Rect::new(1920, 0, 3840, 1040),
+            )
+            .with_device(r"\\.\DISPLAY2", "Generic PnP Monitor"),
+        );
+
+        config.apply_to(&mut state);
+
+        assert_eq!(first_workspace_name(&state, 0).as_deref(), Some("one"));
+        assert_eq!(first_workspace_name(&state, 1).as_deref(), Some("two"));
+    }
+
     #[test]
     fn applying_a_config_leaves_unset_keys_alone() {
         let mut state = State::new();
@@ -1018,6 +1464,23 @@ mod tests {
         let mut state = State::new();
         config.apply_to(&mut state);
         assert!(state.monitors().is_empty());
+    }
+
+    #[test]
+    fn a_migrated_file_keeps_the_list_it_spells_differently() {
+        // Both formats have this list and spell it differently. Unknown keys
+        // are ignored by design, so without the alias a migrated file loses it
+        // without a word, which is exactly what this module says cannot happen
+        // to a key both formats carry.
+        let config = Config::from_json(
+            r#"{"layered_applications":[{"kind":"Exe","id":"a.exe","matching_strategy":"Equals"}]}"#,
+        )
+        .expect("a migrated file parses");
+        assert_eq!(
+            config.layered_whitelist.as_ref().map(Vec::len),
+            Some(1),
+            "the list was dropped in silence"
+        );
     }
 
     #[test]

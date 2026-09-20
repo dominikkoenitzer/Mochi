@@ -52,6 +52,10 @@ const NO_HOTKEYS: &str = "this daemon binds no keys, it was started with --no-ho
 /// What a command that would change the desktop answers while paused.
 const PAUSED: &str = "mochi is paused, nothing was changed";
 
+/// How long a `slow_application_identifiers` window is given to finish opening
+/// before the layout is applied to it a second time.
+const SLOW_APPLICATION_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// The `mochic hotkeys` rows of a set of bindings, in file order.
 fn rows_of(bindings: &mochi_hotkey::Bindings) -> Vec<(String, String)> {
     bindings
@@ -656,6 +660,7 @@ impl WindowManager {
             return;
         }
 
+        let slow = self.core.rules.is_slow(&window.info());
         let (monitor, workspace) = self.destination(info, &window);
         let before = self.focus();
         match self.core.add_window_to(monitor, workspace, window) {
@@ -674,9 +679,38 @@ impl WindowManager {
                 });
                 self.apply_changes(changes);
                 self.announce(before);
+                if slow {
+                    self.defer_retile(info.hwnd);
+                }
             }
             Err(e) => tracing::warn!(hwnd = %info.hwnd, error = %e, "could not manage a window"),
         }
+    }
+
+    /// Asks for a second layout pass a beat from now.
+    ///
+    /// `slow_application_identifiers` names the applications whose window is
+    /// not ready to be positioned at the moment it appears; the first placement
+    /// lands on a window that then resizes itself out of its tile. The loop
+    /// owns every piece of state and is the only thread that may touch it, so
+    /// it must not sleep: waiting here would freeze the keyboard, the IPC
+    /// server and every other window for as long as the slowest application
+    /// takes to draw itself. The wait happens on a thread of its own and comes
+    /// back as the same `retile` a user could have typed.
+    fn defer_retile(&self, hwnd: Hwnd) {
+        tracing::debug!(%hwnd, "a slow application was given a second layout pass");
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(SLOW_APPLICATION_SETTLE);
+            let (reply, answer) = crate::events::Reply::channel();
+            if tx.send(Event::command(Command::Retile, reply)).is_err() {
+                // The loop has ended; there is nothing left to retile.
+                return;
+            }
+            // Holding the answer until the loop has handled the command keeps
+            // it from logging a client that hung up on its own retile.
+            let _ = answer.recv();
+        });
     }
 
     /// Which workspace a new window belongs on.
@@ -685,16 +719,8 @@ impl WindowManager {
     /// monitor Windows put it on, which is far less surprising than dragging
     /// everything onto whatever monitor happens to be focused.
     fn destination(&self, info: &WindowInfo, window: &Window) -> (usize, usize) {
-        let rule_info = window.info();
-        for rule in &self.workspace_rules {
-            if rule.initial_only && self.routed.contains(&info.hwnd) {
-                continue;
-            }
-            if rule.rule.matches(&rule_info)
-                && self.core.workspace(rule.monitor, rule.workspace).is_ok()
-            {
-                return (rule.monitor, rule.workspace);
-            }
+        if let Some(routed) = self.routed_by_rule(info, window) {
+            return routed;
         }
 
         let monitor = info
@@ -707,6 +733,27 @@ impl WindowManager {
             .get(monitor)
             .map_or(0, Monitor::focused_workspace_idx);
         (monitor, workspace)
+    }
+
+    /// The workspace a `workspace_rules` entry asks for, if one matches.
+    ///
+    /// Only the rule half of [`WindowManager::destination`]: the fallback
+    /// there is "wherever the window already is", which is an answer, not a
+    /// match, and a caller that moves a window has to be able to tell the two
+    /// apart.
+    fn routed_by_rule(&self, info: &WindowInfo, window: &Window) -> Option<(usize, usize)> {
+        let rule_info = window.info();
+        for rule in &self.workspace_rules {
+            if rule.initial_only && self.routed.contains(&info.hwnd) {
+                continue;
+            }
+            if rule.rule.matches(&rule_info)
+                && self.core.workspace(rule.monitor, rule.workspace).is_ok()
+            {
+                return Some((rule.monitor, rule.workspace));
+            }
+        }
+        None
     }
 
     /// Drops a window from the model, whatever the reason.
@@ -1187,12 +1234,22 @@ impl WindowManager {
         match kind {
             WindowEventKind::LocationChange => {}
             WindowEventKind::Destroyed => {
-                self.unmanage(hwnd, "destroyed");
-                // The handle is free now and Windows will hand it to another
-                // window, which has to be routed by the initial rules on its
-                // own account.
-                self.routed.remove(&hwnd);
-                self.minimized.remove(&hwnd);
+                if self.lives_in_the_tray(hwnd) {
+                    // The application put its window away rather than closing:
+                    // the handle is still a live window and the same one comes
+                    // back when the user opens it from the tray. It leaves the
+                    // layout like any other window that went off screen, but it
+                    // keeps its place in the ledgers, because what comes back
+                    // is the window that left and not a new one.
+                    self.unmanage(hwnd, "a tray application put its window away");
+                } else {
+                    self.unmanage(hwnd, "destroyed");
+                    // The handle is free now and Windows will hand it to another
+                    // window, which has to be routed by the initial rules on its
+                    // own account.
+                    self.routed.remove(&hwnd);
+                    self.minimized.remove(&hwnd);
+                }
             }
             WindowEventKind::Hidden | WindowEventKind::Cloaked => {
                 // Mochi's own cloak comes back as an event; ignoring it is what
@@ -1248,6 +1305,23 @@ impl WindowManager {
 
     fn we_hid(&self, hwnd: Hwnd) -> bool {
         self.hidden.lock().is_ok_and(|hidden| hidden.contains(hwnd))
+    }
+
+    /// Whether a destroy is an application closing to the tray rather than a
+    /// window that is gone.
+    ///
+    /// Both halves are needed. `tray_and_multi_window_applications` names the
+    /// applications that keep a hidden window alive when they are "closed",
+    /// and the platform says whether this particular handle is one of those or
+    /// really dead: quitting such an application for good destroys its window
+    /// like anything else, and a dead handle left in the routing ledger is
+    /// inherited by whatever window Windows hands the value to next.
+    fn lives_in_the_tray(&self, hwnd: Hwnd) -> bool {
+        let Some(window) = self.core.window(window_id(hwnd)) else {
+            return false;
+        };
+        self.core.rules.is_tray_or_multi_window(&window.info())
+            && self.platform.window_info(hwnd).is_ok()
     }
 
     /// A window was created, shown or uncloaked.
@@ -1385,7 +1459,66 @@ impl WindowManager {
                 Ok(changes) => self.apply_changes(changes),
                 Err(e) => tracing::debug!(%hwnd, error = %e, "could not float"),
             },
-            RuleDecision::Tile => {}
+            RuleDecision::Tile => self.contents_changed(&info, id),
+        }
+    }
+
+    /// A window that reuses itself was given different contents.
+    ///
+    /// `object_name_change_applications` names the applications that open a
+    /// new document in the window they already have: nothing is created, the
+    /// title simply changes. The workspace routing is written against the
+    /// document, and for every other application it is asked when the window
+    /// appears, so for these the title change is the moment to ask it again.
+    ///
+    /// Two things are deliberately not done here. `initial_workspace_rules`
+    /// are not asked, because this window has been routed once already and
+    /// that is the whole meaning of them; `routed_by_rule` skips them for the
+    /// same reason `destination` does. And a window that is off screen is left
+    /// alone: Mochi hid it, the model does not know that, and moving it onto a
+    /// visible workspace would tile a hole where a cloaked window is.
+    fn contents_changed(&mut self, info: &WindowInfo, id: WindowId) {
+        if self.core.is_paused || !self.core.rules.changes_object_name(&rule_info(info)) {
+            return;
+        }
+        let Some(window) = self.core.window(id).cloned() else {
+            return;
+        };
+        let Some(here) = self.core.locate_window(id) else {
+            return;
+        };
+        let Some(there) = self.routed_by_rule(info, &window) else {
+            return;
+        };
+        if there == here || self.we_hid(info.hwnd) {
+            return;
+        }
+
+        let before = self.focus();
+        match self.core.remove_window(id) {
+            // The workspace it came from closes the gap straight away; the
+            // window itself is placed by the change set the add hands back.
+            Ok(changes) => self.apply_changes(changes),
+            Err(e) => {
+                tracing::debug!(hwnd = %info.hwnd, error = %e, "could not move a renamed window");
+                return;
+            }
+        }
+        match self.core.add_window_to(there.0, there.1, window) {
+            Ok(changes) => {
+                tracing::info!(
+                    hwnd = %info.hwnd,
+                    title = %info.title,
+                    monitor = there.0,
+                    workspace = there.1,
+                    "a workspace rule matched the new contents of a reused window"
+                );
+                self.apply_changes(changes);
+                self.announce(before);
+            }
+            Err(e) => {
+                tracing::warn!(hwnd = %info.hwnd, error = %e, "could not route a renamed window");
+            }
         }
     }
 
@@ -3427,6 +3560,189 @@ mod tests {
             wm.state().locate_window(WindowId(1)),
             Some((0, 1)),
             "the window teleported back to its initial workspace on a restore"
+        );
+    }
+
+    /// A rule that matches one window by its exact title.
+    fn titled(title: &str) -> MatchingRule {
+        MatchingRule::simple(
+            ApplicationIdentifier::Title,
+            title.to_owned(),
+            MatchingStrategy::Equals,
+        )
+    }
+
+    #[test]
+    fn an_application_that_closes_to_the_tray_keeps_its_place_in_the_ledgers() {
+        // An application in `tray_and_multi_window_applications` does not die
+        // when its window goes away: the handle is still a window and the same
+        // one comes back out of the tray. Treated as an ordinary destroy it
+        // leaves the routing ledger, and `initial_workspace_rules` then route
+        // it a second time, onto a workspace the user had moved it off.
+        let (mut wm, _) = manager(vec![window(1, "Tray")]);
+        wm.core
+            .rules
+            .tray_and_multi_window_applications
+            .push(titled("Tray"));
+        wm.workspace_rules.push(WorkspaceRule {
+            monitor: 0,
+            workspace: 0,
+            rule: titled("Tray"),
+            initial_only: true,
+        });
+        wm.handle_command(Command::MoveToWorkspace { index: 1 });
+        assert_eq!(wm.state().locate_window(WindowId(1)), Some((0, 1)));
+
+        // Closed to the tray: the window is gone from the screen, the handle
+        // is not gone from the desktop.
+        wm.on_window_event(WindowEventKind::Destroyed, Hwnd(1));
+        assert_eq!(
+            wm.state().all_window_ids().count(),
+            0,
+            "a window that is not on screen has no business in the layout"
+        );
+        assert!(
+            wm.routed.contains(&Hwnd(1)),
+            "the window was forgotten while it sat in the tray"
+        );
+
+        // Opened again from the tray.
+        wm.on_window_event(WindowEventKind::Shown, Hwnd(1));
+        assert_eq!(
+            wm.state().locate_window(WindowId(1)),
+            Some((0, 1)),
+            "the window came back on its initial workspace instead of the one \
+             the user had left it on"
+        );
+    }
+
+    #[test]
+    fn a_window_that_really_is_gone_still_leaves_the_ledger() {
+        // The other half of the same rule: quitting a tray application for
+        // good destroys its window like anything else, and the handle Windows
+        // hands out next must be routed on its own account.
+        let (mut wm, platform) = manager(vec![window(1, "Tray")]);
+        wm.core
+            .rules
+            .tray_and_multi_window_applications
+            .push(titled("Tray"));
+        platform.windows.lock().unwrap().clear();
+
+        wm.on_window_event(WindowEventKind::Destroyed, Hwnd(1));
+        assert!(
+            !wm.routed.contains(&Hwnd(1)),
+            "a dead handle stayed in the ledger because the application once \
+             had a tray icon"
+        );
+    }
+
+    #[test]
+    fn a_reused_window_is_routed_again_when_its_contents_change() {
+        // An application in `object_name_change_applications` opens a document
+        // in the window it already has. Nothing is created, so the workspace
+        // routing is never asked, and the rule the user wrote for that
+        // document never applies.
+        let (mut wm, platform) = manager(vec![window(1, "Inbox")]);
+        // The workspace the rule points at, the way a configuration file with
+        // a `workspace_rules` entry in it would have made it.
+        wm.core
+            .monitors_mut()
+            .get_mut(0)
+            .unwrap()
+            .ensure_workspaces(2);
+        wm.core
+            .rules
+            .object_name_change_applications
+            .push(MatchingRule::simple(
+                ApplicationIdentifier::Exe,
+                "Code.exe".to_owned(),
+                MatchingStrategy::Equals,
+            ));
+        wm.workspace_rules.push(WorkspaceRule {
+            monitor: 0,
+            workspace: 1,
+            rule: titled("Report"),
+            initial_only: false,
+        });
+        assert_eq!(wm.state().locate_window(WindowId(1)), Some((0, 0)));
+
+        platform.windows.lock().unwrap()[0].title = "Report".into();
+        wm.on_window_event(WindowEventKind::NameChange, Hwnd(1));
+        assert_eq!(
+            wm.state().locate_window(WindowId(1)),
+            Some((0, 1)),
+            "the new contents never reached the workspace rule written for them"
+        );
+        assert_eq!(wm.state().window(WindowId(1)).unwrap().title, "Report");
+        assert!(
+            wm.hidden().lock().unwrap().contains(Hwnd(1)),
+            "the window was moved to a workspace nobody is looking at and left              on screen, and nothing knows it is owed back"
+        );
+    }
+
+    #[test]
+    fn a_window_that_was_not_named_a_reuser_is_left_where_it_is() {
+        // The same rename without the rule. A title change is an everyday
+        // event and must not move anybody's window on its own.
+        let (mut wm, platform) = manager(vec![window(1, "Inbox")]);
+        wm.core
+            .monitors_mut()
+            .get_mut(0)
+            .unwrap()
+            .ensure_workspaces(2);
+        wm.workspace_rules.push(WorkspaceRule {
+            monitor: 0,
+            workspace: 1,
+            rule: titled("Report"),
+            initial_only: false,
+        });
+
+        platform.windows.lock().unwrap()[0].title = "Report".into();
+        wm.on_window_event(WindowEventKind::NameChange, Hwnd(1));
+        assert_eq!(
+            wm.state().locate_window(WindowId(1)),
+            Some((0, 0)),
+            "a plain title change moved a window to another workspace"
+        );
+    }
+
+    #[test]
+    fn a_slow_application_is_given_a_second_layout_pass() {
+        // A window in `slow_application_identifiers` is not ready to be placed
+        // at the moment it appears, so the first placement is the one it
+        // resizes itself out of. The loop owns the state and cannot wait for
+        // it; the second pass has to come back through the channel.
+        let (mut wm, platform) = manager(vec![window(1, "One")]);
+        wm.core
+            .rules
+            .slow_application_identifiers
+            .push(titled("Slow"));
+
+        platform.windows.lock().unwrap().push(window(2, "Slow"));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(2));
+        assert_eq!(wm.state().all_window_ids().count(), 2);
+
+        let deferred = wm
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a slow application was tiled once and never again");
+        platform.clear_history();
+        wm.on_event(deferred);
+        assert_eq!(
+            platform.rect_of(Hwnd(2)),
+            wm.state().rect_for_window(WindowId(2)),
+            "the deferred pass did not put the slow window in its tile"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_application_is_not_tiled_twice() {
+        let (wm, _) = manager(vec![window(1, "One")]);
+        assert!(
+            wm.rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "every window is now paying for the slow ones"
         );
     }
 
