@@ -22,6 +22,7 @@ env:
 jobs:
   fmt:
     name: rustfmt
+    timeout-minutes: 30
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +33,7 @@ jobs:
 
   clippy:
     name: clippy
+    timeout-minutes: 30
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,10 +43,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: clippy
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   test:
     name: test
+    timeout-minutes: 30
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +57,7 @@ jobs:
           key: test
       # mochi-testbed creates real WS_EX_TOOLWINDOW windows; they skip
       # themselves when the runner has no desktop to draw on.
-      - run: cargo test --workspace --all-features
+      - run: cargo test --locked --workspace --all-features
       - name: No test windows left behind
         shell: pwsh
         run: |
@@ -65,8 +68,63 @@ jobs:
           }
           Write-Output 'no mochi-testwin process left'
 
+  e2e:
+    name: end to end
+    timeout-minutes: 30
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e
+      # These tests start the real daemon against real windows, so they need an
+      # interactive window station. They are opt-in through MOCHI_E2E, which
+      # means the ordinary test job reports them as passed without running one
+      # of them: this job is where they actually execute. The daemon manages
+      # only its own window class, so nothing else on the runner is touched.
+      - name: Test against real windows
+        shell: pwsh
+        env:
+          MOCHI_E2E: "1"
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Continue'
+          $output = cargo test --locked -p mochi --test e2e_testbed -- --test-threads 1 --nocapture 2>&1 | Out-String
+          Write-Output $output
+          if ($LASTEXITCODE -ne 0) { throw "the end-to-end suite failed with $LASTEXITCODE" }
+
+          # A test that skips still reports as passed, so a runner without a
+          # desktop would turn this job green having run nothing at all. The
+          # harness prints a step tally for every test that really executed;
+          # requiring it is the difference between coverage and a badge.
+          $ran = ([regex]::Matches($output, 'steps passed')).Count
+          Write-Output "tests that really executed: $ran"
+          if ($ran -lt 8) {
+              throw "only $ran end-to-end tests executed; the rest skipped and reported as passed. $(
+                  '')Check the runner has an interactive desktop."
+          }
+      - name: No test windows left behind
+        shell: pwsh
+        run: |
+          $stragglers = @(Get-Process mochi-testwin -ErrorAction SilentlyContinue)
+          if ($stragglers.Count -gt 0) {
+              $stragglers | Stop-Process -Force
+              throw "$($stragglers.Count) mochi-testwin process(es) survived the run"
+          }
+          Write-Output 'no mochi-testwin process left'
+      - name: Upload the daemon logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: ${{ runner.temp }}/mochi-e2e/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   doc:
     name: doc
+    timeout-minutes: 30
     runs-on: windows-latest
     env:
       RUSTDOCFLAGS: -D warnings
@@ -76,10 +134,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: doc
-      - run: cargo doc --workspace --all-features --no-deps
+      - run: cargo doc --locked --workspace --all-features --no-deps
 
   build:
     name: build release
+    timeout-minutes: 30
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,10 +148,11 @@ jobs:
           key: release
       # The release profile is thin LTO with one codegen unit, so it breaks in
       # ways a debug build does not. Every push walks that path.
-      - run: cargo build --release --workspace
+      - run: cargo build --locked --release --workspace
 
   deny:
     name: cargo-deny
+    timeout-minutes: 30
     # The one job that is not on Windows: cargo-deny-action is a container
     # action and only runs on a Linux runner. It reads Cargo.lock and the
     # advisory database, and deny.toml pins the graph to the Windows target,
