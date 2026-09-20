@@ -56,9 +56,24 @@ pub fn read_line<R: BufRead>(reader: &mut R) -> std::io::Result<Option<String>> 
     let mut line = String::new();
     loop {
         line.clear();
-        let read = {
+        let outcome = {
             let mut limited = std::io::Read::take(&mut *reader, MAX_MESSAGE_BYTES as u64);
-            limited.read_line(&mut line)?
+            limited.read_line(&mut line)
+        };
+        let read = match outcome {
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // `read_line` consumes the bytes and validates UTF-8 only
+                // afterwards, so a line carrying one byte that is not UTF-8
+                // fails with the reader left mid-line. Propagating straight
+                // out would leave the tail of that line in the stream to be
+                // framed as a message of its own, which is exactly what the
+                // length check below refuses to allow. Same reasoning, same
+                // remedy.
+                discard_to_newline(reader)?;
+                return Err(e);
+            }
+            Err(e) => return Err(e),
         };
         if read == 0 {
             return Ok(None);
@@ -207,6 +222,28 @@ mod tests {
             read_message::<_, Command>(&mut reader).unwrap(),
             None,
             "the tail of an over-long line was framed as a command"
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_does_not_desync_the_framing_either() {
+        // The same attack, with one byte that is not UTF-8 in the padding.
+        // `read_line` consumes the bytes and validates them afterwards, so it
+        // failed with the reader left mid-line and the guard below it skipped:
+        // the tail was then framed as a message of its own, and on the command
+        // pipe that means stopping the window manager on a command the peer
+        // never sent.
+        let mut raw = vec![0xFF; MAX_MESSAGE_BYTES];
+        raw.extend_from_slice(br#"{"cmd":"stop"}"#);
+        raw.push(b'\n');
+        let mut reader = std::io::BufReader::new(raw.as_slice());
+
+        let err = read_message::<_, Command>(&mut reader).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            read_message::<_, Command>(&mut reader).unwrap(),
+            None,
+            "the tail of a line that was not utf-8 was framed as a command"
         );
     }
 
