@@ -49,6 +49,9 @@ use crate::state::{State, snapshot};
 /// What a command that needs the keyboard hook answers without one.
 const NO_HOTKEYS: &str = "this daemon binds no keys, it was started with --no-hotkeys";
 
+/// What a command that would change the desktop answers while paused.
+const PAUSED: &str = "mochi is paused, nothing was changed";
+
 /// The `mochic hotkeys` rows of a set of bindings, in file order.
 fn rows_of(bindings: &mochi_hotkey::Bindings) -> Vec<(String, String)> {
     bindings
@@ -116,17 +119,22 @@ impl Hidden {
         let Some(path) = self.record.as_deref() else {
             return;
         };
-        let entries: Vec<crate::recover::Entry> = self
-            .windows
-            .iter()
-            .map(|(hwnd, behaviour)| {
-                let (pid, class) = self.identity.get(hwnd).cloned().unwrap_or_default();
+        // Every window Mochi has touched, not only the hidden ones. A window
+        // that is merely faded is still Mochi's doing and is left translucent
+        // by a hard kill, with nothing on disk that says who did it or that it
+        // is on screen at all.
+        let mut handles: BTreeSet<Hwnd> = self.windows.keys().copied().collect();
+        handles.extend(self.faded.iter().copied());
+        let entries: Vec<crate::recover::Entry> = handles
+            .into_iter()
+            .map(|hwnd| {
+                let (pid, class) = self.identity.get(&hwnd).cloned().unwrap_or_default();
                 crate::recover::Entry {
                     hwnd: hwnd.0,
                     pid,
                     class,
-                    behaviour: *behaviour,
-                    faded: self.faded.contains(hwnd),
+                    behaviour: self.windows.get(&hwnd).copied(),
+                    faded: self.faded.contains(&hwnd),
                 }
             })
             .collect();
@@ -162,16 +170,35 @@ impl Hidden {
         self.windows.is_empty() && self.faded.is_empty()
     }
 
-    /// Everything Mochi owes the user back, emptying the record.
+    /// Everything Mochi owes the user back, emptying the in-memory record.
+    ///
+    /// The mirror on disk is deliberately left alone here. It is the only
+    /// thing that knows where these windows went, the restore loop that
+    /// follows is not instant, and the console close path is killed by the OS
+    /// after a fixed timeout: erasing the file first means every window that
+    /// did not get its turn is lost with nothing left pointing at it. A record
+    /// that still names a window already back on screen costs one harmless
+    /// call on the next start. [`Hidden::settle`] replaces it at the end.
     fn drain(&mut self) -> (Vec<(Hwnd, HidingBehaviour)>, Vec<Hwnd>) {
-        if let Some(path) = self.record.as_deref() {
-            crate::recover::save(path, &[]);
-        }
-        self.identity.clear();
         (
             std::mem::take(&mut self.windows).into_iter().collect(),
             std::mem::take(&mut self.faded).into_iter().collect(),
         )
+    }
+
+    /// Takes back whatever the restore could not deal with and rewrites the
+    /// mirror, which empties it when there is nothing left.
+    fn settle(&mut self, windows: Vec<(Hwnd, HidingBehaviour)>, faded: Vec<Hwnd>) {
+        self.windows.extend(windows);
+        self.faded.extend(faded);
+        let live: Vec<Hwnd> = self
+            .windows
+            .keys()
+            .copied()
+            .chain(self.faded.iter().copied())
+            .collect();
+        self.identity.retain(|hwnd, _| live.contains(hwnd));
+        self.write();
     }
 }
 
@@ -193,6 +220,7 @@ pub fn restore(platform: &dyn Platform, hidden: &Mutex<Hidden>) {
         count = windows.len(),
         "restore: putting windows back on screen"
     );
+    let mut owed = Vec::new();
     for (hwnd, behaviour) in windows {
         let result = match behaviour {
             HidingBehaviour::Cloak => platform.set_cloaked(hwnd, false),
@@ -201,12 +229,20 @@ pub fn restore(platform: &dyn Platform, hidden: &Mutex<Hidden>) {
         };
         if let Err(e) = result {
             tracing::error!(%hwnd, error = %e, "restore: could not show a window");
+            owed.push((hwnd, behaviour));
         }
     }
+    let mut still_faded = Vec::new();
     for hwnd in faded {
         if let Err(e) = platform.set_transparency(hwnd, None) {
             tracing::error!(%hwnd, error = %e, "restore: could not clear the alpha");
+            still_faded.push(hwnd);
         }
+    }
+    // Only now, with every window either back or written down again.
+    match hidden.lock() {
+        Ok(mut list) => list.settle(owed, still_faded),
+        Err(poisoned) => poisoned.into_inner().settle(owed, still_faded),
     }
 }
 
@@ -329,7 +365,7 @@ impl WindowManager {
         };
 
         wm.refresh_monitors();
-        wm.load_config();
+        let _ = wm.load_config();
         wm.foreground = wm.platform.foreground_window();
         wm.adopt_existing_windows();
         wm.retile();
@@ -450,19 +486,25 @@ impl WindowManager {
     // -----------------------------------------------------------------
 
     /// Reads `mochi.json`, applies it to the model and remembers the routing.
-    fn load_config(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// When the file is there and does not parse. The previous configuration
+    /// is kept, and the caller has to say so rather than report success for a
+    /// file nothing was read from.
+    fn load_config(&mut self) -> Result<()> {
         let path = self.session.config_path.clone();
         let loaded = match config::load(&path) {
             Ok(loaded) => loaded,
             Err(e) => {
                 tracing::error!(path = %path.display(), error = %e, "keeping the previous configuration");
-                return;
+                return Err(e);
             }
         };
 
         loaded.config.apply_to(&mut self.core);
         self.core.rules.extend(loaded.app_rules);
-        for broken in self.core.rules.validate() {
+        for broken in self.core.rules.drop_invalid() {
             tracing::warn!(error = %broken, "a rule was dropped");
         }
         self.session.settings.apply(&loaded.config);
@@ -494,6 +536,7 @@ impl WindowManager {
             padding = self.core.default_workspace_padding,
             "configuration applied"
         );
+        Ok(())
     }
 
     /// Takes over every window that is already on the desktop.
@@ -575,7 +618,11 @@ impl WindowManager {
     }
 
     fn rules_say_ignore(&self, info: &WindowInfo) -> bool {
-        self.core.rules.should_ignore(&rule_info(info))
+        // The whole ladder, not the ignore list alone: a rule file drops a
+        // broad class and then names the one window it wants back, and asking
+        // only the ignore half would leave that window behind here even though
+        // every other path rescues it.
+        self.core.rules.decide(&rule_info(info)) == RuleDecision::Ignore
     }
 
     /// Whether Mochi may take this window, before the user's rules are asked.
@@ -683,7 +730,19 @@ impl WindowManager {
         if let Ok(mut hidden) = self.hidden.lock() {
             hidden.show(hwnd);
         }
-        self.routed.remove(&hwnd);
+        // Whatever the reason, this window is not the foreground any more. A
+        // stale handle here is worse than none: Windows reuses handle values,
+        // and `focus_hwnd` refuses a handle it believes is already focused, so
+        // the next window to inherit it would never be given the foreground.
+        if self.foreground == Some(hwnd) {
+            self.foreground = None;
+        }
+        // The routing ledger is deliberately *not* cleared here. A user
+        // minimize, a virtual desktop cloak and a rule change all end up in
+        // `unmanage` with the window still alive, and forgetting that it has
+        // been routed once makes `initial_workspace_rules` fire again and
+        // teleport it off whatever workspace the user had moved it to. Only a
+        // destroyed window leaves the ledger, in `on_window_event`.
     }
 
     // -----------------------------------------------------------------
@@ -715,6 +774,14 @@ impl WindowManager {
         for target in &changes.retiled {
             self.apply_workspace(target.monitor, target.workspace);
         }
+        if !changes.retiled.is_empty() {
+            // One pass for the whole desktop, after every workspace in this
+            // change set has been placed: the border manager is given the
+            // complete set and removes whatever it was not shown, so a pass
+            // per monitor would have them deleting each other's borders.
+            let targets = self.visuals_targets();
+            self.visuals.update(&targets);
+        }
         for id in &changes.show {
             self.show_window(handle(*id));
         }
@@ -740,10 +807,8 @@ impl WindowManager {
             // without a retile, does not appear in `changes.retiled`, so
             // borders and transparency need their own nudge here or they
             // would only ever follow a layout change.
-            if let Ok((monitor, workspace)) = self.core.focused_indices() {
-                let targets = self.visuals_targets(monitor, workspace);
-                self.visuals.update(&targets);
-            }
+            let targets = self.visuals_targets();
+            self.visuals.update(&targets);
         }
         if let Some(rect) = changes.warp_mouse_to
             && self.core.mouse_follows_focus
@@ -758,6 +823,11 @@ impl WindowManager {
 
     /// Takes a window off screen the way the configuration asked for.
     fn hide_window(&mut self, hwnd: Hwnd) {
+        // Read before the window is taken off screen. A hidden, cloaked or
+        // minimized window is exactly the sort `window_info` fails on, and a
+        // record that carries pid 0 and no class can never be matched against
+        // the live window on the next start.
+        let identity = self.platform.window_info(hwnd).ok();
         let mut behaviour = self.core.window_hiding_behaviour;
         let mut result = match behaviour {
             HidingBehaviour::Cloak => self.platform.set_cloaked(hwnd, true),
@@ -780,7 +850,6 @@ impl WindowManager {
             // The record is only written after the call succeeded, so the
             // restore path never promises a window it did not actually hide.
             Ok(()) => {
-                let identity = self.platform.window_info(hwnd).ok();
                 if let Ok(mut hidden) = self.hidden.lock() {
                     if let Some(info) = identity {
                         hidden.identify(hwnd, info.pid, &info.class);
@@ -833,37 +902,81 @@ impl WindowManager {
             tracing::debug!(monitor, workspace, windows = placements.len(), "retiling");
             self.apply_layout(&placements);
         }
-        // The visuals pass runs even with nothing to tile: a workspace holding
-        // only floating windows still wants a border on the focused one, and an
-        // emptied workspace has to drop the borders it had.
-        let targets = self.visuals_targets(monitor, workspace);
-        self.visuals.update(&targets);
+        // The visuals are not drawn here. They belong to the whole desktop at
+        // once and are done in `apply_changes`, after every workspace of the
+        // change set has been placed. A workspace with nothing to tile still
+        // gets its pass that way: a workspace holding only floating windows
+        // wants a border on the focused one, and an emptied workspace has to
+        // drop the borders it had.
     }
 
-    /// Every visible window of a workspace, classified for the borders and
+    /// Every visible window of the desktop, classified for the borders and
     /// transparency pass: which one has the focus, the [`mochi_render::BorderKind`]
-    /// it should draw with, and the rest as the transparency set. Empty when
-    /// the workspace is not the one showing on its monitor, matching
-    /// [`WindowManager::placements_for`].
-    fn visuals_targets(&self, monitor: usize, workspace: usize) -> crate::visuals::VisualsTargets {
+    /// it should draw with, and the rest as the transparency set.
+    ///
+    /// Every monitor at once, deliberately. The border manager is handed the
+    /// complete desired set and removes every border it was not shown, and a
+    /// change set carries one `retiled` entry per monitor, so a set built from
+    /// a single monitor has the screens taking each other's borders away on
+    /// every pass.
+    fn visuals_targets(&self) -> crate::visuals::VisualsTargets {
+        let mut targets = crate::visuals::VisualsTargets::default();
+        let focused_monitor = self.core.focused_indices().ok().map(|(monitor, _)| monitor);
+        for monitor in 0..self.core.monitors().len() {
+            let workspace = self
+                .core
+                .monitors()
+                .get(monitor)
+                .map_or(0, Monitor::focused_workspace_idx);
+            self.push_visuals_targets(
+                monitor,
+                workspace,
+                focused_monitor == Some(monitor),
+                &mut targets,
+            );
+        }
+        targets
+    }
+
+    /// The part of [`WindowManager::visuals_targets`] that belongs to one
+    /// workspace. Adds nothing when the workspace is not the one showing on
+    /// its monitor, matching [`WindowManager::placements_for`], and nothing for
+    /// a maximized workspace, which is Windows' business rather than the
+    /// layout's.
+    ///
+    /// `has_focus` is true only for the monitor the desktop focus is on: one
+    /// window on the whole desktop carries the focused border, and every other
+    /// screen draws unfocused ones.
+    fn push_visuals_targets(
+        &self,
+        monitor: usize,
+        workspace: usize,
+        has_focus: bool,
+        targets: &mut crate::visuals::VisualsTargets,
+    ) {
         use mochi_render::BorderKind;
 
-        let mut targets = crate::visuals::VisualsTargets::default();
         let Some(display) = self.core.monitors().get(monitor) else {
-            return targets;
+            return;
         };
         if display.focused_workspace_idx() != workspace {
-            return targets;
+            return;
         }
         let Ok(target) = self.core.workspace(monitor, workspace) else {
-            return targets;
+            return;
         };
         if target.is_maximized() {
-            return targets;
+            return;
         }
 
-        let focused = target.focused_window_id().map(handle);
-        targets.focused = focused;
+        let focused = if has_focus {
+            target.focused_window_id().map(handle)
+        } else {
+            None
+        };
+        if has_focus {
+            targets.focused = focused;
+        }
         let focused_kind = if target.is_monocle() {
             BorderKind::Monocle
         } else if target.focus_is_floating() {
@@ -917,12 +1030,13 @@ impl WindowManager {
             for window in target.floating_windows().iter() {
                 let floating_hwnd = handle(window.id);
                 if let Ok(info) = self.platform.window_info(floating_hwnd) {
-                    push(floating_hwnd, info.rect);
+                    // The window rect includes the invisible resize border, so
+                    // a border drawn around it sits several pixels outside the
+                    // frame the user actually sees.
+                    push(floating_hwnd, info.visible_frame());
                 }
             }
         }
-
-        targets
     }
 
     /// The rectangle every visible window of a workspace should occupy.
@@ -1000,7 +1114,9 @@ impl WindowManager {
                     self.reload_hotkeys();
                 } else {
                     tracing::info!(path = %path.display(), "the configuration changed on disk");
-                    self.reload_config();
+                    // Already logged by the loader; a file saved half way
+                    // through an edit is an everyday event here.
+                    let _ = self.reload_config();
                 }
                 Flow::Continue
             }
@@ -1048,7 +1164,14 @@ impl WindowManager {
     fn on_window_event(&mut self, kind: WindowEventKind, hwnd: Hwnd) {
         match kind {
             WindowEventKind::LocationChange => {}
-            WindowEventKind::Destroyed => self.unmanage(hwnd, "destroyed"),
+            WindowEventKind::Destroyed => {
+                self.unmanage(hwnd, "destroyed");
+                // The handle is free now and Windows will hand it to another
+                // window, which has to be routed by the initial rules on its
+                // own account.
+                self.routed.remove(&hwnd);
+                self.minimized.remove(&hwnd);
+            }
             WindowEventKind::Hidden | WindowEventKind::Cloaked => {
                 // Mochi's own cloak comes back as an event; ignoring it is what
                 // keeps a workspace switch from unmanaging everything it hid.
@@ -1060,7 +1183,14 @@ impl WindowManager {
                 self.window_appeared(hwnd);
             }
             WindowEventKind::MinimizeStart => {
-                if self.core.is_managed(window_id(hwnd)) {
+                // Mochi's own minimize comes back as an event, exactly the way
+                // its own cloak does. Acting on it would unmanage every window
+                // the workspace switch had just hidden, and `unmanage` clears
+                // the hidden record as it goes, so nothing would be left that
+                // knows those windows are off screen and owed back.
+                if self.we_hid(hwnd) || self.minimized.contains(&hwnd) {
+                    tracing::debug!(%hwnd, "our own minimize, leaving the window managed");
+                } else if self.core.is_managed(window_id(hwnd)) {
                     self.minimized.insert(hwnd);
                     self.unmanage(hwnd, "minimized");
                 }
@@ -1356,7 +1486,23 @@ impl WindowManager {
     // -----------------------------------------------------------------
 
     /// Runs one operation on the model and applies whatever it changed.
+    ///
+    /// Refused while paused. `apply_changes` touches no window in that state,
+    /// so the model would drift away from the desktop and every command,
+    /// `mochic close` included, would answer `Ok` for something that did not
+    /// happen.
     fn run_op(
+        &mut self,
+        op: impl FnOnce(&mut CoreState) -> mochi_core::Result<Changes>,
+    ) -> Response {
+        if self.core.is_paused {
+            return Response::error(PAUSED);
+        }
+        self.run_op_even_when_paused(op)
+    }
+
+    /// The same without the pause check, for the command that lifts it.
+    fn run_op_even_when_paused(
         &mut self,
         op: impl FnOnce(&mut CoreState) -> mochi_core::Result<Changes>,
     ) -> Response {
@@ -1408,7 +1554,7 @@ impl WindowManager {
 
             // --- lifecycle ---------------------------------------------
             Command::TogglePause => {
-                let response = self.run_op(CoreState::toggle_pause);
+                let response = self.run_op_even_when_paused(CoreState::toggle_pause);
                 tracing::info!(paused = self.core.is_paused, "pause toggled");
                 if self.core.is_paused {
                     self.visuals.clear();
@@ -1420,10 +1566,10 @@ impl WindowManager {
                 });
                 response
             }
-            Command::ReloadConfiguration => {
-                self.reload_config();
-                Response::Ok
-            }
+            Command::ReloadConfiguration => match self.reload_config() {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::error(e),
+            },
             Command::Retile => self.run_op(CoreState::retile),
 
             // --- focus and movement ------------------------------------
@@ -1834,10 +1980,8 @@ impl WindowManager {
         self.visuals.set_settings(&self.visual_config);
         // Paused means Mochi has taken its visuals off the desktop on purpose.
         // The settings are kept and the retile that unpauses draws them.
-        if !self.core.is_paused
-            && let Ok((monitor, workspace)) = self.core.focused_indices()
-        {
-            let targets = self.visuals_targets(monitor, workspace);
+        if !self.core.is_paused {
+            let targets = self.visuals_targets();
             self.visuals.update(&targets);
         }
         tracing::info!(setting = what, "applied");
@@ -1872,14 +2016,22 @@ impl WindowManager {
     /// The hotkey file goes with it: a user who presses reload after editing
     /// their setup means both files, and saving either one is noticed on its
     /// own anyway.
-    pub fn reload_config(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// When the configuration file did not parse. Nothing was read from it, so
+    /// no `reload` is announced either: a subscriber that redraws on one would
+    /// be redrawing for settings that never changed.
+    pub fn reload_config(&mut self) -> Result<()> {
         let path = self.session.config_path().to_path_buf();
-        self.load_config();
+        let loaded = self.load_config();
         self.reload_hotkeys();
+        loaded?;
         self.notify(NotificationEvent::Reload {
             path: path.display().to_string(),
         });
         self.retile();
+        Ok(())
     }
 
     /// Uncloaks and restores everything Mochi took off screen.
@@ -2101,7 +2253,7 @@ mod tests {
     use crate::platform::WindowPlacement;
     use crate::platform::types::{MonitorId, style};
     use crate::state::Settings;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// The 4K main screen, the one every single monitor test runs on.
@@ -2144,6 +2296,15 @@ mod tests {
         /// Windows that refuse to be positioned, which is what an elevated
         /// window looks like to a process that is not elevated.
         refuses: Mutex<Vec<Hwnd>>,
+        /// Windows that stop answering `window_info` once they are off screen,
+        /// which is what a cloaked or hidden window often does.
+        vanishing: Mutex<Vec<Hwnd>>,
+        /// A crash record to count while a window is being put back.
+        record_watch: Mutex<Option<PathBuf>>,
+        /// How many entries it held at each of those moments.
+        record_seen: Mutex<Vec<usize>>,
+        /// Windows that cannot be uncloaked, the way an elevated one cannot.
+        unrestorable: Mutex<Vec<Hwnd>>,
     }
 
     impl FakePlatform {
@@ -2162,6 +2323,10 @@ mod tests {
                 placements: Mutex::new(Vec::new()),
                 history: Mutex::new(Vec::new()),
                 refuses: Mutex::new(Vec::new()),
+                vanishing: Mutex::new(Vec::new()),
+                record_watch: Mutex::new(None),
+                record_seen: Mutex::new(Vec::new()),
+                unrestorable: Mutex::new(Vec::new()),
             }
         }
 
@@ -2178,6 +2343,28 @@ mod tests {
         /// Makes one window unpositionable from now on.
         fn refuse(&self, hwnd: Hwnd) {
             self.refuses.lock().unwrap().push(hwnd);
+        }
+
+        /// Makes one window unreadable from the moment it goes off screen.
+        fn vanish_when_hidden(&self, hwnd: Hwnd) {
+            self.vanishing.lock().unwrap().push(hwnd);
+        }
+
+        /// Counts the entries of the crash record on every uncloak from now on.
+        fn watch_record(&self, path: &Path) {
+            *self.record_watch.lock().unwrap() = Some(path.to_path_buf());
+        }
+
+        /// Makes one window impossible to put back on screen.
+        fn cannot_be_restored(&self, hwnd: Hwnd) {
+            self.unrestorable.lock().unwrap().push(hwnd);
+        }
+
+        /// Drops a window that was told to vanish once it is off screen.
+        fn went_off_screen(&self, hwnd: Hwnd) {
+            if self.vanishing.lock().unwrap().contains(&hwnd) {
+                self.windows.lock().unwrap().retain(|w| w.hwnd != hwnd);
+            }
         }
 
         /// Forgets every move made so far.
@@ -2248,11 +2435,24 @@ mod tests {
             }
         }
         fn set_cloaked(&self, hwnd: Hwnd, cloaked: bool) -> Result<()> {
+            if let Some(path) = self.record_watch.lock().unwrap().clone() {
+                let count = crate::recover::load(&path).map_or(0, |entries| entries.len());
+                self.record_seen.lock().unwrap().push(count);
+            }
+            if !cloaked && self.unrestorable.lock().unwrap().contains(&hwnd) {
+                return Err(anyhow::anyhow!("this window cannot be uncloaked"));
+            }
             self.cloaks.lock().unwrap().push((hwnd, cloaked));
+            if cloaked {
+                self.went_off_screen(hwnd);
+            }
             Ok(())
         }
         fn show(&self, hwnd: Hwnd, state: ShowState) -> Result<()> {
             self.shows.lock().unwrap().push((hwnd, state));
+            if matches!(state, ShowState::Hide | ShowState::Minimize) {
+                self.went_off_screen(hwnd);
+            }
             Ok(())
         }
         fn focus(&self, hwnd: Hwnd) -> Result<()> {
@@ -3011,5 +3211,363 @@ mod tests {
         wm.handle_command(Command::ToggleTransparency);
         assert!(!wm.session().settings.transparency);
         assert_eq!(wm.visual_config.transparency, Some(false));
+    }
+
+    #[test]
+    fn a_workspace_switch_that_minimizes_keeps_owing_every_window_back() {
+        // With `window_hiding_behaviour: minimize` Mochi's own minimize comes
+        // back as a MinimizeStart event, exactly the way its cloak comes back
+        // as a Cloaked event. Acting on it unmanages the whole workspace that
+        // was just hidden, and `unmanage` clears the hidden record too, so
+        // nothing is left that knows those windows are off screen.
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.core.window_hiding_behaviour = HidingBehaviour::Minimize;
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(1));
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        assert_eq!(
+            wm.state().all_window_ids().count(),
+            2,
+            "a workspace switch unmanaged the windows it had just hidden"
+        );
+        assert_eq!(
+            wm.hidden().lock().unwrap().len(),
+            2,
+            "mochi forgot it owes these windows back, so nothing will restore them"
+        );
+
+        platform.shows.lock().unwrap().clear();
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+        let restored: Vec<_> = platform
+            .shows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, state)| *state == ShowState::Restore)
+            .map(|(hwnd, _)| *hwnd)
+            .collect();
+        assert!(
+            restored.contains(&Hwnd(1)) && restored.contains(&Hwnd(2)),
+            "the windows stayed minimized on the way back: {restored:?}"
+        );
+    }
+
+    #[test]
+    fn a_destroyed_window_stops_being_the_foreground() {
+        // Windows hands the handle of a dead window to the next one, and
+        // `focus_hwnd` refuses a handle it believes already has the focus.
+        let (mut wm, platform) = manager(vec![window(1, "One")]);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(1));
+        assert_eq!(wm.foreground, Some(Hwnd(1)));
+
+        wm.on_window_event(WindowEventKind::Destroyed, Hwnd(1));
+        assert_eq!(
+            wm.foreground, None,
+            "a destroyed handle was left as the foreground"
+        );
+
+        platform.focused.lock().unwrap().clear();
+        wm.focus_hwnd(Hwnd(1));
+        assert_eq!(
+            platform.focused.lock().unwrap().as_slice(),
+            [Hwnd(1)],
+            "a new window on the recycled handle was never focused"
+        );
+    }
+
+    #[test]
+    fn a_window_that_only_went_off_screen_keeps_its_place_in_the_routing_ledger() {
+        // `initial_workspace_rules` apply the first time a window is seen. A
+        // user minimize, a virtual desktop cloak and a rule change all reach
+        // `unmanage` with the window still alive, and forgetting the routing
+        // there teleports the window back to its initial workspace.
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        assert!(wm.routed.contains(&Hwnd(1)));
+
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(1));
+        assert!(
+            wm.routed.contains(&Hwnd(1)),
+            "a minimized window would be routed by the initial rules all over again"
+        );
+
+        wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(1));
+        wm.on_window_event(WindowEventKind::Destroyed, Hwnd(1));
+        assert!(
+            !wm.routed.contains(&Hwnd(1)),
+            "a dead handle stayed in the ledger, so the window that inherits it              is treated as one that has already been routed"
+        );
+    }
+
+    #[test]
+    fn an_initial_workspace_rule_does_not_fire_again_after_a_minimize() {
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        wm.workspace_rules.push(WorkspaceRule {
+            monitor: 0,
+            workspace: 0,
+            rule: MatchingRule::simple(
+                ApplicationIdentifier::Title,
+                "One".to_owned(),
+                MatchingStrategy::Equals,
+            ),
+            initial_only: true,
+        });
+        // The user moves it somewhere else.
+        wm.handle_command(Command::MoveToWorkspace { index: 1 });
+        assert_eq!(wm.state().locate_window(WindowId(1)), Some((0, 1)));
+
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(1));
+        wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(1));
+        assert_eq!(
+            wm.state().locate_window(WindowId(1)),
+            Some((0, 1)),
+            "the window teleported back to its initial workspace on a restore"
+        );
+    }
+
+    #[test]
+    fn a_floating_windows_border_follows_the_frame_the_user_sees() {
+        // `GetWindowRect` includes the invisible resize border, so a border
+        // drawn around it sits several pixels off on every edge.
+        let mut floating = window(1, "Floating");
+        floating.rect = Rect::new(0, 0, 800, 600);
+        floating.frame = Rect::new(7, 0, 793, 593);
+        let (mut wm, _) = manager(vec![floating, window(2, "Tiled")]);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(1));
+        wm.handle_command(Command::ToggleFloat);
+
+        let targets = wm.visuals_targets();
+        let (_, rect, _) = targets
+            .tiled
+            .iter()
+            .find(|(hwnd, _, _)| *hwnd == Hwnd(1))
+            .expect("the floating window got no border at all");
+        assert_eq!(
+            *rect,
+            Rect::new(7, 0, 793, 593),
+            "the border was drawn around the window rect, not the visible frame"
+        );
+    }
+
+    /// A window that Windows reports on the second screen.
+    fn window_on_portrait(hwnd: isize, title: &str) -> WindowInfo {
+        WindowInfo {
+            monitor: Some(MonitorId(2)),
+            rect: Rect::new(3840, 0, 4920, 1920),
+            frame: Rect::new(3840, 0, 4920, 1920),
+            ..window(hwnd, title)
+        }
+    }
+
+    #[test]
+    fn every_monitor_gets_a_border_in_the_same_pass() {
+        // `BorderManager::update` is handed the complete desired set and
+        // removes every border it was not shown, so one monitor's targets on
+        // their own delete the borders of all the others.
+        let (wm, _) = manager_on(
+            vec![window(1, "Main"), window_on_portrait(2, "Portrait")],
+            vec![main_screen(), portrait_screen()],
+        );
+        assert_eq!(wm.state().monitors().len(), 2);
+        assert_eq!(wm.state().locate_window(WindowId(2)), Some((1, 0)));
+
+        let targets = wm.visuals_targets();
+        let drawn: Vec<Hwnd> = targets.tiled.iter().map(|(hwnd, _, _)| *hwnd).collect();
+        assert!(
+            drawn.contains(&Hwnd(1)) && drawn.contains(&Hwnd(2)),
+            "one monitor's pass left the other monitor's window out, so its              border is removed on every retile: {drawn:?}"
+        );
+        assert_eq!(
+            targets.focused.iter().count(),
+            1,
+            "only the window the desktop focus is on may carry the focused border"
+        );
+    }
+
+    #[test]
+    fn a_maximized_workspace_only_drops_the_borders_of_its_own_monitor() {
+        let (mut wm, _) = manager_on(
+            vec![window(1, "Main"), window_on_portrait(2, "Portrait")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(1));
+        wm.handle_command(Command::ToggleMaximize);
+        assert!(wm.state().workspace(0, 0).unwrap().is_maximized());
+
+        let targets = wm.visuals_targets();
+        let drawn: Vec<Hwnd> = targets.tiled.iter().map(|(hwnd, _, _)| *hwnd).collect();
+        assert_eq!(
+            drawn,
+            vec![Hwnd(2)],
+            "maximizing on one screen took the borders off every other screen"
+        );
+    }
+
+    #[test]
+    fn a_window_is_named_in_the_record_before_it_goes_off_screen() {
+        // A cloaked, hidden or minimized window is exactly the sort
+        // `window_info` fails on, and an entry with pid 0 and no class can
+        // never be told apart from a handle Windows has since reused.
+        let subject = WindowInfo {
+            pid: 4242,
+            ..window(1, "One")
+        };
+        let (mut wm, platform) = manager(vec![subject]);
+        platform.vanish_when_hidden(Hwnd(1));
+
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        let hidden = wm.hidden();
+        let hidden = hidden.lock().unwrap();
+        assert_eq!(
+            hidden.identity.get(&Hwnd(1)),
+            Some(&(4242, "Chrome_WidgetWin_1".to_owned())),
+            "the identity was read after the window was hidden, so the record \
+             carries a name that can never match"
+        );
+    }
+
+    #[test]
+    fn a_paused_daemon_refuses_the_commands_it_would_not_carry_out() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.handle_command(Command::TogglePause);
+        assert!(wm.state().is_paused);
+
+        platform.clear_history();
+        for command in [Command::Close, Command::Promote, Command::Retile] {
+            let name = command.name();
+            let (response, _) = wm.handle_command(command);
+            assert_eq!(
+                response.error_message(),
+                Some(PAUSED),
+                "{name} answered Ok while paused, having changed nothing"
+            );
+        }
+        assert!(platform.rect_of(Hwnd(1)).is_none());
+
+        // The command that lifts the pause still has to work.
+        let (response, _) = wm.handle_command(Command::TogglePause);
+        assert!(response.is_ok());
+        assert!(!wm.state().is_paused);
+    }
+
+    #[test]
+    fn a_reload_of_a_file_that_did_not_parse_is_not_an_ok() {
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        let broken = std::env::temp_dir().join("mochi-wm-broken-config.json");
+        std::fs::write(&broken, b"{ this is not json").unwrap();
+        wm.session.config_path = broken.clone();
+
+        let (response, _) = wm.handle_command(Command::ReloadConfiguration);
+        assert!(
+            response.error_message().is_some(),
+            "mochic reload-configuration reported success for a file nothing \
+             could be read from"
+        );
+        let _ = std::fs::remove_file(&broken);
+    }
+
+    /// A crash record path of its own, emptied before the test runs.
+    fn record_path(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("mochi-wm-{name}.json"));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn a_window_that_is_only_faded_is_written_to_the_crash_record() {
+        // A faded window is on screen and translucent. A hard kill leaves it
+        // that way, and nothing else on the desktop knows why.
+        let path = record_path("faded");
+        let mut hidden = Hidden::with_record(path.clone());
+        hidden.fade(Hwnd(7));
+
+        let entries = crate::recover::load(&path).expect("the record did not parse");
+        assert_eq!(
+            entries.len(),
+            1,
+            "a faded window left nothing behind, so nothing will ever make it opaque again"
+        );
+        assert!(entries[0].faded);
+        assert_eq!(entries[0].behaviour, None, "it was never taken off screen");
+
+        // Another window coming back must not take the alpha record with it.
+        hidden.hide(Hwnd(8), HidingBehaviour::Cloak);
+        hidden.show(Hwnd(8));
+        let entries = crate::recover::load(&path).expect("the record did not parse");
+        assert_eq!(
+            entries.len(),
+            1,
+            "showing one window erased the record of another that is still faded"
+        );
+        assert_eq!(entries[0].hwnd, 7);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_record_written_before_the_faded_only_shape_still_parses() {
+        let path = record_path("old-shape");
+        std::fs::write(
+            &path,
+            br#"[{"hwnd":1,"pid":4,"class":"C","behaviour":"Cloak","faded":false}]"#,
+        )
+        .unwrap();
+        let entries = crate::recover::load(&path).expect("an existing record stopped parsing");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].behaviour, Some(HidingBehaviour::Cloak));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_crash_record_outlives_the_restore_of_the_first_window() {
+        // The console close path is killed by the OS after a fixed timeout, so
+        // a record erased before the loop starts loses every window that did
+        // not get its turn.
+        let path = record_path("restore-order");
+        let platform = Arc::new(FakePlatform::new(vec![]));
+        let hidden = Mutex::new(Hidden::with_record(path.clone()));
+        {
+            let mut list = hidden.lock().unwrap();
+            list.hide(Hwnd(1), HidingBehaviour::Cloak);
+            list.hide(Hwnd(2), HidingBehaviour::Cloak);
+        }
+        platform.watch_record(&path);
+
+        restore(platform.as_ref(), &hidden);
+        assert_eq!(
+            platform.record_seen.lock().unwrap().as_slice(),
+            [2, 2],
+            "the record was emptied before a single window had been put back"
+        );
+        assert!(
+            !path.exists(),
+            "the record survived a restore that dealt with everything in it"
+        );
+        assert!(hidden.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_window_the_restore_could_not_put_back_stays_in_the_record() {
+        let path = record_path("restore-failure");
+        let platform = Arc::new(FakePlatform::new(vec![]));
+        platform.cannot_be_restored(Hwnd(2));
+        let hidden = Mutex::new(Hidden::with_record(path.clone()));
+        {
+            let mut list = hidden.lock().unwrap();
+            list.identify(Hwnd(2), 4242, "Chrome_WidgetWin_1");
+            list.hide(Hwnd(1), HidingBehaviour::Cloak);
+            list.hide(Hwnd(2), HidingBehaviour::Cloak);
+        }
+
+        restore(platform.as_ref(), &hidden);
+        let entries = crate::recover::load(&path).expect("the record did not parse");
+        assert_eq!(
+            entries.iter().map(|entry| entry.hwnd).collect::<Vec<_>>(),
+            vec![2],
+            "the window that could not be uncloaked was forgotten, and nothing \
+             else will ever bring it back"
+        );
+        assert_eq!(entries[0].pid, 4242, "it was written back without its name");
+        assert_eq!(hidden.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 }
