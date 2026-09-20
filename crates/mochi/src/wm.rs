@@ -1219,10 +1219,16 @@ impl WindowManager {
             if let Some(id) = container.focused_window_id()
                 && let Some(work_area) = self.core.work_area_for(monitor, workspace)
             {
-                let rect = target.full_rect(
+                // Scaled, like every other tile. `full_rect` pins the scale
+                // to 1.0, so on a 150% screen a monocle came out ten physical
+                // pixels larger per side than the tile it replaced, and the
+                // border followed the same wrong rectangle. On a 96 DPI screen
+                // the two agree, which is why it was invisible on one monitor.
+                let rect = target.full_rect_scaled(
                     work_area,
                     self.core.default_workspace_padding,
                     self.core.default_container_padding,
+                    self.core.padding_scale(monitor),
                 );
                 push(handle(id), rect);
             }
@@ -1268,10 +1274,11 @@ impl WindowManager {
         };
 
         if let Some(container) = target.monocle_container() {
-            let rect = target.full_rect(
+            let rect = target.full_rect_scaled(
                 work_area,
                 self.core.default_workspace_padding,
                 self.core.default_container_padding,
+                self.core.padding_scale(monitor),
             );
             return container
                 .focused_window_id()
@@ -1945,6 +1952,15 @@ impl WindowManager {
                 if self.core.is_paused {
                     self.visuals.clear();
                 } else {
+                    // Look at the desktop again before tiling it. While paused
+                    // the model only ever shrinks: a destroyed, minimized or
+                    // cloaked window still leaves it, because a window that is
+                    // gone must never stay in the model, but a window that
+                    // appears is dropped on the floor. So anything opened
+                    // during the pause, and anything that was minimized and
+                    // restored across it, was never managed again and sat
+                    // untiled over the layout for the rest of the session.
+                    self.adopt_newly_eligible();
                     self.retile();
                 }
                 self.notify(NotificationEvent::Pause {
@@ -3820,6 +3836,53 @@ mod tests {
         // file the user did not ask for.
         let named = std::path::PathBuf::from(r"D:\somewhere\keys");
         assert_eq!(hotkey_file_now(&named, &[]), named);
+    }
+
+    #[test]
+    fn a_window_opened_while_paused_is_managed_when_tiling_comes_back() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        wm.handle_command(Command::TogglePause);
+        assert!(wm.state().is_paused);
+
+        // The desktop carries on while Mochi is not arranging it.
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .push(window(2, "Opened while paused"));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(2));
+        assert!(
+            wm.state().window(WindowId(2)).is_none(),
+            "a paused daemon should not be tiling anything yet"
+        );
+
+        wm.handle_command(Command::TogglePause);
+
+        // Pause used to be one-way: windows still left the model while it was
+        // on, but nothing that appeared could get back in, so this window
+        // stayed untiled over the layout for the rest of the session.
+        assert!(
+            wm.state().window(WindowId(2)).is_some(),
+            "the window opened during the pause was never picked up"
+        );
+    }
+
+    #[test]
+    fn a_shell_class_with_a_version_suffix_is_still_the_shell() {
+        use crate::platform::types::{Unmanageable, is_manageable};
+        for class in [
+            "XamlExplorerHostIslandWindow_WASDK",
+            "TopLevelWindowForOverflowXamlIsland",
+            "Windows.UI.Composition.DesktopWindowContentBridge_1234",
+        ] {
+            let mut w = window(1, "Shell surface");
+            w.class = class.into();
+            assert_eq!(
+                is_manageable(&w),
+                Err(Unmanageable::ShellClass),
+                "{class} was managed like an ordinary window"
+            );
+        }
     }
 
     #[test]
