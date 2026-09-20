@@ -5,11 +5,11 @@ The daemon. One thread owns all state; everything else is a producer on a single
 
 ```
 main.rs          argument parsing, startup order, shutdown order, Ctrl-C
-cli.rs           --dry-run, --config, --manage-class
+cli.rs           --dry-run, --config, --hotkeys, --no-hotkeys, --manage-class
 logging.rs       stderr (RUST_LOG, default info) + %LOCALAPPDATA%\mochi\mochi.log, daily rotation
 single_instance.rs   named mutex Local\mochi-single-instance
 safety.rs        panic hook, RestoreGuard, the restore hook the daemon installs
-config.rs        config path resolution, reading mochi.json plus applications.json, quickstart stub, file watcher
+config.rs        path resolution for mochi.json and the hotkey file, reading them plus applications.json, quickstart stub, file watcher
 state.rs         the session facts, Settings, and snapshot(), the JSON `mochic state` prints
 wm.rs            the event loop, the mochi-core model, command handling, Changes to Win32
 
@@ -26,6 +26,7 @@ events/
   winevent.rs    SetWinEventHook on its own thread with a message loop
   message_window.rs  hidden top-level window: display, work area, DPI, session, power
   mouse.rs       focus-follows-mouse, polling by default, WH_MOUSE_LL behind `mouse-hook`
+  hotkey.rs      WH_KEYBOARD_LL on its own thread: the bindings, the gate, the shell spawn
 
 ipc/
   mod.rs
@@ -90,9 +91,9 @@ Every command in `docs/cli.md` reaches the model. `border`, `border-width`,
 `animation`, `animation-duration`, `animation-style` and `animation-fps` all
 show up in `mochic state` under `settings`, and the *configuration file* keys
 of the same name are drawn by [`visuals`](src/visuals.rs): borders, unfocused
-transparency and move/resize animation. The individual CLI commands still only
-update `settings`; a live change needs `mochic reload-configuration` (or a
-watched edit to `mochi.json`) to reach the screen. There is no stackbar and
+transparency and move/resize animation. Each of those commands takes effect
+where it lands: it writes the live configuration, hands it back to the managers
+and redraws the workspace, with no reload in between. There is no stackbar and
 `visuals` never builds one: Mochi draws borders and nothing else, on purpose.
 
 `visuals` owns an optional `mochi-render` `BorderManager`, `TransparencyManager`
@@ -158,6 +159,37 @@ the daemon under test and every count assertion drifts.
 Each test writes `RUST_LOG=debug` to `%TEMP%\mochi-e2e\mochi-*.log` and names
 that file in its failure message. Every step is reported on its own line, so one
 run tells you about all of them rather than stopping at the first surprise.
+
+## The hotkeys
+
+`events/hotkey.rs` owns a `WH_KEYBOARD_LL` hook on its own thread and matches
+every key press against the [`mochi-hotkey`](../mochi-hotkey) bindings the
+daemon read from the hotkey file. A match is swallowed, its release with it, and
+sent to the loop as `Event::Hotkey`; everything else goes straight on.
+
+Two rules the hook lives by. The callback runs inside the raw input path for
+every key on the desktop, so it does one hash lookup and one non-blocking send
+and nothing else: Windows removes a hook whose callback overruns
+`LowLevelHooksTimeout`. And nothing is ever withheld from the desktop that did
+not match a binding exactly, because the failure mode of getting that wrong is a
+keyboard that eats keys.
+
+The bindings live in thread-local storage on that thread and a reload is posted
+to it as a thread message, so there is nothing to lock. The one exception is the
+gate, which decides whether all bindings are live, only the one that leaves game
+mode, or none: that is a single atomic, because `mochic set-hotkeys disable` has
+to be in force by the time it answers, not once a thread got round to a message.
+
+```
+mochi --no-hotkeys                       # bind nothing, for a second daemon
+mochi --hotkeys %TEMP%\keys             # bind a scratch file instead
+mochic hotkeys                           # what it made of the file
+```
+
+The end-to-end test injects real key presses on F13 to F16. No keyboard has
+those keys and no layout produces them, which is what makes it safe to run on a
+desktop someone is sitting at; no test in this crate may ever press a key a
+person or another program could mean.
 
 ## Protocol
 
