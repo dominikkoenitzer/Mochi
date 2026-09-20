@@ -366,6 +366,17 @@ function Install-Mochi {
     # Whether the copies actually happened is the only thing that says the rest
     # of the run makes sense: -WhatIf is not the only way to answer no, a
     # declined -Confirm is the other one.
+    # A running daemon holds its own image open for reading only, so the copy
+    # below fails with a raw sharing violation. Since autostart exists, that is
+    # the *normal* upgrade path, and the error it produced said nothing about
+    # what to do. Refuse early and say it, rather than throwing halfway through
+    # and leaving one new binary beside one old one.
+    $running = @(Get-Process -Name mochi, mochic -ErrorAction SilentlyContinue)
+    if ($running.Count -gt 0) {
+        $names = ($running | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" }) -join ', '
+        throw "Mochi is running: $names. Stop it first with 'mochic stop', then run this again. Its files cannot be replaced while it is using them."
+    }
+
     $copied = $true
     foreach ($binary in $script:Binaries) {
         if ($PSCmdlet.ShouldProcess($binary, "copy to $script:BinDir")) {
@@ -375,8 +386,6 @@ function Install-Mochi {
             $copied = $false
         }
     }
-    Remove-TempWork
-
     Write-Step 'checking that the installed binaries run'
     if (-not $copied) {
         Write-Detail 'skipped, the binaries were not copied'
@@ -405,6 +414,10 @@ function Install-Mochi {
             Write-Detail "$line"
         }
     }
+    # Only now. Throwing the download away before the installed binaries had
+    # proven they run left a broken install in place with nothing to retry
+    # from, and autostart pointing straight at it.
+    Remove-TempWork
 
     if ($SkipPath) {
         Write-Step 'user PATH left alone (-SkipPath)'
