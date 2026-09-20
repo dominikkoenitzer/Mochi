@@ -1928,6 +1928,14 @@ fn round_trip() -> Vec<Command> {
             direction: CycleDirection::Next,
         },
         Command::Unstack,
+        // The whole workspace into one stack and back out again. Five of the
+        // six windows go off screen and have to come back, which is the shape
+        // of every bug that loses one.
+        Command::StackAll,
+        Command::UnstackAll,
+        // A no-op on a healthy desktop, which is the claim worth testing: the
+        // rescue must not drag anything onto the screen that belongs off it.
+        Command::RestoreWindows,
         Command::FocusWorkspace { index: 1 },
         Command::FocusWorkspace { index: 0 },
         Command::TogglePause,

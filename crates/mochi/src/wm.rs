@@ -208,6 +208,11 @@ impl Hidden {
         crate::recover::save(path, &entries);
     }
 
+    /// Every window Mochi currently has off screen.
+    pub fn handles(&self) -> Vec<Hwnd> {
+        self.windows.keys().copied().collect()
+    }
+
     /// True when Mochi is the reason the window is off screen.
     pub fn contains(&self, hwnd: Hwnd) -> bool {
         self.windows.contains_key(&hwnd)
@@ -1837,6 +1842,7 @@ impl WindowManager {
                 Err(e) => Response::error(e),
             },
             Command::Retile => self.run_op(CoreState::retile),
+            Command::RestoreWindows => self.restore_stranded_windows(),
 
             // --- focus and movement ------------------------------------
             Command::Focus { direction } => {
@@ -1883,6 +1889,8 @@ impl WindowManager {
             // --- stacks -------------------------------------------------
             Command::Stack { direction } => self.run_op(|core| core.stack(direction_of(direction))),
             Command::Unstack => self.run_op(CoreState::unstack),
+            Command::StackAll => self.run_op(CoreState::stack_all),
+            Command::UnstackAll => self.run_op(CoreState::unstack_all),
             Command::CycleStack { direction } => {
                 self.run_op(|core| core.cycle_stack(cycle_of(direction)))
             }
@@ -1913,6 +1921,15 @@ impl WindowManager {
                 self.run_op(|core| core.cycle_workspace(cycle_of(direction)))
             }
             Command::FocusLastWorkspace => self.run_op(CoreState::focus_last_workspace),
+            Command::FocusNamedWorkspace { name } => {
+                self.run_op(|core| core.focus_named_workspace(&name))
+            }
+            Command::MoveToNamedWorkspace { name } => {
+                self.run_op(|core| core.move_to_named_workspace(&name, true))
+            }
+            Command::SendToNamedWorkspace { name } => {
+                self.run_op(|core| core.move_to_named_workspace(&name, false))
+            }
             Command::WorkspacePadding {
                 monitor,
                 workspace,
@@ -1962,6 +1979,26 @@ impl WindowManager {
                 id,
                 matching_strategy,
             } => self.add_rule(identifier, id, matching_strategy, RuleDecision::Ignore),
+            Command::ManageRule {
+                identifier,
+                id,
+                matching_strategy,
+            } => self.add_rule(identifier, id, matching_strategy, RuleDecision::Tile),
+            Command::WorkspaceRule {
+                identifier,
+                id,
+                monitor,
+                workspace,
+                initial_only,
+                matching_strategy,
+            } => self.add_workspace_rule(
+                identifier,
+                id,
+                matching_strategy,
+                monitor,
+                workspace,
+                initial_only,
+            ),
 
             // --- subscriptions -----------------------------------------------
             Command::SubscribePipe { name } => match self.subscribers.add(&name) {
@@ -2174,11 +2211,145 @@ impl WindowManager {
             return Response::error(e);
         }
         match decision {
-            RuleDecision::Ignore => self.core.rules.ignore_rules.push(rule),
-            _ => self.core.rules.floating_applications.push(rule),
+            RuleDecision::Ignore => {
+                // Into both lists, exactly as the configuration file does it.
+                // A rule the user types at their own keyboard carries the same
+                // authority as one they wrote in their own file, so a manage
+                // rule out of a community list cannot cancel it.
+                self.core.rules.ignore_rules.push(rule.clone());
+                self.core.rules.own_ignore_rules.push(rule);
+            }
+            RuleDecision::Float => self.core.rules.floating_applications.push(rule),
+            RuleDecision::Tile => self.core.rules.manage_rules.push(rule),
         }
         // A rule that arrives after the window it describes has to catch up.
         self.reapply_rules();
+        // And a manage rule is about windows that are not in the model at all,
+        // which is the one case re-asking the model cannot reach.
+        if decision == RuleDecision::Tile {
+            self.adopt_newly_eligible();
+        }
+        Response::Ok
+    }
+
+    /// Takes over every window on the desktop that the rules now allow and the
+    /// model does not already hold.
+    ///
+    /// Only a `manage_rules` entry can turn a window Mochi was skipping into
+    /// one it manages, so this is the other half of adding one: without it the
+    /// rule would take effect on the application's *next* window and leave the
+    /// one the user was looking at untiled.
+    fn adopt_newly_eligible(&mut self) {
+        let Ok(windows) = self.platform.windows() else {
+            tracing::error!("could not enumerate the windows, adopting nothing");
+            return;
+        };
+        for info in windows {
+            if self.core.window(window_id(info.hwnd)).is_some() {
+                continue;
+            }
+            if !self.is_candidate(&info) {
+                continue;
+            }
+            self.manage(&info);
+        }
+    }
+
+    /// Adds a `workspace_rules` entry for the rest of this session.
+    ///
+    /// Not written to the configuration file. Everything `mochic` sets is
+    /// session state that a reload replaces with the file, which is what makes
+    /// the file the source of truth and a command a thing you can try out.
+    fn add_workspace_rule(
+        &mut self,
+        identifier: mochi_client::RuleIdentifier,
+        id: String,
+        strategy: mochi_client::MatchingStrategy,
+        monitor: usize,
+        workspace: usize,
+        initial_only: bool,
+    ) -> Response {
+        let rule = MatchingRule::simple(identifier_of(identifier), id, strategy_of(strategy));
+        if let Err(e) = rule.validate() {
+            return Response::error(e);
+        }
+        // A rule pointing at a screen that is not attached would silently send
+        // windows nowhere, and the mistake would only show up as a window that
+        // never opens where it was told to.
+        if monitor >= self.core.monitors().len() {
+            return Response::error(mochi_core::Error::MonitorNotFound(monitor));
+        }
+        if workspace >= mochi_core::MAX_WORKSPACES {
+            return Response::error(mochi_core::Error::WorkspaceIndexOutOfRange(workspace));
+        }
+        // Workspaces exist on demand everywhere else, and routing skips a rule
+        // whose destination is not there yet. Without this the command would
+        // be accepted, do nothing, and give no hint why.
+        if let Some(monitor) = self.core.monitors_mut().get_mut(monitor) {
+            monitor.ensure_workspaces(workspace + 1);
+        }
+        self.workspace_rules.push(WorkspaceRule {
+            monitor,
+            workspace,
+            rule,
+            initial_only,
+        });
+        Response::Ok
+    }
+
+    /// Puts back every window that is off screen with nothing in the model to
+    /// explain it.
+    ///
+    /// The escape hatch for the one failure that cannot be recovered from
+    /// inside Windows: a window Mochi hid and then stopped tracking is
+    /// invisible, out of Alt-Tab and unreachable, and no amount of clicking
+    /// brings it back. A blunt "show everything" would work, but it would also
+    /// drag every window on every hidden workspace onto the screen, so this
+    /// compares the hiding record against the model and only touches the
+    /// windows the model does not account for.
+    fn restore_stranded_windows(&mut self) -> Response {
+        let visible: std::collections::BTreeSet<_> =
+            self.core.visible_window_ids().into_iter().collect();
+        let accounted: std::collections::BTreeSet<Hwnd> = self
+            .core
+            .all_window_ids()
+            .filter(|id| !visible.contains(id))
+            .map(handle)
+            .collect();
+
+        let stranded: Vec<Hwnd> = {
+            let Ok(hidden) = self.hidden.lock() else {
+                return Response::error("the hiding record is unreadable");
+            };
+            hidden
+                .handles()
+                .into_iter()
+                .filter(|hwnd| !accounted.contains(hwnd))
+                .collect()
+        };
+
+        if stranded.is_empty() {
+            tracing::info!("no window is off screen without a reason");
+            return Response::Ok;
+        }
+
+        let mut given_back = 0;
+        for hwnd in stranded {
+            let behaviour = match self.hidden.lock() {
+                Ok(mut hidden) => hidden.show(hwnd),
+                Err(_) => None,
+            };
+            let result = match behaviour {
+                Some(HidingBehaviour::Cloak) | None => self.platform.set_cloaked(hwnd, false),
+                Some(HidingBehaviour::Minimize) => self.platform.show(hwnd, ShowState::Restore),
+                Some(HidingBehaviour::Hide) => self.platform.show(hwnd, ShowState::ShowNoActivate),
+            };
+            match result {
+                Ok(()) => given_back += 1,
+                Err(e) => tracing::error!(%hwnd, error = %e, "could not give a window back"),
+            }
+        }
+        tracing::warn!(count = given_back, "gave stranded windows back");
         Response::Ok
     }
 
@@ -3417,6 +3588,152 @@ mod tests {
         });
         assert_eq!(response, Response::Ok);
         assert_eq!(wm.state().all_window_ids().count(), 0);
+    }
+
+    #[test]
+    fn a_manage_rule_added_at_runtime_adopts_the_window_it_describes() {
+        // A tool window: skipped by the heuristics, and skipped for a reason a
+        // manage rule is allowed to overrule.
+        let mut tool = window(3, "The palette");
+        tool.exe = "Palette.exe".into();
+        tool.ex_style = crate::platform::types::ex_style::WS_EX_TOOLWINDOW;
+
+        let (mut wm, _) = manager(vec![window(1, "Editor"), tool]);
+        assert_eq!(wm.state().all_window_ids().count(), 1, "skipped at startup");
+
+        let (response, _) = wm.handle_command(Command::ManageRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "Palette.exe".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert_eq!(response, Response::Ok);
+
+        // The window that was already on the desktop, not merely the next one
+        // the application opens.
+        assert_eq!(wm.state().all_window_ids().count(), 2);
+        assert!(wm.state().window(WindowId(3)).is_some());
+    }
+
+    #[test]
+    fn a_manage_rule_is_not_quietly_filed_as_a_float_rule() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        wm.handle_command(Command::ManageRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "Palette.exe".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert_eq!(wm.state().rules.manage_rules.len(), 1);
+        assert!(
+            wm.state().rules.floating_applications.is_empty(),
+            "a manage rule that lands in the floating list would float every              window it was meant to rescue"
+        );
+    }
+
+    #[test]
+    fn an_ignore_rule_typed_at_the_keyboard_outranks_a_later_manage_rule() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.handle_command(Command::IgnoreRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "Code.exe".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        wm.handle_command(Command::ManageRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "Code.exe".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        // The user's own word is the last one, whichever order the two arrive
+        // in. Otherwise a rule file could cancel what they typed themselves.
+        assert_eq!(wm.state().all_window_ids().count(), 0);
+    }
+
+    #[test]
+    fn a_workspace_rule_pointed_at_a_screen_that_is_not_there_is_refused() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        let (response, _) = wm.handle_command(Command::WorkspaceRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "Code.exe".into(),
+            monitor: 4,
+            workspace: 0,
+            initial_only: false,
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert!(
+            response.error_message().is_some(),
+            "a rule that routes nowhere would only show up as a window that              never opens where it was told to"
+        );
+        assert!(wm.workspace_rules.is_empty());
+    }
+
+    #[test]
+    fn a_workspace_rule_added_at_runtime_routes_the_next_window() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        let (response, _) = wm.handle_command(Command::WorkspaceRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "Mail.exe".into(),
+            monitor: 0,
+            workspace: 3,
+            initial_only: false,
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert_eq!(response, Response::Ok);
+
+        let mut mail = window(7, "Inbox");
+        mail.exe = "Mail.exe".into();
+        wm.manage(&mail);
+
+        assert_eq!(wm.state().workspace(0, 3).unwrap().containers().len(), 1);
+    }
+
+    #[test]
+    fn restore_windows_gives_back_a_window_nothing_accounts_for() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+
+        // A window off screen with no entry in the model to explain it: the
+        // shape of every bug that loses one, whatever the cause was.
+        wm.hidden
+            .lock()
+            .unwrap()
+            .hide(Hwnd(99), HidingBehaviour::Cloak);
+
+        let (response, _) = wm.handle_command(Command::RestoreWindows);
+        assert_eq!(response, Response::Ok);
+        assert!(
+            platform.cloaks.lock().unwrap().contains(&(Hwnd(99), false)),
+            "the stranded window was left off screen"
+        );
+        assert!(!wm.hidden.lock().unwrap().contains(Hwnd(99)));
+    }
+
+    #[test]
+    fn restore_windows_leaves_a_hidden_workspace_where_it_is() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        // Both windows are on workspace 0; moving to another workspace hides
+        // them legitimately, and the record says so.
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert!(wm.hidden.lock().unwrap().contains(Hwnd(1)));
+
+        let before = platform.cloaks.lock().unwrap().len();
+        let (response, _) = wm.handle_command(Command::RestoreWindows);
+        assert_eq!(response, Response::Ok);
+        assert_eq!(
+            platform.cloaks.lock().unwrap().len(),
+            before,
+            "a rescue that drags every hidden workspace back on screen is not              a rescue"
+        );
+        assert!(wm.hidden.lock().unwrap().contains(Hwnd(1)));
+    }
+
+    #[test]
+    fn stacking_the_whole_workspace_shows_one_window_and_unstacking_gives_them_back() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two"), window(3, "Three")]);
+        let (response, _) = wm.handle_command(Command::StackAll);
+        assert_eq!(response, Response::Ok);
+        assert_eq!(wm.state().workspace(0, 0).unwrap().containers().len(), 1);
+
+        let (response, _) = wm.handle_command(Command::UnstackAll);
+        assert_eq!(response, Response::Ok);
+        assert_eq!(wm.state().workspace(0, 0).unwrap().containers().len(), 3);
     }
 
     #[test]

@@ -257,9 +257,10 @@ Strategies: `Legacy`, `Equals`, `DoesNotEqual`, `StartsWith`, `DoesNotStartWith`
 `Legacy` treats the id as a regular expression when it contains regex
 characters and as an exact comparison otherwise. Prefer an explicit strategy.
 
-`mochic float-rule` and `mochic ignore-rule` take only five of them:
-`equals`, `contains`, `starts-with`, `ends-with` and `regex`. A rule that needs
-`Legacy` or one of the four negative strategies has to be written here.
+The four rule commands, `mochic float-rule`, `ignore-rule`, `manage-rule` and
+`workspace-rule`, take only five of them: `equals`, `contains`, `starts-with`,
+`ends-with` and `regex`. A rule that needs `Legacy` or one of the four negative
+strategies has to be written here.
 
 A UWP window is hosted by `ApplicationFrameHost.exe`, which would make every
 UWP app the same program. Mochi reports the process the application itself runs

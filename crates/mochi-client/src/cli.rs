@@ -67,6 +67,8 @@ pub enum Cmd {
     ToggleGameMode,
     /// Re-read the configuration file and the hotkey file
     ReloadConfiguration,
+    /// Show every window Mochi is hiding, without stopping it
+    RestoreWindows,
     /// Recompute and re-apply every layout
     Retile,
 
@@ -176,6 +178,10 @@ pub enum Cmd {
     },
     /// Pull the focused window out of its stack
     Unstack,
+    /// Collapse the whole workspace into one stack
+    StackAll,
+    /// Give every stacked window its own container again
+    UnstackAll,
     /// Step through the windows of the focused stack
     CycleStack {
         /// next or previous
@@ -229,6 +235,21 @@ pub enum Cmd {
     },
     /// Go back to the previously focused workspace
     FocusLastWorkspace,
+    /// Focus a workspace by its configured name
+    FocusNamedWorkspace {
+        /// The name from the configuration
+        name: String,
+    },
+    /// Move the focused window to a named workspace and follow it
+    MoveToNamedWorkspace {
+        /// The name from the configuration
+        name: String,
+    },
+    /// Move the focused window to a named workspace and stay where you are
+    SendToNamedWorkspace {
+        /// The name from the configuration
+        name: String,
+    },
     /// Set the outer padding of one workspace
     WorkspacePadding {
         /// Zero-based monitor index
@@ -352,6 +373,35 @@ pub enum Cmd {
     },
 
     // --- rules ------------------------------------------------------------
+    /// Manage windows that match a rule, even ones Mochi would skip
+    ManageRule {
+        /// exe, class, title or path
+        #[arg(value_enum)]
+        identifier: RuleIdentifier,
+        /// Value to match against
+        id: String,
+        /// How to compare
+        #[arg(long, value_enum, default_value_t = MatchingStrategy::Equals)]
+        matching_strategy: MatchingStrategy,
+    },
+    /// Open windows that match a rule on a particular workspace
+    WorkspaceRule {
+        /// exe, class, title or path
+        #[arg(value_enum)]
+        identifier: RuleIdentifier,
+        /// Value to match against
+        id: String,
+        /// Zero-based monitor index
+        monitor: usize,
+        /// Zero-based workspace index on that monitor
+        workspace: usize,
+        /// Only route the first window the rule ever matches
+        #[arg(long)]
+        initial_only: bool,
+        /// How to compare
+        #[arg(long, value_enum, default_value_t = MatchingStrategy::Equals)]
+        matching_strategy: MatchingStrategy,
+    },
     /// Float windows that match a rule
     FloatRule {
         /// exe, class, title or path
@@ -397,6 +447,7 @@ impl Cmd {
             Cmd::TogglePause => Command::TogglePause,
             Cmd::ToggleGameMode => Command::ToggleGameMode,
             Cmd::ReloadConfiguration => Command::ReloadConfiguration,
+            Cmd::RestoreWindows => Command::RestoreWindows,
             Cmd::Retile => Command::Retile,
             Cmd::State => Command::State,
             Cmd::Query { target } => Command::Query { target: *target },
@@ -439,6 +490,8 @@ impl Cmd {
                 direction: *direction,
             },
             Cmd::Unstack => Command::Unstack,
+            Cmd::StackAll => Command::StackAll,
+            Cmd::UnstackAll => Command::UnstackAll,
             Cmd::CycleStack { direction } => Command::CycleStack {
                 direction: *direction,
             },
@@ -455,6 +508,15 @@ impl Cmd {
                 direction: *direction,
             },
             Cmd::FocusLastWorkspace => Command::FocusLastWorkspace,
+            Cmd::FocusNamedWorkspace { name } => {
+                Command::FocusNamedWorkspace { name: name.clone() }
+            }
+            Cmd::MoveToNamedWorkspace { name } => {
+                Command::MoveToNamedWorkspace { name: name.clone() }
+            }
+            Cmd::SendToNamedWorkspace { name } => {
+                Command::SendToNamedWorkspace { name: name.clone() }
+            }
             Cmd::WorkspacePadding {
                 monitor,
                 workspace,
@@ -504,6 +566,30 @@ impl Cmd {
             },
             Cmd::AnimationStyle { style } => Command::AnimationStyle { style: *style },
             Cmd::AnimationFps { fps } => Command::AnimationFps { fps: *fps },
+            Cmd::ManageRule {
+                identifier,
+                id,
+                matching_strategy,
+            } => Command::ManageRule {
+                identifier: *identifier,
+                id: id.clone(),
+                matching_strategy: *matching_strategy,
+            },
+            Cmd::WorkspaceRule {
+                identifier,
+                id,
+                monitor,
+                workspace,
+                initial_only,
+                matching_strategy,
+            } => Command::WorkspaceRule {
+                identifier: *identifier,
+                id: id.clone(),
+                monitor: *monitor,
+                workspace: *workspace,
+                initial_only: *initial_only,
+                matching_strategy: *matching_strategy,
+            },
             Cmd::FloatRule {
                 identifier,
                 id,

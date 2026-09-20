@@ -21,6 +21,7 @@ The groups below follow the order of the hotkey file.
 | `focus-monitor` | index | Focus a monitor by zero based index. |
 | `focus-workspace` | index | Focus a workspace of the current monitor by zero based index. |
 | `focus-last-workspace` | none | Go back to the workspace focused before this one. |
+| `focus-named-workspace` | name | Focus the workspace with that `name` in `mochi.json`, on whichever monitor it is. The search starts at the screen you are looking at, so a name used on both resolves to the near one. Case does not matter. |
 | `cycle-focus` | `next` \| `previous` | Step the focus one container along the ring. It goes by position rather than by geometry, so it is the one that still makes sense on a layout where "left" is ambiguous. |
 | `promote-focus` | none | Focus the first window of the workspace, the one most layouts give the biggest tile. Moves nothing; `promote` is the half that does. |
 | `cycle-monitor` | `next` \| `previous` | Step through the monitors. |
@@ -35,11 +36,15 @@ The groups below follow the order of the hotkey file.
 | `cycle-move` | `next` \| `previous` | Swap the focused window with its neighbour in the ring, by position rather than by geometry. The counterpart to `cycle-focus`. |
 | `move-to-workspace` | index | Move the focused window to a workspace and follow it. |
 | `send-to-workspace` | index | Move the focused window to a workspace and stay where you are. The same command without the following, which is often exactly what you want: park something and carry on. |
+| `move-to-named-workspace` | name | Move the focused window to the workspace with that name and follow it. |
+| `send-to-named-workspace` | name | Move the focused window to the workspace with that name and stay where you are. |
 | `move-to-monitor` | index | Move the focused window to a monitor and follow it. |
 | `send-to-monitor` | index | Move the focused window to a monitor and stay where you are. |
 | `promote` | none | Swap the focused window with the first window of the workspace. |
 | `stack` | `left` \| `right` \| `up` \| `down` | Stack the focused window onto the neighbour in that direction. |
 | `unstack` | none | Pull the focused window out of its stack. |
+| `stack-all` | none | Collapse the whole workspace into one stack, keeping the focused window in front. Floating windows are left alone. |
+| `unstack-all` | none | Give every stacked window its own container again, in the order they were stacked. The window you were looking at keeps the focus. |
 
 ## Resize
 
@@ -91,6 +96,7 @@ The groups below follow the order of the hotkey file.
 | `toggle-pause` | none | Stop and resume management without exiting. |
 | `retile` | none | Recompute and apply every layout. |
 | `reload-configuration` | none | Re-read `mochi.json` and the hotkey file. |
+| `restore-windows` | none | Put back every window that is off screen with nothing in the daemon state to explain it. The escape hatch for a window that has gone invisible and unreachable: windows that belong to a hidden workspace are left where they are, so this is safe to run at any time. |
 
 ## Hotkeys
 
@@ -123,10 +129,13 @@ in [hotkeys.md](hotkeys.md).
 | `animation-style` | easing style | Easing curve, kebab-case, for example `ease-out-quad`. |
 | `animation-fps` | fps | Frames per second while animating. |
 | `float-rule` | `exe` \| `class` \| `title` \| `path`, id, [`--matching-strategy`] | Add a rule that floats matching windows. |
-| `ignore-rule` | `exe` \| `class` \| `title` \| `path`, id, [`--matching-strategy`] | Add a rule that ignores matching windows. |
+| `ignore-rule` | `exe` \| `class` \| `title` \| `path`, id, [`--matching-strategy`] | Add a rule that ignores matching windows. An ignore rule you type here is your own word, so a later `manage-rule` cannot cancel it. |
+| `manage-rule` | `exe` \| `class` \| `title` \| `path`, id, [`--matching-strategy`] | Add a rule that manages matching windows Mochi would otherwise skip, and adopt the ones already on screen. It can only overrule the soft reasons for skipping a window, never the ones that describe something nothing could tile. |
+| `workspace-rule` | `exe` \| `class` \| `title` \| `path`, id, monitor, workspace, [`--initial-only`], [`--matching-strategy`] | Open matching windows on that monitor and workspace. The workspace is created if it is not there yet. `--initial-only` routes only the first window the rule ever matches, so a second window of the same application opens where you are. |
 
-Rules added with `float-rule` and `ignore-rule` live until the daemon stops or
-the configuration is reloaded. Put the permanent ones in `mochi.json`.
+Rules added with `float-rule`, `ignore-rule`, `manage-rule` and
+`workspace-rule` live until the daemon stops or the configuration is reloaded.
+Put the permanent ones in `mochi.json`.
 
 `--matching-strategy` takes `equals` (the default), `contains`, `starts-with`,
 `ends-with` or `regex`. The file knows ten strategies and the command line only

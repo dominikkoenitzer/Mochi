@@ -959,6 +959,81 @@ impl Workspace {
         true
     }
 
+    /// Collapses every tiled container into one stack, in the order the
+    /// containers are in.
+    ///
+    /// The focused window keeps the focus, which is what makes this usable as
+    /// a toggle: stack everything to read one window at a time, unstack to get
+    /// the tiling back, and the window you were looking at is still the one in
+    /// front.
+    ///
+    /// Floating windows are left alone. They are not in the container ring, so
+    /// collapsing the ring has nothing to say about them.
+    ///
+    /// Returns `false` when there is nothing to collapse.
+    pub fn stack_all(&mut self) -> bool {
+        if self.containers.len() < 2 {
+            return false;
+        }
+        let focused = self.focused_window_id();
+
+        let mut windows = Vec::new();
+        for container in self.containers.iter_mut() {
+            windows.append(&mut container.drain());
+        }
+        let mut stack = Container::new();
+        for window in windows {
+            stack.add_window(window);
+        }
+        if let Some(id) = focused {
+            stack.focus_window(id);
+        }
+
+        self.containers.clear();
+        self.containers.push(stack);
+        self.containers.focus(0);
+        self.resize_dimensions.clear();
+        self.resize_dimensions.resize(1, None);
+        self.focus_is_floating = false;
+        true
+    }
+
+    /// Gives every window in every stack a container of its own.
+    ///
+    /// The reverse of [`Workspace::stack_all`], and the way out of a workspace
+    /// somebody stacked by hand one window at a time. Order is preserved, so a
+    /// stack of three becomes three neighbouring containers in the order they
+    /// were stacked.
+    ///
+    /// Returns `false` when no container holds more than one window.
+    pub fn unstack_all(&mut self) -> bool {
+        if !self.containers.iter().any(Container::is_stack) {
+            return false;
+        }
+        let focused = self.focused_window_id();
+
+        let mut windows = Vec::new();
+        for container in self.containers.iter_mut() {
+            windows.append(&mut container.drain());
+        }
+
+        self.containers.clear();
+        self.resize_dimensions.clear();
+        for window in windows {
+            self.containers.push(Container::from_window(window));
+        }
+        self.resize_dimensions.resize(self.containers.len(), None);
+
+        // The focus follows the window, not the position: the window that was
+        // on top of a stack is somewhere in the middle of the ring now.
+        let idx = focused
+            .and_then(|id| self.containers.position(|c| c.contains(id)))
+            .unwrap_or(0);
+        self.containers.focus(idx);
+        self.focus_is_floating = false;
+        true
+    }
+
     /// Moves the focused window into the container at `target`, stacking it on
     /// top.
     ///
