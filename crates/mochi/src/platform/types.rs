@@ -357,6 +357,18 @@ pub fn is_manageable_with(w: &WindowInfo, allow_tool_window: bool) -> Result<(),
     {
         return Err(Unmanageable::ShellClass);
     }
+    // The families. The list above is exact spellings; these carry a suffix
+    // that changes between Windows releases, which is the whole reason the
+    // prefix list exists. It was declared with that explanation and never
+    // read, so `XamlExplorerHostIslandWindow_WASDK` — alive on this machine
+    // next to the plain spelling — and the Windows 11 notification overflow
+    // were managed like ordinary windows: tiled, and hidden on a workspace
+    // switch.
+    if SHELL_CLASS_PREFIXES.iter().any(|prefix| {
+        w.class.len() >= prefix.len() && w.class[..prefix.len()].eq_ignore_ascii_case(prefix)
+    }) {
+        return Err(Unmanageable::ShellClass);
+    }
     if SHELL_EXES.iter().any(|e| e.eq_ignore_ascii_case(&w.exe)) {
         return Err(Unmanageable::ShellProcess);
     }
