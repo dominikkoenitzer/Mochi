@@ -66,9 +66,10 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// round of `WM_CLOSE`, and a second round for a window that missed the first.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The smallest a test window lets a layout make it, in physical pixels. Small
-/// on purpose: a test window that fights the tiler hides the tiler's mistakes.
-/// `SpawnOptions::min_size` is how a test asks for an application that does.
+/// The minimum a spawn that did not ask for one carries, in physical pixels.
+/// It is never enforced: a test window that fights the tiler would correct the
+/// very thing a layout test measures. `SpawnOptions::min_size` is how a test
+/// asks for an application that does fight back.
 const DEFAULT_MIN_SIZE: (i32, i32) = (120, 80);
 
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
@@ -111,9 +112,11 @@ pub struct SpawnOptions {
     /// a known rect instead of from wherever the stagger landed.
     pub position: Option<(i32, i32)>,
     /// Minimum track size in physical pixels, answered on `WM_GETMINMAXINFO`.
-    /// `None` keeps the default 120x80, which lets a layout make the window as
-    /// small as it likes. `Some` simulates an application that refuses to go
-    /// below a size, which is the case a tiler gets wrong.
+    /// `None` answers zero, so the window takes every size it is given down to
+    /// the floor the Windows frame itself keeps, and a layout that collapses a
+    /// tile stays visible in the rect a test reads back. `Some` simulates an
+    /// application that refuses to go below a size, which is the case a tiler
+    /// gets wrong.
     pub min_size: Option<(i32, i32)>,
     /// Create each window as an owned popup: a hidden owner window of the class
     /// `MochiTestOwnerWindow`, and the visible window owned by it. The usual
@@ -660,8 +663,18 @@ unsafe fn create_window(spec: &WindowSpec) -> Result<HWND> {
             WS_OVERLAPPEDWINDOW,
             rect.left,
             rect.top,
-            rect.width().max(spec.min_size.0),
-            rect.height().max(spec.min_size.1),
+            // A window that defends a minimum is not created below it; one
+            // that does not is created at exactly the size it was asked for.
+            if spec.enforce_min {
+                rect.width().max(spec.min_size.0)
+            } else {
+                rect.width()
+            },
+            if spec.enforce_min {
+                rect.height().max(spec.min_size.1)
+            } else {
+                rect.height()
+            },
             // An owner turns this into an owned popup, which the usual
             // manageability rules skip.
             owner,
@@ -753,11 +766,12 @@ unsafe extern "system" fn window_proc(
                 paint(hwnd);
                 LRESULT(0)
             }
-            // `WM_GETMINMAXINFO` is only consulted while the *user* drags a
-            // border; `SetWindowPos`, which is the only way a tiling manager
-            // ever resizes anything, goes straight past it. So a window that
-            // was spawned with a minimum size defends it here, which is what a
-            // real application with a minimum size does.
+            // `SetWindowPos`, the call a tiling manager makes, is clamped to
+            // the `ptMinTrackSize` answered on `WM_GETMINMAXINFO` just as a
+            // user's border drag is, so that is where the minimum is really
+            // enforced. This clamp only covers the sizing paths that never ask,
+            // and it is deliberately behind `enforce_min`: a window spawned
+            // without a minimum takes whatever size it is given.
             WM_WINDOWPOSCHANGING => {
                 let result = DefWindowProcW(hwnd, message, wparam, lparam);
                 let pos = lparam.0 as *mut WINDOWPOS;
@@ -794,11 +808,16 @@ unsafe extern "system" fn window_proc(
                 let result = DefWindowProcW(hwnd, message, wparam, lparam);
                 let info = lparam.0 as *mut MINMAXINFO;
                 if !info.is_null() {
-                    // By default a layout may make these windows as small as it
-                    // likes: a test window fighting the tiler would only hide
-                    // the tiler's own mistakes. `SpawnOptions::min_size` is how
-                    // a test asks for an application that does fight back.
-                    let (x, y) = state_of(hwnd).map_or(DEFAULT_MIN_SIZE, |s| s.min_size);
+                    // A layout may make these windows as small as it likes,
+                    // zero pixels included: a test window fighting the tiler
+                    // would correct the very thing the test is measuring, and
+                    // `DefWindowProc` answers with the system minimum track
+                    // size, which is well over a hundred pixels wide. Only a
+                    // spawn that asked for `SpawnOptions::min_size` gets an
+                    // application that fights back.
+                    let (x, y) = state_of(hwnd)
+                        .filter(|state| state.enforce_min)
+                        .map_or((0, 0), |state| state.min_size);
                     (*info).ptMinTrackSize = POINT { x, y };
                 }
                 result

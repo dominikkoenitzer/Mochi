@@ -35,7 +35,16 @@ pub struct Monitor {
     pub name: String,
     /// The GDI device name, for example `\\.\DISPLAY1`.
     pub device: String,
-    /// The stable device id used by `display_index_preferences`.
+    /// The display's model name, from `EnumDisplayDevicesW`'s `DeviceString`.
+    ///
+    /// This is the identifier `display_index_preferences` pins a `monitors`
+    /// entry to, and the first one [`State::reconcile_monitors`] recognises a
+    /// display by. It is stable across a reboot, a cable swap and a
+    /// `DisplayPort` renegotiation, but it is a model name such as `Odyssey G8`
+    /// or `Generic PnP Monitor`, never a serial number, so two panels of the
+    /// same model carry the same string and nothing here can tell them apart.
+    ///
+    /// [`State::reconcile_monitors`]: crate::model::State::reconcile_monitors
     pub device_id: String,
     /// The full display rectangle in virtual desktop coordinates.
     pub size: Rect,

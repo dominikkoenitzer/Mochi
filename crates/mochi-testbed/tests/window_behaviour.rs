@@ -335,3 +335,61 @@ fn a_window_with_a_menu_bar_spawns_like_any_other_and_starts_outside_menu_mode()
         "a handle that is not a window cannot be in a menu"
     );
 }
+
+#[test]
+fn a_window_without_a_minimum_takes_every_size_it_is_given() {
+    if !desktop_available() {
+        return;
+    }
+
+    let work = mochi_testbed::monitor_at(0).expect("monitor 0").work_area;
+    let corner = (work.left + 64, work.top + 64);
+    let batch = TestWindows::spawn_with(&SpawnOptions {
+        position: Some(corner),
+        size: Some((700, 560)),
+        ..SpawnOptions::new(1, 0)
+    })
+    .expect("one plain test window");
+    let hwnd = batch.handles()[0];
+
+    // Set a size and read the rect back until two reads agree, so what is
+    // asserted is where the window stopped.
+    let squeeze = |width: i32, height: i32| -> Rect {
+        let asked = Rect::from_size(corner.0, corner.1, width, height);
+        mochi_testbed::set_rect(hwnd, asked).expect("set_rect");
+        let deadline = std::time::Instant::now() + DEADLINE;
+        let mut last = mochi_testbed::window_rect(hwnd).expect("window rect");
+        loop {
+            std::thread::sleep(Duration::from_millis(60));
+            let now = mochi_testbed::window_rect(hwnd).expect("window rect");
+            if now == last {
+                return now;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "asked {width}x{height}: the rect never settled, last {now}"
+            );
+            last = now;
+        }
+    };
+
+    // Asked for nothing at all, a window shrinks until only the frame Windows
+    // draws around it is left. That floor belongs to the frame, not to the
+    // testbed: it has to be smaller than the 120x80 a spawn carries but never
+    // enforces, or a collapsed tile would read back as a plausible size and
+    // every layout assertion after it would be measuring the harness.
+    let floor = squeeze(0, 0);
+    assert!(
+        floor.width() < 120 && floor.height() < 80,
+        "a window without a minimum still defends {floor}"
+    );
+
+    for (width, height) in [(400, 300), (200, 150), (100, 60), (40, 30), (1, 1)] {
+        let got = squeeze(width, height);
+        assert_eq!(
+            (got.width(), got.height()),
+            (width.max(floor.width()), height.max(floor.height())),
+            "asked {width}x{height}, got {got}, frame floor {floor}"
+        );
+    }
+}

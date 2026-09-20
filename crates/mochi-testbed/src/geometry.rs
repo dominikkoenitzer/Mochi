@@ -90,11 +90,15 @@ impl Rect {
         self.intersection(other).is_some()
     }
 
-    /// True when `other` lies entirely inside `self`. Empty rectangles are inside.
+    /// True when `other` lies entirely inside `self`.
+    ///
+    /// An empty rectangle is inside nothing. A window a layout collapsed to no
+    /// pixels is not tiled correctly, and a rectangle that is vacuously inside
+    /// every area would make the assertion that checks for it meaningless.
     #[must_use]
     pub fn contains(&self, other: &Self) -> bool {
         if other.is_empty() {
-            return true;
+            return false;
         }
         other.left >= self.left
             && other.top >= self.top
@@ -188,7 +192,17 @@ mod tests {
         let area = Rect::new(0, 0, 100, 100);
         assert!(area.contains(&Rect::new(0, 0, 100, 100)));
         assert!(!area.contains(&Rect::new(0, 0, 101, 100)));
-        assert!(area.contains(&Rect::default()));
+    }
+
+    #[test]
+    fn an_empty_rect_is_inside_nothing() {
+        // A window a layout collapsed, and one Windows parked off screen. Both
+        // cover no pixel, so neither is inside the area it was meant to tile.
+        let area = Rect::new(0, 0, 3840, 2160);
+        assert!(!area.contains(&Rect::default()));
+        assert!(!area.contains(&Rect::new(-32_000, -32_000, -32_000, -32_000)));
+        assert!(!area.contains(&Rect::new(100, 100, 100, 180)));
+        assert!(!area.contains(&Rect::new(100, 100, 80, 180)));
     }
 
     #[test]

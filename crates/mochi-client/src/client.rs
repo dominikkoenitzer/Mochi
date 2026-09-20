@@ -2,6 +2,8 @@
 
 use std::io::BufReader;
 
+use windows::Win32::Storage::FileSystem::{SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT};
+
 use crate::protocol;
 use crate::{Command, Response};
 
@@ -62,12 +64,23 @@ pub fn is_running() -> bool {
 }
 
 /// Opens a duplex connection to a named pipe, retrying while all instances are busy.
+///
+/// The quality of service is pinned to `SECURITY_IDENTIFICATION`. Without
+/// `SECURITY_SQOS_PRESENT` Windows hands the pipe server a full impersonation
+/// token, so a process that squatted the pipe name before the daemon started
+/// could call `ImpersonateNamedPipeClient` and act as the user for as long as
+/// the connection lasts. `FILE_FLAG_FIRST_PIPE_INSTANCE` proves the name was
+/// free for the daemon; it does nothing for whoever connects.
 fn connect(pipe: &str) -> Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let sqos = (SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION).0;
     let deadline = std::time::Instant::now() + BUSY_RETRY;
     loop {
         match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(sqos)
             .open(pipe)
         {
             Ok(file) => return Ok(file),
@@ -95,6 +108,106 @@ mod tests {
     fn pipe_name_is_the_real_win32_spelling() {
         assert_eq!(PIPE_NAME, "\\\\.\\pipe\\mochi");
         assert!(PIPE_NAME.starts_with(PIPE_PREFIX));
+    }
+
+    /// A pipe server that tries to impersonate whoever connects to it, and
+    /// reports the impersonation level it managed to reach.
+    ///
+    /// This is what a process that squatted `\\.\pipe\mochi` before the daemon
+    /// started would do: `FILE_FLAG_FIRST_PIPE_INSTANCE` protects the daemon,
+    /// not the client, so the only thing standing between the squatter and the
+    /// user's token is the quality of service the client asks for.
+    #[test]
+    fn a_pipe_server_cannot_impersonate_the_client() {
+        use std::io::{Read, Write};
+        use std::os::windows::io::FromRawHandle;
+        use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+        use windows::Win32::Security::{
+            GetTokenInformation, RevertToSelf, SECURITY_IMPERSONATION_LEVEL,
+            SecurityIdentification, TOKEN_QUERY, TokenImpersonationLevel,
+        };
+        use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE,
+            PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+        use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+        use windows::core::HSTRING;
+
+        let pipe = format!(r"\\.\pipe\mochi-test-sqos-{}", std::process::id());
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (level_tx, level_rx) = std::sync::mpsc::channel::<i32>();
+
+        let squatter = {
+            let pipe = pipe.clone();
+            std::thread::spawn(move || {
+                let handle = unsafe {
+                    CreateNamedPipeW(
+                        &HSTRING::from(pipe.as_str()),
+                        PIPE_ACCESS_DUPLEX,
+                        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                        1,
+                        4096,
+                        4096,
+                        0,
+                        None,
+                    )
+                };
+                assert!(handle != INVALID_HANDLE_VALUE, "could not create {pipe}");
+                let mut server = unsafe { std::fs::File::from_raw_handle(handle.0) };
+                ready_tx.send(()).unwrap();
+
+                unsafe { ConnectNamedPipe(HANDLE(handle.0), None) }.ok();
+                // A local client can be impersonated straight after the
+                // connect, but reading first is what a real squatter would do.
+                let mut byte = [0u8; 1];
+                let _ = server.read(&mut byte);
+
+                let mut level = -1i32;
+                if unsafe { ImpersonateNamedPipeClient(HANDLE(handle.0)) }.is_ok() {
+                    let mut token = HANDLE::default();
+                    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }
+                        .is_ok()
+                    {
+                        let mut got = SECURITY_IMPERSONATION_LEVEL::default();
+                        let mut len = 0u32;
+                        if unsafe {
+                            GetTokenInformation(
+                                token,
+                                TokenImpersonationLevel,
+                                Some((&raw mut got).cast()),
+                                std::mem::size_of::<SECURITY_IMPERSONATION_LEVEL>() as u32,
+                                &mut len,
+                            )
+                        }
+                        .is_ok()
+                        {
+                            level = got.0;
+                        }
+                        let _ = unsafe { windows::Win32::Foundation::CloseHandle(token) };
+                    }
+                    let _ = unsafe { RevertToSelf() };
+                }
+                let _ = level_tx.send(level);
+            })
+        };
+
+        ready_rx.recv().unwrap();
+        let mut client = connect(&pipe).expect("the squatted pipe should accept a connection");
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        let level = level_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the squatter never reported an impersonation level");
+        drop(client);
+        squatter.join().unwrap();
+
+        assert!(
+            level <= SecurityIdentification.0,
+            "a pipe server reached impersonation level {level}; the client must ask for \
+             SECURITY_IDENTIFICATION so a squatted pipe can only read who we are, never act as us"
+        );
     }
 
     #[test]
