@@ -75,6 +75,60 @@ impl std::str::FromStr for Sizing {
     }
 }
 
+/// The smallest a tile may get, per axis.
+///
+/// One number cannot say this. A tiling user who wants a floor usually wants a
+/// *width* floor, so a column of text stays readable, and cares much less about
+/// height; collapsing the two into a single number either under-enforces the
+/// one they asked for or silently raises the one they did not. Every cut a
+/// layout makes divides exactly one axis, so every cut knows which of the two
+/// applies to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MinSize {
+    /// The narrowest a tile may be.
+    pub width: i32,
+    /// The shortest a tile may be.
+    pub height: i32,
+}
+
+impl MinSize {
+    /// The same floor on both axes.
+    #[must_use]
+    pub const fn square(size: i32) -> Self {
+        Self {
+            width: size,
+            height: size,
+        }
+    }
+
+    /// The floor that binds a cut along `axis`.
+    ///
+    /// A horizontal cut divides the area left to right, so what it constrains
+    /// is width.
+    #[must_use]
+    pub const fn along(self, axis: Axis) -> i32 {
+        match axis {
+            Axis::Horizontal => self.width,
+            Axis::Vertical => self.height,
+        }
+    }
+
+    /// Both floors at zero or above.
+    #[must_use]
+    pub const fn clamped(self) -> Self {
+        Self {
+            width: if self.width < 0 { 0 } else { self.width },
+            height: if self.height < 0 { 0 } else { self.height },
+        }
+    }
+}
+
+impl Default for MinSize {
+    fn default() -> Self {
+        Self::square(MIN_TILE_SIZE)
+    }
+}
+
 /// Which axes a layout is mirrored on.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, schemars::JsonSchema,
@@ -237,7 +291,7 @@ impl Layout {
             container_padding,
             flip,
             resize_dimensions,
-            MIN_TILE_SIZE,
+            MinSize::square(MIN_TILE_SIZE),
         )
     }
 
@@ -255,12 +309,12 @@ impl Layout {
         container_padding: i32,
         flip: Flip,
         resize_dimensions: &[Option<Rect>],
-        min_tile_size: i32,
+        min_tile_size: MinSize,
     ) -> Vec<Rect> {
         if len == 0 {
             return Vec::new();
         }
-        let min = min_tile_size.max(0);
+        let min = min_tile_size.clamped();
 
         let mut rects = match self {
             Self::Bsp => bsp::calculate(area, len, resize_dimensions, min),
@@ -329,17 +383,17 @@ impl std::str::FromStr for Layout {
     }
 }
 
-fn columns(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> {
+fn columns(area: Rect, len: usize, resize: &[Option<Rect>], min: MinSize) -> Vec<Rect> {
     let deltas = boundary_deltas(resize, 0, len, Axis::Horizontal);
-    let slices = divide(area.left, area.right, len, &deltas, min);
+    let slices = divide(area.left, area.right, len, &deltas, min.along(Axis::Horizontal));
     let mut rects = Vec::with_capacity(len);
     extend_with_rects(&mut rects, area, Axis::Horizontal, &slices);
     rects
 }
 
-fn rows(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> {
+fn rows(area: Rect, len: usize, resize: &[Option<Rect>], min: MinSize) -> Vec<Rect> {
     let deltas = boundary_deltas(resize, 0, len, Axis::Vertical);
-    let slices = divide(area.top, area.bottom, len, &deltas, min);
+    let slices = divide(area.top, area.bottom, len, &deltas, min.along(Axis::Vertical));
     let mut rects = Vec::with_capacity(len);
     extend_with_rects(&mut rects, area, Axis::Vertical, &slices);
     rects
@@ -355,7 +409,7 @@ fn main_and_stack(
     len: usize,
     resize: &[Option<Rect>],
     main_axis: Axis,
-    min: i32,
+    min: MinSize,
 ) -> Vec<Rect> {
     if len == 1 {
         return vec![area];
@@ -369,7 +423,7 @@ fn main_and_stack(
         area.end(main_axis),
         2,
         &[split_delta],
-        min,
+        min.along(main_axis),
     );
     let main = rect_from_slice(area, main_axis, halves[0].0, halves[0].1);
     let stack_area = rect_from_slice(area, main_axis, halves[1].0, halves[1].1);
@@ -381,7 +435,7 @@ fn main_and_stack(
         stack_area.end(stack_axis),
         len - 1,
         &stack_deltas,
-        min,
+        min.along(stack_axis),
     );
 
     let mut rects = Vec::with_capacity(len);
@@ -390,13 +444,13 @@ fn main_and_stack(
     rects
 }
 
-fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> {
+fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], min: MinSize) -> Vec<Rect> {
     match len {
         1 => vec![area],
         2 => {
             // Secondary on the left, primary on the right.
             let delta = boundary_delta(resize, 1, 0, Axis::Horizontal);
-            let slices = divide(area.left, area.right, 2, &[delta], min);
+            let slices = divide(area.left, area.right, 2, &[delta], min.width);
             vec![
                 rect_from_slice(area, Axis::Horizontal, slices[1].0, slices[1].1),
                 rect_from_slice(area, Axis::Horizontal, slices[0].0, slices[0].1),
@@ -413,7 +467,7 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<R
                 area.right,
                 &[1, 2, 1],
                 &[left_delta, right_delta],
-                min,
+                min.width,
             );
             let cell = |i: usize| rect_from_slice(area, Axis::Horizontal, slices[i].0, slices[i].1);
             let (secondary, primary, stack_area) = (cell(0), cell(1), cell(2));
@@ -425,7 +479,7 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<R
                 stack_area.bottom,
                 stack_len,
                 &stack_deltas,
-                min,
+                min.height,
             );
 
             let mut rects = Vec::with_capacity(len);
@@ -437,7 +491,7 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<R
     }
 }
 
-fn grid(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> {
+fn grid(area: Rect, len: usize, resize: &[Option<Rect>], min: MinSize) -> Vec<Rect> {
     let columns_count = grid_columns(len);
     let base = len / columns_count;
     let remainder = len % columns_count;
@@ -470,7 +524,7 @@ fn grid(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> 
             )
         })
         .collect();
-    let column_slices = divide(area.left, area.right, columns_count, &column_deltas, min);
+    let column_slices = divide(area.left, area.right, columns_count, &column_deltas, min.width);
     let column_rects = slices_to_rects(area, Axis::Horizontal, &column_slices);
 
     let mut rects = Vec::with_capacity(len);
@@ -483,7 +537,7 @@ fn grid(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> 
             column_rect.bottom,
             rows_in_column,
             &deltas,
-            min,
+            min.height,
         );
         extend_with_rects(&mut rects, column_rect, Axis::Vertical, &slices);
     }

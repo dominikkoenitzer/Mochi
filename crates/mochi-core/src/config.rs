@@ -390,6 +390,25 @@ pub struct Config {
     pub float_override: Option<bool>,
     /// How many pixels one `resize-axis` step moves a boundary.
     pub resize_delta: Option<i32>,
+    /// The width below which a tile is not allowed to shrink.
+    ///
+    /// In logical pixels, the same units as `default_workspace_padding` and
+    /// scaled the same way: the number in the file is the value at 100
+    /// percent, and it is multiplied by the scale factor of the monitor the
+    /// workspace lands on, so a floor of `300` is 450 physical pixels on a
+    /// display at 150 percent. Defaults to
+    /// [`MIN_TILE_SIZE`](crate::layout::MIN_TILE_SIZE), which is what every
+    /// layout used before this key existed.
+    ///
+    /// The layouts take one minimum per cut, not one per axis, so the floor
+    /// that binds on both axes is the larger of this and
+    /// `minimum_window_height`. A value too large for the screen is not an
+    /// error: the layouts scale a minimum that cannot fit back down, so the
+    /// tiles still cover the area exactly.
+    pub minimum_window_width: Option<i32>,
+    /// The height below which a tile is not allowed to shrink. The
+    /// counterpart of `minimum_window_width`, in the same units.
+    pub minimum_window_height: Option<i32>,
 
     /// Padding around a workspace that has none of its own.
     pub default_workspace_padding: Option<i32>,
@@ -579,6 +598,12 @@ impl Config {
         if let Some(value) = self.resize_delta {
             state.resize_delta = value;
         }
+        if let Some(value) = self.minimum_window_width {
+            state.minimum_window_width = value;
+        }
+        if let Some(value) = self.minimum_window_height {
+            state.minimum_window_height = value;
+        }
         if let Some(value) = self.default_workspace_padding {
             state.default_workspace_padding = value;
         }
@@ -741,6 +766,8 @@ pub fn json_schema() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::layout::MIN_TILE_SIZE;
 
     /// A verbatim copy of the config this crate has to keep working with.
     const REAL_CONFIG: &str = r##"{
@@ -1447,6 +1474,157 @@ mod tests {
 
         assert_eq!(first_workspace_name(&state, 0).as_deref(), Some("one"));
         assert_eq!(first_workspace_name(&state, 1).as_deref(), Some("two"));
+    }
+
+    /// A state with one 4K screen and one workspace holding `len` windows,
+    /// configured by `json`.
+    fn tiled(json: &str, layout: Layout, len: isize) -> (State, Rect) {
+        use crate::model::Window;
+
+        let config = Config::from_json(json).expect("the config parses");
+        let mut state = State::new();
+        state.add_monitor(Monitor::new(
+            1,
+            Rect::new(0, 0, 3840, 2160),
+            Rect::new(0, 0, 3840, 2160),
+        ));
+        state
+            .monitors_mut()
+            .get_mut(0)
+            .expect("the monitor is there")
+            .ensure_workspaces(1);
+        config.apply_to(&mut state);
+
+        let work_area = state.work_area_for(0, 0).expect("a work area");
+        let workspace_padding = state.default_workspace_padding;
+        let container_padding = state.default_container_padding;
+        let workspace = state.workspace_mut(0, 0).expect("the workspace");
+        workspace.layout = layout;
+        for id in 1..=len {
+            workspace.add_window(Window::new(id));
+        }
+        workspace.update_layout(work_area, workspace_padding, container_padding);
+        (state, work_area)
+    }
+
+    /// The tiles of the only workspace of `state`.
+    fn tiles(state: &State) -> Vec<Rect> {
+        state.workspace(0, 0).unwrap().latest_layout().to_vec()
+    }
+
+    #[test]
+    fn a_configured_minimum_is_the_floor_every_tile_keeps() {
+        // Twelve containers on a 4K screen: BSP squeezes the last of them down
+        // to 64x67, right onto the old hardcoded floor, which is what makes a
+        // configurable one worth having and this test worth reading.
+        const NO_PADDING: &str =
+            r#"{ "default_workspace_padding": 0, "default_container_padding": 0"#;
+        let (loose, _) = tiled(&format!("{NO_PADDING} }}"), Layout::Bsp, 12);
+        assert!(
+            tiles(&loose)
+                .iter()
+                .any(|rect| rect.width() < 300 || rect.height() < 300),
+            "without the key nothing is squeezed, so the floor proves nothing"
+        );
+
+        let (state, _) = tiled(
+            &format!(
+                "{NO_PADDING}, \"minimum_window_width\": 300, \"minimum_window_height\": 250 }}"
+            ),
+            Layout::Bsp,
+            12,
+        );
+        assert_eq!(state.minimum_window_width, 300);
+        assert_eq!(state.minimum_window_height, 250);
+        assert_eq!(
+            state.workspace(0, 0).unwrap().minimum_tile_size(),
+            crate::layout::MinSize {
+                width: 300,
+                height: 250
+            },
+            "each axis keeps its own floor"
+        );
+
+        for (idx, rect) in tiles(&state).iter().enumerate() {
+            assert!(
+                rect.width() >= 300 && rect.height() >= 250,
+                "tile {idx} is {}x{}, below the configured floor",
+                rect.width(),
+                rect.height()
+            );
+        }
+
+        // The two are genuinely independent. The proof is a tile that is
+        // shorter than the *width* floor: if one number bound both axes, the
+        // larger would have raised every height to 300 as well.
+        assert!(
+            tiles(&state).iter().any(|rect| rect.height() < 300),
+            "no tile is shorter than the width floor, so the two axes are not              independent and a height of 250 was silently raised to 300"
+        );
+    }
+
+    #[test]
+    fn a_config_without_the_minimum_tiles_exactly_as_it_always_did() {
+        // The layout the crate computed before the key existed, from the entry
+        // point that still hardcodes MIN_TILE_SIZE.
+        for layout in Layout::ALL {
+            for len in 1..=12_isize {
+                let (state, work_area) = tiled(r#"{}"#, layout, len);
+                let workspace = state.workspace(0, 0).unwrap();
+                assert_eq!(
+                    workspace.minimum_tile_size(),
+                    crate::layout::MinSize::square(MIN_TILE_SIZE)
+                );
+                let expected = layout.calculate(
+                    work_area.padded_clamped(state.default_workspace_padding),
+                    len as usize,
+                    state.default_container_padding,
+                    workspace.layout_flip,
+                    &workspace.resize_dimensions,
+                );
+                assert_eq!(tiles(&state), expected, "{layout} with {len} containers");
+            }
+        }
+    }
+
+    #[test]
+    fn a_minimum_larger_than_the_screen_still_tiles_the_area_exactly() {
+        // Absurd values are the user's to type. The layouts scale a minimum
+        // that cannot fit back down, so the worst this can do is give every
+        // tile an equal share, never a panic and never an inverted rectangle.
+        for minimum in [100_000, i32::MAX] {
+            let json = format!(
+                r#"{{ "default_workspace_padding": 0, "default_container_padding": 0,
+                      "minimum_window_width": {minimum}, "minimum_window_height": 1 }}"#
+            );
+            for layout in Layout::ALL {
+                for len in 1..=12_isize {
+                    let (state, _) = tiled(&json, layout, len);
+                    let rects = tiles(&state);
+                    assert_eq!(rects.len(), len as usize);
+                    let mut covered = 0_i64;
+                    for rect in &rects {
+                        assert!(
+                            rect.right >= rect.left && rect.bottom >= rect.top,
+                            "{layout} with {len} containers inverted a tile: {rect:?}"
+                        );
+                        assert!(
+                            rect.left >= 0
+                                && rect.top >= 0
+                                && rect.right <= 3840
+                                && rect.bottom <= 2160,
+                            "{layout} with {len} containers left the screen: {rect:?}"
+                        );
+                        covered += i64::from(rect.width()) * i64::from(rect.height());
+                    }
+                    assert_eq!(
+                        covered,
+                        3840 * 2160,
+                        "{layout} with {len} containers stopped tiling its area exactly"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -72,6 +72,18 @@ pub struct Workspace {
     pub workspace_padding: Option<i32>,
     /// Padding around each container. `None` uses the global default.
     pub container_padding: Option<i32>,
+    /// The width a tile of this workspace may never shrink below, in logical
+    /// pixels.
+    ///
+    /// Carried here because the layout is computed from the workspace. The
+    /// value is the global `minimum_window_width`, which
+    /// [`State::workspace_mut`](super::State::workspace_mut) stamps on every
+    /// time it hands a workspace out, so a workspace created on demand long
+    /// after the configuration was read still tiles to the configured floor.
+    pub minimum_window_width: i32,
+    /// The height a tile of this workspace may never shrink below, in logical
+    /// pixels. The counterpart of [`Workspace::minimum_window_width`].
+    pub minimum_window_height: i32,
     /// `false` turns tiling off for this workspace without unmanaging anything.
     pub tile: bool,
     /// `true` makes every new window float.
@@ -105,6 +117,8 @@ impl Default for Workspace {
             maximized_restore: None,
             workspace_padding: None,
             container_padding: None,
+            minimum_window_width: MIN_TILE_SIZE,
+            minimum_window_height: MIN_TILE_SIZE,
             tile: true,
             float_override: false,
             apply_window_based_work_area_offset: false,
@@ -411,6 +425,25 @@ impl Workspace {
             .padded_clamped(scale_padding(padding, scale))
     }
 
+    /// The floor a tile of this workspace may not shrink below, in logical
+    /// pixels, per axis.
+    ///
+    /// Every cut a layout makes divides exactly one axis, so each takes the
+    /// floor that belongs to it: a width of 300 and a height of 200 means no
+    /// tile narrower than 300 and none shorter than 200, rather than 300 on
+    /// both.
+    ///
+    /// An absurd value is not clamped here. The layouts scale a minimum that
+    /// cannot fit back down themselves, so a minimum larger than the screen
+    /// still tiles the area exactly instead of overflowing it.
+    #[must_use]
+    pub fn minimum_tile_size(&self) -> crate::layout::MinSize {
+        crate::layout::MinSize {
+            width: self.minimum_window_width,
+            height: self.minimum_window_height,
+        }
+    }
+
     /// Recomputes the tiled rectangles and stores them in `latest_layout`.
     ///
     /// Returns the new rectangles. A workspace with tiling turned off gets an
@@ -433,7 +466,9 @@ impl Workspace {
     ///
     /// Both paddings and the minimum tile size are logical pixel values, so
     /// they are multiplied by `scale` before the layout runs. A scale of 1.0
-    /// is exactly [`Workspace::update_layout`].
+    /// is exactly [`Workspace::update_layout`]. The minimum is
+    /// [`Workspace::minimum_tile_size`], which is
+    /// [`MIN_TILE_SIZE`] until a configuration says otherwise.
     pub fn update_layout_scaled(
         &mut self,
         work_area: Rect,
@@ -456,7 +491,13 @@ impl Workspace {
                 padding,
                 self.layout_flip,
                 &self.resize_dimensions,
-                scale_padding(MIN_TILE_SIZE, scale),
+                {
+                    let min = self.minimum_tile_size();
+                    crate::layout::MinSize {
+                        width: scale_padding(min.width, scale),
+                        height: scale_padding(min.height, scale),
+                    }
+                },
             );
             // Reusing the buffer keeps the per event path free of one free and
             // one allocation on every retile.

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::MAX_WORKSPACES;
 use crate::error::{Error, Result};
 use crate::geometry::{Direction, Offset, Rect, nearest_in_direction};
+use crate::layout::MIN_TILE_SIZE;
 use crate::rules::RuleSets;
 
 use super::monitor::Monitor;
@@ -104,6 +105,18 @@ pub struct State {
     pub default_container_padding: i32,
     /// How many pixels one `resize-axis` step moves a boundary.
     pub resize_delta: i32,
+    /// The width below which a tile is not allowed to shrink, in logical
+    /// pixels.
+    ///
+    /// The same units as [`State::default_workspace_padding`] and scaled the
+    /// same way: what this carries is the value at 100 percent, multiplied by
+    /// the monitor's scale factor while [`State::scale_padding_with_dpi`] is
+    /// on. Defaults to [`MIN_TILE_SIZE`], so a configuration that says nothing
+    /// tiles exactly as it always did.
+    pub minimum_window_width: i32,
+    /// The height below which a tile is not allowed to shrink, in logical
+    /// pixels. The counterpart of [`State::minimum_window_width`].
+    pub minimum_window_height: i32,
     /// A work area offset applied to every monitor without one of its own.
     pub work_area_offset: Option<Offset>,
     /// Make every new window float, everywhere.
@@ -136,6 +149,8 @@ impl Default for State {
             default_workspace_padding: 10,
             default_container_padding: 10,
             resize_delta: 50,
+            minimum_window_width: MIN_TILE_SIZE,
+            minimum_window_height: MIN_TILE_SIZE,
             work_area_offset: None,
             float_override: false,
             scale_padding_with_dpi: true,
@@ -207,15 +222,22 @@ impl State {
 
     /// The focused workspace of the focused monitor, mutably.
     ///
+    /// Carries the minimum tile size onto it first, the same as
+    /// [`State::workspace_mut`].
+    ///
     /// # Errors
     ///
     /// Returns an error when there is no focused monitor or it has no
     /// workspaces.
     pub fn focused_workspace_mut(&mut self) -> Result<&mut Workspace> {
         let monitor_idx = self.focused_monitor_idx();
-        self.focused_monitor_mut()?
+        let minimum = self.minimum_window_size();
+        let workspace = self
+            .focused_monitor_mut()?
             .focused_workspace_mut()
-            .ok_or(Error::NoFocusedWorkspace(monitor_idx))
+            .ok_or(Error::NoFocusedWorkspace(monitor_idx))?;
+        carry_minimum(workspace, minimum);
+        Ok(workspace)
     }
 
     /// The monitor and workspace indices that are focused right now.
@@ -391,18 +413,37 @@ impl State {
             .map_or(1.0, Monitor::scale_factor)
     }
 
+    /// The floor a tile is not allowed to shrink below, as width and height in
+    /// logical pixels.
+    ///
+    /// See [`State::minimum_window_width`] for the units.
+    #[must_use]
+    pub fn minimum_window_size(&self) -> (i32, i32) {
+        (self.minimum_window_width, self.minimum_window_height)
+    }
+
     /// A mutable borrow of one workspace.
+    ///
+    /// The minimum tile size is carried onto the workspace on the way out,
+    /// because the layout is computed from the workspace and this is where a
+    /// workspace is reached from the state. Doing it here and not once when
+    /// the configuration is read is what makes the floor hold for a workspace
+    /// that is created on demand, long after the file was parsed.
     ///
     /// # Errors
     ///
     /// Returns an error when either index is out of range.
     pub fn workspace_mut(&mut self, monitor: usize, workspace: usize) -> Result<&mut Workspace> {
-        self.monitors
+        let minimum = self.minimum_window_size();
+        let target = self
+            .monitors
             .get_mut(monitor)
             .ok_or(Error::MonitorNotFound(monitor))?
             .workspaces_mut()
             .get_mut(workspace)
-            .ok_or(Error::WorkspaceNotFound { monitor, workspace })
+            .ok_or(Error::WorkspaceNotFound { monitor, workspace })?;
+        carry_minimum(target, minimum);
+        Ok(target)
     }
 
     /// A borrow of one workspace.
@@ -418,6 +459,12 @@ impl State {
             .get(workspace)
             .ok_or(Error::WorkspaceNotFound { monitor, workspace })
     }
+}
+
+/// Copies the global minimum tile size onto a workspace.
+fn carry_minimum(workspace: &mut Workspace, (width, height): (i32, i32)) {
+    workspace.minimum_window_width = width;
+    workspace.minimum_window_height = height;
 }
 
 #[cfg(test)]

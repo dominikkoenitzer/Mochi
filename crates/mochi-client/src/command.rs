@@ -247,10 +247,22 @@ pub enum Command {
         /// Direction to move focus in.
         direction: Direction,
     },
+    /// Step the focus one container along the ring, by position rather than by
+    /// geometry, which is what a layout with no obvious left and right wants.
+    CycleFocus {
+        /// Which way to step.
+        direction: CycleDirection,
+    },
     /// Move the focused window in a direction.
     Move {
         /// Direction to move the window in.
         direction: Direction,
+    },
+    /// Swap the focused window with its neighbour in the ring, by position
+    /// rather than by geometry.
+    CycleMove {
+        /// Which way to step.
+        direction: CycleDirection,
     },
     /// Grow or shrink the focused window along an axis.
     ResizeAxis {
@@ -259,12 +271,24 @@ pub enum Command {
         /// Grow or shrink.
         sizing: Sizing,
     },
+    /// Grow or shrink the focused window by moving one named edge, instead of
+    /// letting the axis decide which edge to move.
+    ResizeEdge {
+        /// Edge to move.
+        direction: Direction,
+        /// Grow or shrink.
+        sizing: Sizing,
+    },
     /// Swap the focused window with the first window of its workspace.
     Promote,
+    /// Focus the first window of the workspace without moving anything.
+    PromoteFocus,
 
     // --- window state ----------------------------------------------------
     /// Toggle the focused window between tiled and floating.
     ToggleFloat,
+    /// Toggle whether every new window floats, for as long as the daemon runs.
+    ToggleFloatOverride,
     /// Toggle the focused window between tiled and maximized.
     ToggleMaximize,
     /// Toggle monocle mode for the focused window.
@@ -308,6 +332,9 @@ pub enum Command {
         /// Axis to flip along.
         axis: Axis,
     },
+    /// Stop and resume tiling the focused workspace, leaving every window
+    /// managed and exactly where it is.
+    ToggleTiling,
 
     // --- workspaces -------------------------------------------------------
     /// Focus a workspace by its zero-based index on the focused monitor.
@@ -317,6 +344,11 @@ pub enum Command {
     },
     /// Move the focused window to a workspace and follow it.
     MoveToWorkspace {
+        /// Zero-based workspace index.
+        index: usize,
+    },
+    /// Move the focused window to a workspace and stay where you are.
+    SendToWorkspace {
         /// Zero-based workspace index.
         index: usize,
     },
@@ -354,6 +386,11 @@ pub enum Command {
     },
     /// Move the focused window to a monitor and follow it.
     MoveToMonitor {
+        /// Zero-based monitor index.
+        index: usize,
+    },
+    /// Move the focused window to a monitor and stay where you are.
+    SendToMonitor {
         /// Zero-based monitor index.
         index: usize,
     },
@@ -496,10 +533,15 @@ impl Command {
             Self::Query { .. } => "query",
             Self::Hotkeys => "hotkeys",
             Self::Focus { .. } => "focus",
+            Self::CycleFocus { .. } => "cycle-focus",
             Self::Move { .. } => "move",
+            Self::CycleMove { .. } => "cycle-move",
             Self::ResizeAxis { .. } => "resize-axis",
+            Self::ResizeEdge { .. } => "resize-edge",
             Self::Promote => "promote",
+            Self::PromoteFocus => "promote-focus",
             Self::ToggleFloat => "toggle-float",
+            Self::ToggleFloatOverride => "toggle-float-override",
             Self::ToggleMaximize => "toggle-maximize",
             Self::ToggleMonocle => "toggle-monocle",
             Self::Minimize => "minimize",
@@ -512,14 +554,17 @@ impl Command {
             Self::CycleLayout { .. } => "cycle-layout",
             Self::ChangeLayout { .. } => "change-layout",
             Self::FlipLayout { .. } => "flip-layout",
+            Self::ToggleTiling => "toggle-tiling",
             Self::FocusWorkspace { .. } => "focus-workspace",
             Self::MoveToWorkspace { .. } => "move-to-workspace",
+            Self::SendToWorkspace { .. } => "send-to-workspace",
             Self::CycleWorkspace { .. } => "cycle-workspace",
             Self::FocusLastWorkspace => "focus-last-workspace",
             Self::WorkspacePadding { .. } => "workspace-padding",
             Self::ContainerPadding { .. } => "container-padding",
             Self::FocusMonitor { .. } => "focus-monitor",
             Self::MoveToMonitor { .. } => "move-to-monitor",
+            Self::SendToMonitor { .. } => "send-to-monitor",
             Self::CycleMonitor { .. } => "cycle-monitor",
             Self::FocusFollowsMouse { .. } => "focus-follows-mouse",
             Self::MouseFollowsFocus { .. } => "mouse-follows-focus",

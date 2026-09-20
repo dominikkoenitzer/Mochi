@@ -691,6 +691,68 @@ impl State {
         Ok(Changes::none())
     }
 
+    /// Grows or shrinks the focused container by moving the edge it names.
+    ///
+    /// [`State::resize_axis`] picks the edge itself, which is the right thing
+    /// on a layout where only one of the two is a boundary. This one moves the
+    /// edge it was given and nothing else, so a binding per edge does what the
+    /// key it sits under looks like it does. A resize that the clamps refuse
+    /// leaves the layout untouched, exactly as on the axis command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when there is no focused workspace or no container.
+    pub fn resize_edge(&mut self, direction: Direction, sizing: Sizing) -> Result<Changes> {
+        if self.is_paused {
+            return Ok(Changes::none());
+        }
+        let (monitor, workspace) = self.focused_indices()?;
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
+        let delta = sizing.signed(self.resize_delta);
+        let Some(work_area) = self.work_area_for(monitor, workspace) else {
+            return Err(Error::MonitorNotFound(monitor));
+        };
+        let workspace_padding = self.default_workspace_padding;
+        let container_padding = self.default_container_padding;
+        let scale = self.padding_scale(monitor);
+
+        let target = self.workspace_mut(monitor, workspace)?;
+        if target.containers().is_empty() {
+            return Err(Error::NoFocusedContainer);
+        }
+        let idx = target.focused_container_idx();
+
+        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+        let original = target.resize_dimension(idx);
+        let before = target.latest_layout().get(idx).copied();
+
+        // Right and down are the far edges of their axis; left and up are the
+        // near ones, which `nudged` already counts the other way round so that
+        // `increase` always grows the container.
+        let (axis, far_edge) = match direction {
+            Direction::Left => (Axis::Horizontal, false),
+            Direction::Right => (Axis::Horizontal, true),
+            Direction::Up => (Axis::Vertical, false),
+            Direction::Down => (Axis::Vertical, true),
+        };
+        let next = Self::nudged(original.unwrap_or_default(), axis, far_edge, delta);
+        target.set_resize_dimension(idx, Some(next));
+        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+        if target.latest_layout().get(idx).copied() != before {
+            // Stored as asked for rather than as granted, for the reason
+            // `resize_axis` spells out: anything else drifts under a held key.
+            return Ok(Changes::none().retile(monitor, workspace));
+        }
+
+        // That edge is no boundary, or the clamp refused. Either way there is
+        // no second edge to fall back to: this command was given one.
+        target.set_resize_dimension(idx, original);
+        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+        Ok(Changes::none())
+    }
+
     /// One resize delta with `by` pixels added to the edge the command is
     /// working on. The near edge counts the other way round, because pulling
     /// it back is what makes the container grow.
@@ -1861,6 +1923,44 @@ mod tests {
             Some(Rect::new(910, 0, 1920, 1080)),
             "the near edge moved because the far edge is the screen edge"
         );
+    }
+
+    #[test]
+    fn resizing_one_edge_moves_that_edge_and_no_other() {
+        let mut state = with_windows(2);
+        state.focus_window(WindowId(2)).unwrap();
+        state
+            .resize_edge(Direction::Left, Sizing::Increase)
+            .unwrap();
+        assert_eq!(
+            state.rect_for_window(WindowId(2)),
+            Some(Rect::new(910, 0, 1920, 1080)),
+            "the left edge moved out by one step"
+        );
+
+        state
+            .resize_edge(Direction::Left, Sizing::Decrease)
+            .unwrap();
+        assert_eq!(
+            state.rect_for_window(WindowId(2)),
+            Some(Rect::new(960, 0, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn resizing_an_edge_that_is_the_screen_edge_does_nothing() {
+        // The whole point of naming the edge: `resize_axis` would quietly
+        // move the other one instead, which on a per edge binding is the key
+        // doing something the user did not press.
+        let mut state = with_windows(2);
+        state.focus_window(WindowId(2)).unwrap();
+        let before = state.rect_for_window(WindowId(2));
+        let changes = state
+            .resize_edge(Direction::Right, Sizing::Increase)
+            .unwrap();
+        assert!(changes.is_empty());
+        assert_eq!(state.rect_for_window(WindowId(2)), before);
+        assert_eq!(state.workspace(0, 0).unwrap().resize_dimension(1), None);
     }
 
     #[test]
