@@ -442,6 +442,50 @@ impl State {
         Ok(changes)
     }
 
+    /// Collapses every container in the focused workspace into one stack.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when there is no focused workspace.
+    pub fn stack_all(&mut self) -> Result<Changes> {
+        if self.is_paused {
+            return Ok(Changes::none());
+        }
+        let (monitor, workspace) = self.focused_indices()?;
+        let before = self.visible_window_ids();
+        let target = self.workspace_mut(monitor, workspace)?;
+        if !target.stack_all() {
+            return Ok(Changes::none());
+        }
+        let id = target.focused_window_id();
+        let mut changes = self.retiled(monitor, workspace);
+        changes.merge(self.focus_changes(id));
+        self.visibility_delta(&before, &mut changes);
+        Ok(changes)
+    }
+
+    /// Gives every stacked window in the focused workspace its own container.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when there is no focused workspace.
+    pub fn unstack_all(&mut self) -> Result<Changes> {
+        if self.is_paused {
+            return Ok(Changes::none());
+        }
+        let (monitor, workspace) = self.focused_indices()?;
+        let before = self.visible_window_ids();
+        let target = self.workspace_mut(monitor, workspace)?;
+        if !target.unstack_all() {
+            return Ok(Changes::none());
+        }
+        let id = target.focused_window_id();
+        let mut changes = self.retiled(monitor, workspace);
+        changes.merge(self.focus_changes(id));
+        self.visibility_delta(&before, &mut changes);
+        Ok(changes)
+    }
+
     // -- window states ------------------------------------------------------
 
     /// Moves the focused window between the tiled containers and the floating
@@ -843,6 +887,60 @@ impl State {
         self.check_workspace_idx_on(monitor, idx)?;
         self.focused_monitor_mut()?.ensure_workspaces(idx + 1);
         self.move_focused_container(monitor, idx, follow)
+    }
+
+    /// Where the workspace with this name is, searching every monitor.
+    ///
+    /// The search starts at the focused monitor so that a name used on more
+    /// than one screen resolves to the one in front of you, which is the one
+    /// you meant. Names are compared case insensitively: a name is typed at a
+    /// keyboard, not parsed.
+    #[must_use]
+    pub fn named_workspace(&self, name: &str) -> Option<(usize, usize)> {
+        let count = self.monitors().len();
+        let first = self.focused_monitor_idx();
+        (0..count)
+            .map(|step| (first + step) % count)
+            .find_map(|monitor| {
+                let idx = self.monitors().get(monitor)?.workspaces().position(|w| {
+                    w.name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                })?;
+                Some((monitor, idx))
+            })
+    }
+
+    /// Focuses the workspace with this name, wherever it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WorkspaceNameNotFound`] when no workspace carries it.
+    pub fn focus_named_workspace(&mut self, name: &str) -> Result<Changes> {
+        if self.is_paused {
+            return Ok(Changes::none());
+        }
+        let (monitor, workspace) = self
+            .named_workspace(name)
+            .ok_or_else(|| Error::WorkspaceNameNotFound(name.to_string()))?;
+        let mut changes = self.focus_monitor(monitor)?;
+        changes.merge(self.focus_workspace(workspace)?);
+        Ok(changes)
+    }
+
+    /// Moves the focused container to the workspace with this name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WorkspaceNameNotFound`] when no workspace carries it.
+    pub fn move_to_named_workspace(&mut self, name: &str, follow: bool) -> Result<Changes> {
+        if self.is_paused {
+            return Ok(Changes::none());
+        }
+        let (monitor, workspace) = self
+            .named_workspace(name)
+            .ok_or_else(|| Error::WorkspaceNameNotFound(name.to_string()))?;
+        self.move_focused_container(monitor, workspace, follow)
     }
 
     // -- monitors -----------------------------------------------------------
@@ -1739,6 +1837,125 @@ mod tests {
         let changes = state.unstack().unwrap();
         assert_eq!(state.workspace(0, 0).unwrap().containers().len(), 2);
         assert!(changes.show.contains(&WindowId(2)));
+    }
+
+    #[test]
+    fn stacking_the_whole_workspace_keeps_the_window_you_were_looking_at() {
+        let mut state = with_windows(4);
+        state.focus_window(WindowId(2)).unwrap();
+
+        let changes = state.stack_all().unwrap();
+        let workspace = state.workspace(0, 0).unwrap();
+        assert_eq!(workspace.containers().len(), 1);
+        assert_eq!(workspace.containers().get(0).unwrap().len(), 4);
+        // The point of the command: one window on screen, and it is the one
+        // that was focused rather than whichever happened to be first.
+        assert_eq!(focused(&state), Some(WindowId(2)));
+        for id in [1, 3, 4] {
+            assert!(changes.hide.contains(&WindowId(id)), "{id} stayed visible");
+        }
+
+        // And back, with the same window still in hand.
+        let changes = state.unstack_all().unwrap();
+        assert_eq!(state.workspace(0, 0).unwrap().containers().len(), 4);
+        assert_eq!(focused(&state), Some(WindowId(2)));
+        for id in [1, 3, 4] {
+            assert!(changes.show.contains(&WindowId(id)), "{id} stayed hidden");
+        }
+    }
+
+    #[test]
+    fn unstacking_everything_keeps_the_order_the_windows_were_stacked_in() {
+        let mut state = with_windows(3);
+        state.stack_all().unwrap();
+        state.unstack_all().unwrap();
+
+        let order: Vec<_> = state
+            .workspace(0, 0)
+            .unwrap()
+            .containers()
+            .iter()
+            .map(|c| c.focused_window_id().unwrap())
+            .collect();
+        assert_eq!(order, vec![WindowId(1), WindowId(2), WindowId(3)]);
+    }
+
+    #[test]
+    fn stacking_a_workspace_that_is_already_one_container_changes_nothing() {
+        let mut state = with_windows(1);
+        assert!(state.stack_all().unwrap().is_empty());
+        // Nothing is stacked, so there is nothing to take apart either.
+        assert!(state.unstack_all().unwrap().is_empty());
+    }
+
+    // -- named workspaces ---------------------------------------------------
+
+    #[test]
+    fn a_workspace_is_found_by_its_name_whatever_the_case() {
+        let mut state = state();
+        state
+            .monitors_mut()
+            .get_mut(0)
+            .unwrap()
+            .workspaces_mut()
+            .get_mut(3)
+            .unwrap()
+            .name = Some("Code".to_string());
+
+        assert_eq!(state.named_workspace("code"), Some((0, 3)));
+        assert_eq!(state.named_workspace("CODE"), Some((0, 3)));
+        assert_eq!(state.named_workspace("codex"), None);
+
+        state.focus_named_workspace("code").unwrap();
+        assert_eq!(state.focused_indices().unwrap(), (0, 3));
+    }
+
+    #[test]
+    fn a_name_used_on_both_screens_resolves_to_the_one_in_front_of_you() {
+        let mut state = state();
+        for monitor in 0..2 {
+            state
+                .monitors_mut()
+                .get_mut(monitor)
+                .unwrap()
+                .workspaces_mut()
+                .get_mut(2)
+                .unwrap()
+                .name = Some("mail".to_string());
+        }
+
+        state.focus_monitor(1).unwrap();
+        // Not monitor 0, which is what a plain search from the front would
+        // have found: the workspace you meant is the one on the screen you are
+        // looking at.
+        assert_eq!(state.named_workspace("mail"), Some((1, 2)));
+    }
+
+    #[test]
+    fn a_name_nothing_carries_is_an_error_rather_than_a_silent_no_op() {
+        let mut state = with_windows(2);
+        assert!(matches!(
+            state.focus_named_workspace("nowhere"),
+            Err(Error::WorkspaceNameNotFound(name)) if name == "nowhere"
+        ));
+        assert!(state.move_to_named_workspace("nowhere", true).is_err());
+    }
+
+    #[test]
+    fn a_window_can_be_sent_to_a_named_workspace_without_following_it() {
+        let mut state = with_windows(2);
+        state
+            .monitors_mut()
+            .get_mut(1)
+            .unwrap()
+            .workspaces_mut()
+            .get_mut(4)
+            .unwrap()
+            .name = Some("media".to_string());
+
+        state.move_to_named_workspace("media", false).unwrap();
+        assert_eq!(state.focused_indices().unwrap(), (0, 0));
+        assert_eq!(state.workspace(1, 4).unwrap().containers().len(), 1);
     }
 
     #[test]

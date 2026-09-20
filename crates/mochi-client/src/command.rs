@@ -227,6 +227,8 @@ pub enum Command {
     ToggleGameMode,
     /// Re-read the configuration file.
     ReloadConfiguration,
+    /// Show every window Mochi is hiding, without stopping.
+    RestoreWindows,
     /// Recompute and re-apply every layout.
     Retile,
 
@@ -310,6 +312,10 @@ pub enum Command {
     },
     /// Pull the focused window back out of its stack.
     Unstack,
+    /// Collapse every container in the workspace into one stack.
+    StackAll,
+    /// Give every stacked window in the workspace its own container.
+    UnstackAll,
     /// Step through the windows of the focused stack.
     CycleStack {
         /// Which way to step.
@@ -359,6 +365,21 @@ pub enum Command {
     },
     /// Return to the workspace that was focused before the current one.
     FocusLastWorkspace,
+    /// Focus the workspace with this name, on whichever monitor it is.
+    FocusNamedWorkspace {
+        /// The name as it appears in the configuration.
+        name: String,
+    },
+    /// Move the focused window to the workspace with this name and follow it.
+    MoveToNamedWorkspace {
+        /// The name as it appears in the configuration.
+        name: String,
+    },
+    /// Move the focused window to the workspace with this name and stay put.
+    SendToNamedWorkspace {
+        /// The name as it appears in the configuration.
+        name: String,
+    },
     /// Set the outer padding of one workspace.
     WorkspacePadding {
         /// Zero-based monitor index.
@@ -474,6 +495,33 @@ pub enum Command {
     },
 
     // --- rules ------------------------------------------------------------
+    /// Add a rule that manages matching windows the heuristics would skip.
+    ManageRule {
+        /// Window property to match on.
+        identifier: RuleIdentifier,
+        /// Value to match against.
+        id: String,
+        /// How to compare.
+        #[serde(default = "default_matching_strategy")]
+        matching_strategy: MatchingStrategy,
+    },
+    /// Add a rule that opens matching windows on a particular workspace.
+    WorkspaceRule {
+        /// Window property to match on.
+        identifier: RuleIdentifier,
+        /// Value to match against.
+        id: String,
+        /// Zero-based monitor index.
+        monitor: usize,
+        /// Zero-based workspace index on that monitor.
+        workspace: usize,
+        /// Only route the first window the rule ever matches.
+        #[serde(default)]
+        initial_only: bool,
+        /// How to compare.
+        #[serde(default = "default_matching_strategy")]
+        matching_strategy: MatchingStrategy,
+    },
     /// Add a rule that floats matching windows instead of tiling them.
     FloatRule {
         /// Window property to match on.
@@ -528,6 +576,7 @@ impl Command {
             Self::TogglePause => "toggle-pause",
             Self::ToggleGameMode => "toggle-game-mode",
             Self::ReloadConfiguration => "reload-configuration",
+            Self::RestoreWindows => "restore-windows",
             Self::Retile => "retile",
             Self::State => "state",
             Self::Query { .. } => "query",
@@ -550,6 +599,8 @@ impl Command {
             Self::Unmanage => "unmanage",
             Self::Stack { .. } => "stack",
             Self::Unstack => "unstack",
+            Self::StackAll => "stack-all",
+            Self::UnstackAll => "unstack-all",
             Self::CycleStack { .. } => "cycle-stack",
             Self::CycleLayout { .. } => "cycle-layout",
             Self::ChangeLayout { .. } => "change-layout",
@@ -560,6 +611,9 @@ impl Command {
             Self::SendToWorkspace { .. } => "send-to-workspace",
             Self::CycleWorkspace { .. } => "cycle-workspace",
             Self::FocusLastWorkspace => "focus-last-workspace",
+            Self::FocusNamedWorkspace { .. } => "focus-named-workspace",
+            Self::MoveToNamedWorkspace { .. } => "move-to-named-workspace",
+            Self::SendToNamedWorkspace { .. } => "send-to-named-workspace",
             Self::WorkspacePadding { .. } => "workspace-padding",
             Self::ContainerPadding { .. } => "container-padding",
             Self::FocusMonitor { .. } => "focus-monitor",
@@ -579,6 +633,8 @@ impl Command {
             Self::AnimationDuration { .. } => "animation-duration",
             Self::AnimationStyle { .. } => "animation-style",
             Self::AnimationFps { .. } => "animation-fps",
+            Self::ManageRule { .. } => "manage-rule",
+            Self::WorkspaceRule { .. } => "workspace-rule",
             Self::FloatRule { .. } => "float-rule",
             Self::IgnoreRule { .. } => "ignore-rule",
             Self::SubscribePipe { .. } => "subscribe-pipe",
