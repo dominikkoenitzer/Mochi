@@ -19,7 +19,7 @@ use crate::model::CycleDirection;
 pub use split::MIN_TILE_SIZE;
 use split::{
     boundary_delta, boundary_deltas, divide, divide_weighted, extend_with_rects, rect_from_slice,
-    slices_to_rects,
+    shared_boundary_delta, slices_to_rects,
 };
 
 /// Whether a resize grows or shrinks.
@@ -361,7 +361,9 @@ fn main_and_stack(
         return vec![area];
     }
 
-    let split_delta = boundary_delta(resize, 0, 1, main_axis);
+    // Every container in the stack sits on the main cut, so a resize from any
+    // of them moves it, not just one from the first.
+    let split_delta = shared_boundary_delta(resize, 0..1, 1..len, main_axis);
     let halves = divide(
         area.start(main_axis),
         area.end(main_axis),
@@ -404,7 +406,8 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<R
             // A quarter for the secondary, a half for the primary, a quarter
             // for the stack.
             let left_delta = boundary_delta(resize, 1, 0, Axis::Horizontal);
-            let right_delta = boundary_delta(resize, 0, 2, Axis::Horizontal);
+            // The whole stack sits on the cut between the primary and itself.
+            let right_delta = shared_boundary_delta(resize, 0..1, 2..len, Axis::Horizontal);
             let slices = divide_weighted(
                 area.left,
                 area.right,
@@ -454,12 +457,15 @@ fn grid(area: Rect, len: usize, resize: &[Option<Rect>], min: i32) -> Vec<Rect> 
         })
         .collect();
 
+    // Every cell of the two columns either side of a column boundary sits on
+    // it, so they all get a push at it, not just the top cell of each column.
+    let end_of_column = |c: usize| first_of_column.get(c + 1).copied().unwrap_or(len);
     let column_deltas: Vec<i32> = (0..columns_count.saturating_sub(1))
         .map(|c| {
-            boundary_delta(
+            shared_boundary_delta(
                 resize,
-                first_of_column[c],
-                first_of_column[c + 1],
+                first_of_column[c]..end_of_column(c),
+                first_of_column[c + 1]..end_of_column(c + 1),
                 Axis::Horizontal,
             )
         })

@@ -124,9 +124,16 @@ one, and that `mochic stop` leaves every window with no alpha and no border.
 
 `--manage-class <CLASS>` makes the daemon manage exactly the given classes and
 ignore every other window on the desktop. It is the only switch that lifts the
-tool window rejection, which is what `crates/mochi-testbed` needs, and it is the
-only safe way to exercise the tiling path on a machine where another window
-manager and the user's real applications are running:
+tool window rejection, which is what `crates/mochi-testbed` needs, and it is what
+keeps a test run off every real window:
+
+Give the suite the desktop to itself. `--manage-class` stops Mochi touching
+anything else; it cannot stop anything else touching the test windows. Run with
+another window manager live and it moves and fades them underneath the
+assertions: measured, that produces overlapping tiles, a focus command that
+appears not to work and windows that come back from `stop` still faded, none of
+which is a defect in Mochi. The suite passes with the desktop to itself and is
+noise without it.
 
 ```
 mochi-testwin spawn --count 4 --monitor 0

@@ -33,6 +33,13 @@ pub enum Violation {
         /// The area it should have stayed in.
         area: Rect,
     },
+    /// A window whose rectangle covers no pixel at all.
+    Degenerate {
+        /// Index of the offending rectangle in the slice that was checked.
+        index: usize,
+        /// The rectangle itself.
+        rect: Rect,
+    },
     /// A hole in the tiling that is larger than the tolerance in both directions.
     Gap {
         /// The uncovered block.
@@ -55,6 +62,9 @@ impl std::fmt::Display for Violation {
             Self::Outside { index, rect, area } => {
                 write!(f, "window {index} at {rect} leaves the area {area}")
             }
+            Self::Degenerate { index, rect } => {
+                write!(f, "window {index} at {rect} covers no pixel")
+            }
             Self::Gap {
                 gap,
                 area,
@@ -69,20 +79,18 @@ impl std::fmt::Display for Violation {
 
 impl std::error::Error for Violation {}
 
-/// Checks that no two rectangles share a pixel. Empty rectangles are skipped,
-/// which is what a minimized window looks like.
+/// Checks that no two rectangles share a pixel, and that none of them is empty.
+///
+/// A rectangle that covers no pixel overlaps nothing, so skipping it would let
+/// a layout that collapsed a window pass a check that claims it is correct. A
+/// minimized or hidden window is the caller's to leave out of the slice.
 ///
 /// # Errors
-/// Returns the first overlapping pair.
+/// Returns the first empty rectangle, then the first overlapping pair.
 pub fn check_no_overlap(rects: &[Rect]) -> Result<(), Violation> {
+    check_none_degenerate(rects)?;
     for (a, ra) in rects.iter().enumerate() {
-        if ra.is_empty() {
-            continue;
-        }
         for (b, rb) in rects.iter().enumerate().skip(a + 1) {
-            if rb.is_empty() {
-                continue;
-            }
             if let Some(overlap) = ra.intersection(rb) {
                 return Err(Violation::Overlap { a, b, overlap });
             }
@@ -91,11 +99,24 @@ pub fn check_no_overlap(rects: &[Rect]) -> Result<(), Violation> {
     Ok(())
 }
 
-/// Checks that every rectangle is fully inside `area`.
+/// The first rectangle that covers no pixel, which every check rejects.
+fn check_none_degenerate(rects: &[Rect]) -> Result<(), Violation> {
+    match rects.iter().position(Rect::is_empty) {
+        Some(index) => Err(Violation::Degenerate {
+            index,
+            rect: rects[index],
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Checks that every rectangle is fully inside `area`, and that none of them is
+/// empty.
 ///
 /// # Errors
-/// Returns the first rectangle that pokes out.
+/// Returns the first empty rectangle, then the first one that pokes out.
 pub fn check_all_within(rects: &[Rect], area: Rect) -> Result<(), Violation> {
+    check_none_degenerate(rects)?;
     for (index, rect) in rects.iter().enumerate() {
         if !area.contains(rect) {
             return Err(Violation::Outside {
@@ -109,7 +130,7 @@ pub fn check_all_within(rects: &[Rect], area: Rect) -> Result<(), Violation> {
 }
 
 /// Checks that the rectangles together cover `area`, allowing gaps that are at
-/// most `tolerance_px` wide in one direction.
+/// most `tolerance_px` thick in one direction.
 ///
 /// The tolerance is what makes this usable against a real desktop: a configured
 /// window gap, the invisible border and rounding when an odd number of pixels
@@ -117,8 +138,9 @@ pub fn check_all_within(rects: &[Rect], area: Rect) -> Result<(), Violation> {
 /// both directions is a real layout bug.
 ///
 /// # Errors
-/// Returns the first hole that is too large.
+/// Returns the first empty rectangle, then the largest hole that is too large.
 pub fn check_covers(rects: &[Rect], area: Rect, tolerance_px: i32) -> Result<(), Violation> {
+    check_none_degenerate(rects)?;
     if area.is_empty() {
         return Ok(());
     }
@@ -149,56 +171,53 @@ pub fn check_covers(rects: &[Rect], area: Rect, tolerance_px: i32) -> Result<(),
         }
     }
 
-    // Merge uncovered cells into runs, first across each row and then down each
-    // column. A seam stays thin in one of the two passes; a real hole does not.
-    for row in 0..rows {
-        let mut start: Option<usize> = None;
-        for col in 0..=cols {
-            let uncovered = col < cols && !covered[row * cols + col];
-            match (uncovered, start) {
-                (true, None) => start = Some(col),
-                (false, Some(s)) => {
-                    fail_if_large(
-                        Rect::new(xs[s], ys[row], xs[col], ys[row + 1]),
-                        area,
-                        tolerance_px,
-                    )?;
-                    start = None;
+    // The hole to look for is a whole uncovered block, not a run in a single
+    // direction. Merging only across a row and only down a column misses a
+    // hole that the edges of other frames slice both ways: every one of its
+    // runs is then as thin as the distance between two of those edges, however
+    // large the hole itself is. So every band of rows is taken in turn and the
+    // longest run of columns that is uncovered over all of them is measured.
+    let mut worst: Option<Rect> = None;
+    for top in 0..rows {
+        let mut free: Vec<bool> = covered[top * cols..(top + 1) * cols]
+            .iter()
+            .map(|cell| !cell)
+            .collect();
+        for bottom in top..rows {
+            if bottom > top {
+                for (col, open) in free.iter_mut().enumerate() {
+                    *open = *open && !covered[bottom * cols + col];
                 }
-                _ => {}
+            }
+            if ys[bottom + 1] - ys[top] <= tolerance_px {
+                continue;
+            }
+            let mut start: Option<usize> = None;
+            for col in 0..=cols {
+                match (col < cols && free[col], start) {
+                    (true, None) => start = Some(col),
+                    (false, Some(s)) => {
+                        let gap = Rect::new(xs[s], ys[top], xs[col], ys[bottom + 1]);
+                        if gap.width() > tolerance_px
+                            && worst.is_none_or(|worst| gap.area() > worst.area())
+                        {
+                            worst = Some(gap);
+                        }
+                        start = None;
+                    }
+                    _ => {}
+                }
             }
         }
     }
-    for col in 0..cols {
-        let mut start: Option<usize> = None;
-        for row in 0..=rows {
-            let uncovered = row < rows && !covered[row * cols + col];
-            match (uncovered, start) {
-                (true, None) => start = Some(row),
-                (false, Some(s)) => {
-                    fail_if_large(
-                        Rect::new(xs[col], ys[s], xs[col + 1], ys[row]),
-                        area,
-                        tolerance_px,
-                    )?;
-                    start = None;
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
-
-fn fail_if_large(gap: Rect, area: Rect, tolerance: i32) -> Result<(), Violation> {
-    if gap.width() > tolerance && gap.height() > tolerance {
-        return Err(Violation::Gap {
+    match worst {
+        Some(gap) => Err(Violation::Gap {
             gap,
             area,
-            tolerance,
-        });
+            tolerance: tolerance_px,
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Panicking form of [`check_no_overlap`].
@@ -267,9 +286,21 @@ mod tests {
     }
 
     #[test]
-    fn empty_rects_never_overlap() {
+    fn an_empty_rect_is_a_violation_rather_than_a_rect_that_overlaps_nothing() {
         let rects = [Rect::new(0, 0, 500, 800), Rect::new(100, 100, 100, 100)];
-        assert_no_overlap(&rects);
+        assert_eq!(
+            check_no_overlap(&rects),
+            Err(Violation::Degenerate {
+                index: 1,
+                rect: Rect::new(100, 100, 100, 100),
+            })
+        );
+        assert!(
+            check_no_overlap(&rects)
+                .unwrap_err()
+                .to_string()
+                .contains("covers no pixel")
+        );
     }
 
     #[test]
@@ -322,6 +353,61 @@ mod tests {
     #[test]
     fn covering_an_empty_area_is_vacuously_true() {
         assert!(check_covers(&[], Rect::default(), 0).is_ok());
+    }
+
+    #[test]
+    fn a_collapsed_window_satisfies_nothing() {
+        // One full screen window and three windows a layout squeezed to
+        // nothing. Every check here claims the layout is correct, so none of
+        // them may accept a rectangle that covers no pixel.
+        let rects = [
+            Rect::new(0, 0, 1000, 800),
+            Rect::new(500, 400, 500, 400),
+            Rect::default(),
+            Rect::new(-32_000, -32_000, -32_000, -32_000),
+        ];
+        assert!(
+            check_no_overlap(&rects).is_err(),
+            "no overlap accepted them"
+        );
+        assert!(
+            check_all_within(&rects, AREA).is_err(),
+            "all within accepted them"
+        );
+        assert!(
+            check_covers(&rects, AREA, 8).is_err(),
+            "covers accepted them"
+        );
+    }
+
+    #[test]
+    fn a_hole_the_frame_edges_slice_in_both_directions_is_found() {
+        // A 100x100 hole at 400,350 with a tolerance of 34, the tolerance a 4K
+        // desktop at 150% produces. Frames above it put x edges at 425, 450 and
+        // 475 inside its width, frames beside it put y edges at 375, 400 and
+        // 425 inside its height, so no run in a single direction is ever
+        // thicker than the 25 px between two of those edges.
+        let rects = [
+            Rect::new(0, 0, 425, 350),
+            Rect::new(425, 0, 450, 350),
+            Rect::new(450, 0, 475, 350),
+            Rect::new(475, 0, 1000, 350),
+            Rect::new(0, 350, 400, 375),
+            Rect::new(0, 375, 400, 400),
+            Rect::new(0, 400, 400, 425),
+            Rect::new(0, 425, 400, 450),
+            Rect::new(500, 350, 1000, 450),
+            Rect::new(0, 450, 1000, 800),
+        ];
+        assert_no_overlap(&rects);
+        assert_eq!(
+            check_covers(&rects, AREA, 34),
+            Err(Violation::Gap {
+                gap: Rect::new(400, 350, 500, 450),
+                area: AREA,
+                tolerance: 34,
+            })
+        );
     }
 
     #[test]

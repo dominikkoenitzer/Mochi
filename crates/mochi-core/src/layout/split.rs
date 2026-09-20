@@ -193,6 +193,34 @@ pub(crate) fn boundary_delta(
     far.saturating_add(near)
 }
 
+/// The resize delta that moves a boundary more than two containers sit on,
+/// such as the cut between the main container and a whole stack.
+///
+/// The containers in `before` face the boundary with their far edge and the
+/// ones in `after` with their near edge, and every one of them gets a push at
+/// it. The pushes add up the same way the two facing edges of a boundary
+/// between two containers already do.
+///
+/// Summing is what makes a keypress from any window on the boundary count.
+/// Reading one representative pair drops the delta of every other window on it
+/// on the floor, and picking the largest or the average would make one
+/// window's press undo another's. A sum also keeps a single window's presses
+/// exactly reversible: unwinding its own stored delta takes away exactly what
+/// it contributed, whatever the other windows have stored.
+pub(crate) fn shared_boundary_delta(
+    resize_dimensions: &[Option<Rect>],
+    before: std::ops::Range<usize>,
+    after: std::ops::Range<usize>,
+    axis: Axis,
+) -> i32 {
+    let far = before
+        .filter_map(|i| resize_dimensions.get(i).copied().flatten())
+        .fold(0_i32, |sum, delta| sum.saturating_add(delta.end(axis)));
+    after
+        .filter_map(|i| resize_dimensions.get(i).copied().flatten())
+        .fold(far, |sum, delta| sum.saturating_add(delta.start(axis)))
+}
+
 /// The deltas for the `count - 1` boundaries between containers
 /// `first..first + count`.
 pub(crate) fn boundary_deltas(

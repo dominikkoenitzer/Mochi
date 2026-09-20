@@ -620,8 +620,11 @@ impl State {
     ///
     /// Tries the container's far edge first and its near edge second, so the
     /// command does something sensible whichever side of the layout the
-    /// container happens to sit on. A resize that the clamps refuse leaves the
-    /// layout untouched.
+    /// container happens to sit on. The near edge is only for a container with
+    /// no boundary on its far side: a far edge the clamp refuses stays the one
+    /// the command works on, so the same number of presses back always lands
+    /// on the layout it started from. A resize that the clamps refuse leaves
+    /// the layout untouched.
     ///
     /// # Errors
     ///
@@ -656,29 +659,31 @@ impl State {
             let next = Self::nudged(original.unwrap_or_default(), axis, far_edge, delta);
             target.set_resize_dimension(idx, Some(next));
             target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
-            let after = target.latest_layout().get(idx).copied();
-            if after == before {
-                continue;
+            if target.latest_layout().get(idx).copied() != before {
+                // The step is stored the size it was asked for, even when the
+                // clamp could only grant part of it. Storing what the boundary
+                // really did instead throws the rest of the step away, and
+                // then the same number of presses back lands short of where
+                // the layout started: leaning on the key drifts. The stored
+                // delta still cannot run away, because a press that moves
+                // nothing at all is not stored at all, so it stays within one
+                // delta of what the clamp allows.
+                return Ok(Changes::none().retile(monitor, workspace));
             }
 
-            // The clamps may have swallowed part of the step. Store what the
-            // boundary actually did instead of the step that was asked for,
-            // or the first press the other way would only undo the overshoot.
-            if let (Some(before), Some(after)) = (before, after) {
-                let achieved = after.extent(axis) - before.extent(axis);
-                let effective =
-                    Self::nudged(original.unwrap_or_default(), axis, far_edge, achieved);
-                if effective != next {
-                    target.set_resize_dimension(idx, Some(effective));
-                    target.update_layout_scaled(
-                        work_area,
-                        workspace_padding,
-                        container_padding,
-                        scale,
-                    );
-                }
+            // Nothing moved. Either this edge is no boundary at all and the
+            // container sits at that side of the layout, or the clamp refuses
+            // this direction. Pushing the other way tells the two apart, and
+            // only the first is worth falling back to the near edge for: a
+            // container grown from both sides cannot be shrunk back by the
+            // same number of presses, because every one of them comes off
+            // whichever edge is tried first.
+            let probe = Self::nudged(original.unwrap_or_default(), axis, far_edge, -delta);
+            target.set_resize_dimension(idx, Some(probe));
+            target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+            if target.latest_layout().get(idx).copied() != before {
+                break;
             }
-            return Ok(Changes::none().retile(monitor, workspace));
         }
 
         target.set_resize_dimension(idx, original);
@@ -1900,9 +1905,16 @@ mod tests {
     }
 
     #[test]
-    fn a_saturated_resize_steps_back_by_exactly_one_delta() {
-        // Twenty presses run into the clamp long before the twentieth, so the
-        // stored delta is way past what the layout can do with it.
+    fn a_saturated_resize_steps_back_by_at_most_one_delta_and_then_by_a_full_one() {
+        // Twenty presses run into the clamp long before the twentieth. The
+        // press that reached the clamp only got part of a step, so the first
+        // press back hands that part back: less than a full delta, but never
+        // nothing. Every press after that is a full step.
+        //
+        // This used to be a full step straight away, because the press that
+        // reached the clamp stored what the boundary really moved instead of
+        // the step it asked for. That is what made the same number of presses
+        // each way drift; see `resizing_is_reversible_and_bounded`.
         for axis in [Axis::Horizontal, Axis::Vertical] {
             for sizing in [Sizing::Increase, Sizing::Decrease] {
                 let mut state = with_windows(3);
@@ -1911,19 +1923,28 @@ mod tests {
                     state.resize_axis(axis, sizing).unwrap();
                 }
                 let saturated = state.rect_for_window(WindowId(2)).unwrap();
+
                 state.resize_axis(axis, sizing.opposite()).unwrap();
-                let after = state.rect_for_window(WindowId(2)).unwrap();
+                let first = state.rect_for_window(WindowId(2)).unwrap();
+                let back = (saturated.extent(axis) - first.extent(axis)).abs();
+                assert!(
+                    back > 0 && back <= state.resize_delta,
+                    "{axis:?} {sizing:?} stepped back by {back}, not by at most one delta"
+                );
+
+                state.resize_axis(axis, sizing.opposite()).unwrap();
+                let second = state.rect_for_window(WindowId(2)).unwrap();
                 assert_eq!(
-                    (saturated.extent(axis) - after.extent(axis)).abs(),
+                    (first.extent(axis) - second.extent(axis)).abs(),
                     state.resize_delta,
-                    "{axis:?} {sizing:?} did not give a full step back"
+                    "{axis:?} {sizing:?} did not give a full second step back"
                 );
             }
         }
     }
 
     #[test]
-    fn a_clamped_resize_stores_the_delta_it_achieved() {
+    fn a_clamped_resize_stores_the_step_it_asked_for() {
         let mut state = with_windows(2);
         state.focus_window(WindowId(1)).unwrap();
         for _ in 0..40 {
@@ -1932,12 +1953,17 @@ mod tests {
                 .unwrap();
         }
         let stored = state.workspace(0, 0).unwrap().resize_dimension(0).unwrap();
-        let width = state.rect_for_window(WindowId(1)).unwrap().width();
-        assert_eq!(
-            stored.right,
-            width - 960,
-            "the stored delta is the one the boundary really moved"
+        let achieved = state.rect_for_window(WindowId(1)).unwrap().width() - 960;
+        assert!(
+            stored.right >= achieved,
+            "the stored delta is the step that was asked for, not the part of it \
+             the clamp granted: {} against {achieved}",
+            stored.right
         );
+        // The presses after the clamp move nothing at all and are not stored
+        // at all, so the delta stays within one step of what the layout can do
+        // with it and one press back is always visible.
+        assert!(stored.right < achieved + state.resize_delta);
         assert!(stored.right < 40 * state.resize_delta);
     }
 
