@@ -17,7 +17,7 @@
     ever touches its own files, nothing that another program owns.
 
 .PARAMETER Version
-    Release tag to download, for example v0.1.0. Without it the repository is
+    Release tag to download, for example v0.1.1. Without it the repository is
     built from source with cargo. While the repository is private the download
     needs the GitHub CLI, signed in as someone who can see it.
 
@@ -40,7 +40,7 @@
     .\scripts\install.ps1
 
 .EXAMPLE
-    .\scripts\install.ps1 -Version v0.1.0
+    .\scripts\install.ps1 -Version v0.1.1
 
 .EXAMPLE
     .\scripts\install.ps1 -Uninstall
