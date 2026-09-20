@@ -18,7 +18,8 @@
 
 .PARAMETER Version
     Release tag to download, for example v0.1.0. Without it the repository is
-    built from source with cargo.
+    built from source with cargo. While the repository is private the download
+    needs the GitHub CLI, signed in as someone who can see it.
 
 .PARAMETER Repo
     GitHub repository to download releases from.
@@ -63,7 +64,17 @@ $script:SourceDir = $null
 $script:ConfigPath = Join-Path $env:USERPROFILE 'mochi.json'
 $script:HotkeyDir = Join-Path $env:USERPROFILE '.config\mochi'
 $script:HotkeyPath = Join-Path $script:HotkeyDir 'hotkeys'
+$script:LegacyHotkeyPath = Join-Path $script:HotkeyDir 'whkdrc'
 $script:LogPath = Join-Path $env:LOCALAPPDATA 'mochi\mochi.log'
+
+# Mochi reads either name from that directory, so a summary that always
+# printed the first one would point at a file that is not there.
+function Get-HotkeyPath {
+    if ((-not (Test-Path $script:HotkeyPath)) -and (Test-Path $script:LegacyHotkeyPath)) {
+        return $script:LegacyHotkeyPath
+    }
+    return $script:HotkeyPath
+}
 
 function Write-Step {
     param([Parameter(Mandatory)][string] $Message)
@@ -166,14 +177,36 @@ function Save-ReleaseAsset {
 
     Write-Step "downloading $name.zip from $Repo"
     New-Item -ItemType Directory -Force -Path $work | Out-Null
-    Invoke-WebRequest -Uri "$base/$name.zip" -OutFile $zip -UseBasicParsing
 
+    # A release on a private repository is not there for an anonymous request:
+    # GitHub answers 404 rather than 403, so the plain download looks like a
+    # missing file. The GitHub CLI carries the credentials that make it visible,
+    # so it goes first whenever it is installed and signed in.
+    $gh = (Get-Command gh -ErrorAction SilentlyContinue)
     $haveSum = $true
-    try {
-        Invoke-WebRequest -Uri "$base/$name.zip.sha256" -OutFile $sum -UseBasicParsing
-    } catch {
-        Write-Detail 'no SHA256 file published for this release, skipping the checksum'
-        $haveSum = $false
+    if ($gh) {
+        Write-Detail "using $($gh.Source)"
+        & $gh.Source release download $Tag --repo $Repo --pattern "$name.zip*" --dir $work --clobber
+        if ($LASTEXITCODE -ne 0) {
+            throw "gh release download failed with exit code $LASTEXITCODE. Is $Tag published, and are you signed in with ``gh auth login``?"
+        }
+        $haveSum = Test-Path $sum
+        if (-not $haveSum) {
+            Write-Detail 'no SHA256 file published for this release, skipping the checksum'
+        }
+    } else {
+        try {
+            Invoke-WebRequest -Uri "$base/$name.zip" -OutFile $zip -UseBasicParsing
+        } catch {
+            throw "could not download $name.zip from $Repo ($($_.Exception.Message)). A private repository needs the GitHub CLI: install it, run ``gh auth login`` and try again, or build from source by leaving -Version off."
+        }
+
+        try {
+            Invoke-WebRequest -Uri "$base/$name.zip.sha256" -OutFile $sum -UseBasicParsing
+        } catch {
+            Write-Detail 'no SHA256 file published for this release, skipping the checksum'
+            $haveSum = $false
+        }
     }
 
     if ($haveSum) {
@@ -248,13 +281,13 @@ function Install-Mochi {
 
     # Mochi reads hotkeys or whkdrc from that directory and quickstart leaves
     # either name alone, so either one means the hotkeys are there already.
-    $haveHotkeys = (Test-Path $script:HotkeyPath) -or (Test-Path (Join-Path $script:HotkeyDir 'whkdrc'))
+    $haveHotkeys = (Test-Path $script:HotkeyPath) -or (Test-Path $script:LegacyHotkeyPath)
 
     if ($SkipQuickstart) {
         Write-Step 'configuration left alone (-SkipQuickstart)'
     } elseif ((Test-Path $script:ConfigPath) -and $haveHotkeys) {
         Write-Step "configuration is already there: $script:ConfigPath"
-        Write-Detail "hotkeys are already there: $script:HotkeyDir"
+        Write-Detail "hotkeys are already there: $(Get-HotkeyPath)"
     } else {
         Write-Step 'creating a default configuration and hotkey file with mochic quickstart'
         if ($PSCmdlet.ShouldProcess("$script:ConfigPath and $script:HotkeyPath", 'mochic quickstart')) {
@@ -272,7 +305,7 @@ function Install-Mochi {
     Write-Step 'done'
     Write-Detail "binaries   $script:BinDir"
     Write-Detail "config     $script:ConfigPath"
-    Write-Detail "hotkeys    $script:HotkeyPath"
+    Write-Detail "hotkeys    $(Get-HotkeyPath)"
     Write-Detail "log        $script:LogPath"
     Write-Detail 'autostart  scripts\autostart.ps1 -Enable'
 }
@@ -304,7 +337,7 @@ function Uninstall-Mochi {
 
     Write-Step 'left in place on purpose'
     Write-Detail "config     $script:ConfigPath"
-    Write-Detail "hotkeys    $script:HotkeyPath"
+    Write-Detail "hotkeys    $(Get-HotkeyPath)"
     Write-Detail "log        $script:LogPath"
     Write-Detail 'autostart  remove it with scripts\autostart.ps1 -Disable'
 }
