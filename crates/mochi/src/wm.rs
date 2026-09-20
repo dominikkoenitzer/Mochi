@@ -292,6 +292,22 @@ impl Hidden {
     }
 }
 
+/// The hiding record, whatever state the mutex is in.
+///
+/// Poison is deliberately ignored, as it already is on the restore path. It
+/// used to make every other reader skip itself, and `hide_window` is one of
+/// them: it still cloaked the window, then failed to write it down, so the
+/// window went off screen with no entry in memory and none on disk. Not in
+/// the restore hook, not in the crash mirror, invisible to `restore-windows`.
+/// The data behind this mutex is a map of window handles; a panic elsewhere
+/// cannot make it meaningless, and pretending that it did is what loses a
+/// window for good.
+fn record(hidden: &Mutex<Hidden>) -> std::sync::MutexGuard<'_, Hidden> {
+    hidden
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Puts every window Mochi took off screen back, and clears any alpha it set.
 ///
 /// The body of the restore hook, as a free function so that the panic hook, the
@@ -936,7 +952,8 @@ impl WindowManager {
             }
             Err(e) => tracing::debug!(%hwnd, error = %e, "the window was already gone"),
         }
-        if let Ok(mut hidden) = self.hidden.lock() {
+        {
+            let mut hidden = record(&self.hidden);
             hidden.show(hwnd);
         }
         // The routing ledger is deliberately *not* cleared here. A user
@@ -1052,18 +1069,17 @@ impl WindowManager {
             // The record is only written after the call succeeded, so the
             // restore path never promises a window it did not actually hide.
             Ok(()) => {
-                if let Ok(mut hidden) = self.hidden.lock() {
-                    if let Some(info) = identity {
-                        hidden.identify(hwnd, info.pid, &info.class);
-                    }
-                    hidden.hide(hwnd, behaviour);
-                    tracing::debug!(
-                        %hwnd,
-                        ?behaviour,
-                        off_screen = hidden.len(),
-                        "took a window off screen and recorded it"
-                    );
+                let mut hidden = record(&self.hidden);
+                if let Some(info) = identity {
+                    hidden.identify(hwnd, info.pid, &info.class);
                 }
+                hidden.hide(hwnd, behaviour);
+                tracing::debug!(
+                    %hwnd,
+                    ?behaviour,
+                    off_screen = hidden.len(),
+                    "took a window off screen and recorded it"
+                );
             }
             Err(e) => tracing::error!(%hwnd, ?behaviour, error = %e, "could not hide a window"),
         }
@@ -1096,10 +1112,8 @@ impl WindowManager {
             // without another window manager, which is the one failure this
             // record exists to prevent. `restore` already settles failures
             // back the same way.
-            if let Some(behaviour) = previous
-                && let Ok(mut hidden) = self.hidden.lock()
-            {
-                hidden.hide(hwnd, behaviour);
+            if let Some(behaviour) = previous {
+                record(&self.hidden).hide(hwnd, behaviour);
             }
         }
     }
@@ -1417,7 +1431,7 @@ impl WindowManager {
                     %hwnd,
                     kind = kind.as_str(),
                     ours,
-                    off_screen = self.hidden.lock().map(|h| h.len()).unwrap_or(0),
+                    off_screen = record(&self.hidden).len(),
                     managed = self.core.is_managed(window_id(hwnd)),
                     "a window went off screen"
                 );
@@ -1439,7 +1453,7 @@ impl WindowManager {
                     %hwnd,
                     ours,
                     already_minimized = self.minimized.contains(&hwnd),
-                    off_screen = self.hidden.lock().map(|h| h.len()).unwrap_or(0),
+                    off_screen = record(&self.hidden).len(),
                     managed = self.core.is_managed(window_id(hwnd)),
                     "a window reported itself minimized"
                 );
@@ -1462,7 +1476,7 @@ impl WindowManager {
     }
 
     fn we_hid(&self, hwnd: Hwnd) -> bool {
-        self.hidden.lock().is_ok_and(|hidden| hidden.contains(hwnd))
+        record(&self.hidden).contains(hwnd)
     }
 
     /// Whether a destroy is an application closing to the tray rather than a
@@ -2514,10 +2528,7 @@ impl WindowManager {
             .collect();
 
         let stranded: Vec<Hwnd> = {
-            let Ok(hidden) = self.hidden.lock() else {
-                return Response::error("the hiding record is unreadable");
-            };
-            hidden
+            record(&self.hidden)
                 .handles()
                 .into_iter()
                 .filter(|hwnd| !accounted.contains(hwnd))
@@ -2531,10 +2542,7 @@ impl WindowManager {
 
         let mut given_back = 0;
         for hwnd in stranded {
-            let behaviour = match self.hidden.lock() {
-                Ok(mut hidden) => hidden.show(hwnd),
-                Err(_) => None,
-            };
+            let behaviour = record(&self.hidden).show(hwnd);
             let result = match behaviour {
                 Some(HidingBehaviour::Cloak) | None => self.platform.set_cloaked(hwnd, false),
                 Some(HidingBehaviour::Minimize) => self.platform.show(hwnd, ShowState::Restore),
@@ -2542,7 +2550,16 @@ impl WindowManager {
             };
             match result {
                 Ok(()) => given_back += 1,
-                Err(e) => tracing::error!(%hwnd, error = %e, "could not give a window back"),
+                Err(e) => {
+                    // Written back down, the same way `show_window` does. This
+                    // is the last-resort escape hatch: clearing the record and
+                    // then failing left the window cloaked and invisible to the
+                    // very command the user would run again to rescue it.
+                    tracing::error!(%hwnd, error = %e, "could not give a window back");
+                    if let Some(behaviour) = behaviour {
+                        record(&self.hidden).hide(hwnd, behaviour);
+                    }
+                }
             }
         }
         tracing::warn!(count = given_back, "gave stranded windows back");

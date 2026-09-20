@@ -142,6 +142,23 @@ fn main() -> Result<()> {
     // The loop owns the state until something asks it to stop.
     let result = manager.run();
 
+    // The desktop comes back FIRST, before anything is torn down.
+    //
+    // It used to come last, after four `join()` calls with no deadline. Any of
+    // them can block forever: each producer thread is woken with a posted
+    // message, and `PostThreadMessageW` fails once a thread's queue is full,
+    // which is exactly what a window storming location-change events does to
+    // the hook thread. The join was then waiting on a thread nothing could
+    // wake, with the hotkeys already unbound and the pipe already stopped, so
+    // there was no key and no command left to ask for a restore and every
+    // window on every inactive workspace stayed cloaked behind a live process
+    // nobody could talk to.
+    //
+    // Giving the windows back before the teardown makes a hung producer cost a
+    // lingering process instead of a lost desktop.
+    manager.restore_all();
+    restore_guard.disarm();
+
     tracing::info!("stopping the producers");
     manager.stop_hotkeys();
     pipe.stop();
@@ -149,8 +166,6 @@ fn main() -> Result<()> {
     drop(config_watcher);
     hooks.stop();
     message_window.stop();
-    manager.restore_all();
-    restore_guard.disarm();
 
     if let Some(slot) = SHUTDOWN.get()
         && let Ok(mut guard) = slot.lock()
