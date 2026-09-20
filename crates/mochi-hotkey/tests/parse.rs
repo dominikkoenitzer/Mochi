@@ -1,4 +1,7 @@
-//! The hotkey file Dominik actually runs, parsed end to end.
+//! A real, complete hotkey file, parsed end to end.
+//!
+//! The fixture is the file this project's author runs every day, so a change
+//! that would break a working desktop breaks this test first.
 //!
 //! The fixture next door is his file line for line, only the comments are
 //! reworded. It is here so a change to the parser, the key table or the shared

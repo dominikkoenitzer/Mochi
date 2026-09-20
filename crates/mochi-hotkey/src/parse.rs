@@ -1,7 +1,7 @@
 //! Reading a hotkey file into bindings.
 //!
-//! The format is the one Dominik's existing file already uses, so that file
-//! parses here unchanged:
+//! The format follows the common hotkey file conventions, so a file written
+//! for a standalone hotkey daemon parses here unchanged:
 //!
 //! ```text
 //! .shell pwsh
