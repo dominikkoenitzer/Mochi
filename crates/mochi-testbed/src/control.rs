@@ -102,6 +102,10 @@ pub struct SpawnRequest {
     /// Give the windows a real menu bar, so that Alt has something to open.
     #[serde(default)]
     pub menu_bar: bool,
+    /// Create the windows without the tool window bit, so the shell can
+    /// cloak them. See [`crate::SpawnOptions::taskbar`].
+    #[serde(default)]
+    pub taskbar: bool,
 }
 
 impl From<&crate::SpawnOptions> for SpawnRequest {
@@ -116,6 +120,7 @@ impl From<&crate::SpawnOptions> for SpawnRequest {
             owned: options.owned,
             no_title: options.no_title,
             menu_bar: options.menu_bar,
+            taskbar: options.taskbar,
         }
     }
 }
@@ -135,6 +140,7 @@ impl SpawnRequest {
             owned: self.owned,
             no_title: self.no_title,
             menu_bar: self.menu_bar,
+            taskbar: self.taskbar,
         }
     }
 }

@@ -240,6 +240,10 @@ mod imp {
                 // hand driven tiling session has no use for it. The control
                 // pipe carries it for a host that does.
                 menu_bar: false,
+                // Nor for this one: a window without the tool window bit is
+                // visible to any other window manager on the desktop, so only
+                // a test that knows the desktop is its own asks for it.
+                taskbar: false,
             }),
             Command::List => {
                 print(&json!(mochi_testbed::list_windows()?));
