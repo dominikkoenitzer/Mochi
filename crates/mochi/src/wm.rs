@@ -312,6 +312,48 @@ impl Hidden {
     }
 }
 
+/// Whether this command is one that acts on whatever window is focused.
+///
+/// `unmanaged_window_operation_behaviour` is documented as deciding whether a
+/// command aimed at a window Mochi does not manage runs anyway or is refused,
+/// and the setting was stored, reported by `mochic state` and read by nothing:
+/// under `no-op` every one of these behaved exactly as under `op`.
+///
+/// Only commands that reach for the focused window are listed. Anything that
+/// names its own target, asks a question, or changes a global setting is not
+/// aimed at a window at all and is never refused.
+fn acts_on_the_focused_window(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Focus { .. }
+            | Command::CycleFocus { .. }
+            | Command::Move { .. }
+            | Command::CycleMove { .. }
+            | Command::ResizeAxis { .. }
+            | Command::ResizeEdge { .. }
+            | Command::Promote
+            | Command::PromoteFocus
+            | Command::ToggleFloat
+            | Command::ToggleMaximize
+            | Command::ToggleMonocle
+            | Command::Minimize
+            | Command::Close
+            | Command::Unmanage
+            | Command::Stack { .. }
+            | Command::Unstack
+            | Command::StackAll
+            | Command::UnstackAll
+            | Command::CycleStack { .. }
+            | Command::FocusStackWindow { .. }
+            | Command::MoveToWorkspace { .. }
+            | Command::SendToWorkspace { .. }
+            | Command::MoveToNamedWorkspace { .. }
+            | Command::SendToNamedWorkspace { .. }
+            | Command::MoveToMonitor { .. }
+            | Command::SendToMonitor { .. }
+    )
+}
+
 /// The hiding record, whatever state the mutex is in.
 ///
 /// Poison is deliberately ignored, as it already is on the restore path. It
@@ -571,6 +613,13 @@ impl WindowManager {
         if let Some(hotkeys) = self.hotkeys.as_mut() {
             hotkeys.replace(bindings);
         }
+    }
+
+    /// Whether the window the user is actually looking at is one Mochi owns.
+    fn foreground_is_managed(&self) -> bool {
+        self.foreground
+            .or_else(|| self.platform.foreground_window())
+            .is_some_and(|hwnd| self.core.is_managed(window_id(hwnd)))
     }
 
     /// Whether a change to `path` is a change to the hotkey file.
@@ -1988,6 +2037,17 @@ impl WindowManager {
 
     fn handle_command(&mut self, command: Command) -> (Response, Flow) {
         use mochi_client as wire;
+
+        if self.core.unmanaged_window_operation_behaviour
+            == mochi_core::model::OperationBehaviour::NoOp
+            && acts_on_the_focused_window(&command)
+            && !self.foreground_is_managed()
+        {
+            return (
+                Response::error("the focused window is not managed"),
+                Flow::Continue,
+            );
+        }
 
         let response = match command {
             Command::State => {
@@ -4259,6 +4319,45 @@ mod tests {
         });
         wm.manage(&window(3, "Terminal"));
         assert_eq!(wm.state().workspace(0, 0).unwrap().containers().len(), 2);
+    }
+
+    #[test]
+    fn refusing_commands_for_an_unmanaged_window_actually_refuses_them() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        wm.handle_command(Command::UnmanagedWindowOperationBehaviour {
+            behaviour: mochi_client::OperationBehaviour::NoOp,
+        });
+
+        // A window Mochi does not manage has the foreground.
+        let mut stray = window(9, "A dialog");
+        stray.ex_style = crate::platform::types::ex_style::WS_EX_TOOLWINDOW;
+        platform.windows.lock().unwrap().push(stray);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(9));
+        assert!(!wm.foreground_is_managed());
+
+        // The setting was stored, reported by `mochic state` and read by
+        // nothing, so `no-op` behaved exactly like `op`.
+        let (response, _) = wm.handle_command(Command::Move {
+            direction: mochi_client::Direction::Left,
+        });
+        assert!(
+            response.error_message().is_some(),
+            "a command aimed at an unmanaged window ran under no-op"
+        );
+
+        // A command that names its own target is not aimed at a window and is
+        // never refused.
+        let (response, _) = wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert_eq!(response, Response::Ok);
+
+        // And under the default the same command runs.
+        wm.handle_command(Command::UnmanagedWindowOperationBehaviour {
+            behaviour: mochi_client::OperationBehaviour::Op,
+        });
+        let (response, _) = wm.handle_command(Command::Move {
+            direction: mochi_client::Direction::Left,
+        });
+        assert_eq!(response, Response::Ok);
     }
 
     #[test]
