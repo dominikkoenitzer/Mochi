@@ -8,8 +8,10 @@
     from a shortcut in the Startup folder is moved aside by
     -DisableStartupItem <name>, which renames <name>.lnk to <name>.lnk.disabled,
     and put back by -EnableStartupItem <name>. A HKCU Run value of the same name
-    is backed up and removed the same way, and restored on the way back. Nothing
-    else is touched.
+    is backed up and removed the same way, and restored on the way back. A Run
+    value called Mochi that somebody else wrote is backed up before -Enable
+    replaces it and restored by -Disable, and -Disable never removes a value
+    that does not run mochic. Nothing else is touched.
 
     Without a switch the script only reports the current state.
 
@@ -105,8 +107,42 @@ function Get-MochiCommand {
         return "`"$MochicPath`" start"
     }
 
-    $inner = "Start-Process -FilePath '$MochicPath' -ArgumentList 'start' -WindowStyle Hidden"
+    # A single quote in the path ends the string early and leaves a command
+    # line PowerShell cannot parse. A Windows account called O'Brien is enough,
+    # and because the launcher is hidden nobody ever sees the error: Mochi just
+    # never starts at login. Doubling it is how a single quoted string escapes
+    # one.
+    $quoted = $MochicPath.Replace("'", "''")
+    $inner = "Start-Process -FilePath '$quoted' -ArgumentList 'start' -WindowStyle Hidden"
     return "powershell.exe -NoProfile -WindowStyle Hidden -Command `"$inner`""
+}
+
+# Mochi's own Run value is a name like any other: somebody may already own it.
+# Only a command that runs mochic is ours to overwrite or to remove.
+function Test-MochiRunValue {
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $Value)
+    return ($Value -match '(?i)\bmochic(\.exe)?\b')
+}
+
+function Backup-RunValue {
+    param(
+        [Parameter(Mandatory)][string] $Name,
+        [Parameter(Mandatory)][AllowEmptyString()][string] $Value
+    )
+    $backupValue = "$script:BackupPrefix$Name"
+    if (-not (Test-Path $script:BackupKey)) { New-Item -Path $script:BackupKey -Force | Out-Null }
+    New-ItemProperty -Path $script:BackupKey -Name $backupValue -Value $Value -PropertyType String -Force | Out-Null
+    Write-Detail "Run value backed up to $script:BackupKey\$backupValue"
+}
+
+function Restore-RunValue {
+    param([Parameter(Mandatory)][string] $Name)
+    $backup = Get-BackupValue -Name $Name
+    if ($null -eq $backup) { return $false }
+    $backupValue = "$script:BackupPrefix$Name"
+    New-ItemProperty -Path $script:RunKey -Name $Name -Value $backup -PropertyType String -Force | Out-Null
+    Remove-ItemProperty -Path $script:BackupKey -Name $backupValue
+    return $true
 }
 
 function Enable-MochiAutostart {
@@ -115,26 +151,51 @@ function Enable-MochiAutostart {
     }
     $command = Get-MochiCommand
     $current = Get-RunValue -Name $script:MochiValue
-    if ($current -eq $command) {
+
+    # Every other name this script touches is backed up before it is moved
+    # aside and put back afterwards. Mochi's own name gets the same treatment
+    # rather than -Force writing over whatever a stranger left there.
+    $foreign = ($null -ne $current) -and -not (Test-MochiRunValue -Value "$current")
+    if ((-not $foreign) -and ($current -eq $command)) {
         Write-Detail 'already registered with the same command'
         Write-Detail "$script:RunKey\$script:MochiValue = $command"
         return
     }
+    if ($foreign) {
+        Write-Detail "$script:RunKey\$script:MochiValue is already taken by something else:"
+        Write-Detail "  $current"
+        Write-Detail 'it is backed up first and -Disable puts it back'
+    }
+
     Write-Detail "$script:RunKey\$script:MochiValue = $command"
     if ($PSCmdlet.ShouldProcess("$script:RunKey\$script:MochiValue", 'set')) {
+        if ($foreign) { Backup-RunValue -Name $script:MochiValue -Value "$current" }
         New-ItemProperty -Path $script:RunKey -Name $script:MochiValue -Value $command -PropertyType String -Force | Out-Null
         Write-Detail 'registered'
     }
 }
 
 function Disable-MochiAutostart {
-    if ($null -eq (Get-RunValue -Name $script:MochiValue)) {
+    $current = Get-RunValue -Name $script:MochiValue
+    if ($null -eq $current) {
         Write-Detail 'no Mochi Run value, nothing to do'
+    } elseif (-not (Test-MochiRunValue -Value "$current")) {
+        # Not ours, so not ours to delete.
+        Write-Detail "$script:RunKey\$script:MochiValue does not run mochic, leaving it alone:"
+        Write-Detail "  $current"
         return
-    }
-    if ($PSCmdlet.ShouldProcess("$script:RunKey\$script:MochiValue", 'remove')) {
+    } elseif ($PSCmdlet.ShouldProcess("$script:RunKey\$script:MochiValue", 'remove')) {
         Remove-ItemProperty -Path $script:RunKey -Name $script:MochiValue
         Write-Detail 'removed'
+    } else {
+        return
+    }
+
+    if ($null -ne (Get-BackupValue -Name $script:MochiValue)) {
+        if ($PSCmdlet.ShouldProcess("$script:RunKey\$script:MochiValue", 'restore from backup')) {
+            [void] (Restore-RunValue -Name $script:MochiValue)
+            Write-Detail 'the Run value that was there before Mochi was restored'
+        }
     }
 }
 
@@ -159,12 +220,10 @@ function Disable-OtherAutostart {
     $run = Get-RunValue -Name $Name
     if ($null -ne $run) {
         $found = $true
-        $backupValue = "$script:BackupPrefix$Name"
         if ($PSCmdlet.ShouldProcess("$script:RunKey\$Name", 'back up and remove')) {
-            if (-not (Test-Path $script:BackupKey)) { New-Item -Path $script:BackupKey -Force | Out-Null }
-            New-ItemProperty -Path $script:BackupKey -Name $backupValue -Value $run -PropertyType String -Force | Out-Null
+            Backup-RunValue -Name $Name -Value "$run"
             Remove-ItemProperty -Path $script:RunKey -Name $Name
-            Write-Detail "Run value backed up to $script:BackupKey\$backupValue and removed"
+            Write-Detail 'Run value removed'
         }
     }
 
@@ -193,10 +252,8 @@ function Enable-OtherAutostart {
     $backup = Get-BackupValue -Name $Name
     if ($null -ne $backup) {
         $found = $true
-        $backupValue = "$script:BackupPrefix$Name"
         if ($PSCmdlet.ShouldProcess("$script:RunKey\$Name", 'restore from backup')) {
-            New-ItemProperty -Path $script:RunKey -Name $Name -Value $backup -PropertyType String -Force | Out-Null
-            Remove-ItemProperty -Path $script:BackupKey -Name $backupValue
+            [void] (Restore-RunValue -Name $Name)
             Write-Detail 'Run value restored'
         }
     }
