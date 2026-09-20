@@ -74,6 +74,31 @@ pub fn set_restore_hook(f: impl Fn() + Send + 'static) {
     *lock() = Some(Box::new(f));
 }
 
+/// Where a panic on a producer thread asks the loop to stop.
+static STOPPER: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+
+/// Installs the way to ask the event loop to shut down.
+///
+/// Only used after a panic. It must do nothing but hand a message to the loop:
+/// it runs on whichever thread died, while that thread is unwinding.
+pub fn set_shutdown_hook(f: impl Fn() + Send + 'static) {
+    match STOPPER.lock() {
+        Ok(mut slot) => *slot = Some(Box::new(f)),
+        Err(poisoned) => *poisoned.into_inner() = Some(Box::new(f)),
+    }
+}
+
+/// Asks the event loop to shut down, if anything has said how.
+fn request_shutdown() {
+    let hook = match STOPPER.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(stop) = hook.as_ref() {
+        stop();
+    }
+}
+
 /// Puts the desktop back the way Mochi found it.
 ///
 /// Safe to call more than once, from any thread, and from inside the hook
@@ -150,6 +175,15 @@ pub fn install_panic_hook() {
             .map_or_else(|| "unknown".to_owned(), ToString::to_string);
         tracing::error!(%location, payload = %panic_message(info), "mochi panicked");
         restore_all();
+        // And then stop, rather than carrying on with one thread missing.
+        // A panic on a producer thread unwinds that thread alone: the process
+        // keeps running, the loop keeps answering hotkeys and commands, and
+        // the desktop has just been uncloaked underneath it. But if the thread
+        // that died was the WinEvent hook, no window is ever managed or
+        // unmanaged again, and nothing says so. A window manager that looks
+        // alive while its model rots is worse than one that stops, because
+        // stopping is visible and the windows are already back.
+        request_shutdown();
         previous(info);
     }));
 }
@@ -257,6 +291,38 @@ mod tests {
         );
 
         set_restore_hook(|| {});
+    }
+
+    #[test]
+    fn a_panic_on_a_producer_thread_also_asks_the_loop_to_stop() {
+        let _guard = exclusive();
+        let restored = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        {
+            let restored = Arc::clone(&restored);
+            set_restore_hook(move || {
+                restored.fetch_add(1, Ordering::SeqCst);
+            });
+            let stopped = Arc::clone(&stopped);
+            set_shutdown_hook(move || {
+                stopped.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        install_panic_hook();
+
+        let _ = std::thread::spawn(|| panic!("a producer died")).join();
+
+        // Restoring alone left the daemon alive with one thread missing: if it
+        // was the WinEvent hook, no window is managed or unmanaged ever again
+        // and nothing reports it. The desktop is already back by this point,
+        // so stopping is the honest end.
+        assert_eq!(restored.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            stopped.load(Ordering::SeqCst),
+            1,
+            "a panicking producer thread did not stop the daemon"
+        );
+        let _ = std::panic::take_hook();
     }
 
     #[test]
