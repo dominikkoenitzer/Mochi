@@ -159,5 +159,11 @@ conditions like "class equals X and title does not contain Y".
 
 ## Reloading
 
-`mochic reload-configuration` re-reads the file. Anything set with a `mochic`
-command in the meantime is overwritten by what the file says.
+The file is watched, so saving it applies at once. `mochic
+reload-configuration` re-reads it on demand, and the hotkey file with it.
+Anything set with a `mochic` command in the meantime is overwritten by what the
+file says.
+
+Keys are not configured here. They live in their own file, next to this one in
+spirit but with a syntax of its own, and they reload the same way: see
+[hotkeys.md](hotkeys.md).

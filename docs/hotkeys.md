@@ -19,9 +19,10 @@ Mochi looks for it in this order and takes the first hit:
 4. `%USERPROFILE%\.config\mochi\whkdrc`, for a desktop that came from a
    standalone hotkey daemon and still uses that file name.
 
-`mochic quickstart` writes a starting file with every command in it. Saving the
-file reloads it; nothing has to be restarted. `mochi --no-hotkeys` binds no keys
-at all, for a setup that drives Mochi from something else.
+`mochic quickstart` writes a starting file: focus, moving windows, resizing,
+workspaces, layouts and game mode, one key each. Saving the file reloads it;
+nothing has to be restarted. `mochi --no-hotkeys` binds no keys at all, for a
+setup that drives Mochi from something else.
 
 ## Syntax
 
