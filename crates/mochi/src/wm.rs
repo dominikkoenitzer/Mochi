@@ -179,6 +179,26 @@ impl Hidden {
         }
     }
 
+    /// Takes over the entries a previous session could not put back.
+    ///
+    /// Written straight into the in-memory sets without touching the file:
+    /// what is on disk already says exactly this, and rewriting it here would
+    /// be a no-op that could only go wrong.
+    pub fn adopt(&mut self, entries: Vec<crate::recover::Entry>) {
+        for entry in entries {
+            let hwnd = Hwnd(entry.hwnd);
+            if entry.pid != 0 || !entry.class.is_empty() {
+                self.identity.insert(hwnd, (entry.pid, entry.class));
+            }
+            if let Some(behaviour) = entry.behaviour {
+                self.windows.insert(hwnd, behaviour);
+            }
+            if entry.faded {
+                self.faded.insert(hwnd);
+            }
+        }
+    }
+
     /// Remembers how to recognise a window, so a reused handle is not touched.
     pub fn identify(&mut self, hwnd: Hwnd, pid: u32, class: &str) {
         self.identity.insert(hwnd, (pid, class.to_owned()));
@@ -449,14 +469,27 @@ impl WindowManager {
         // so they are enumerated and tiled like any other window.
         let record = crate::recover::default_path();
         let recovered = crate::recover::recover(platform.as_ref(), &record);
-        if !recovered.is_empty() {
+        if !recovered.back.is_empty() {
             tracing::info!(
-                count = recovered.len(),
+                count = recovered.back.len(),
                 "brought back windows a previous session left off screen"
             );
         }
 
-        let hidden = Arc::new(Mutex::new(Hidden::with_record(record)));
+        // Whatever the recovery could not finish is adopted, not started over.
+        // A fresh record rewrites the file on its first hide, and the entries
+        // the last session was still owed were the only thing that knew those
+        // windows exist: not in the model, not enumerable while cloaked, and
+        // gone from disk the moment any other window went off screen.
+        let mut carried = Hidden::with_record(record);
+        if !recovered.unfinished.is_empty() {
+            tracing::warn!(
+                count = recovered.unfinished.len(),
+                "still holding windows a previous session could not put back"
+            );
+            carried.adopt(recovered.unfinished);
+        }
+        let hidden = Arc::new(Mutex::new(carried));
         let visuals = crate::visuals::Visuals::new(Arc::clone(&platform), Arc::clone(&hidden));
 
         let mut wm = Self {
