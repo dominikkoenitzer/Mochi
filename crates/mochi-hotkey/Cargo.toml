@@ -4,7 +4,6 @@ description = "Hotkey bindings for Mochi: parsing, key names and lookup."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-authors.workspace = true
 repository.workspace = true
 publish.workspace = true
 

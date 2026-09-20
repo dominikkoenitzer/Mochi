@@ -40,9 +40,9 @@ mod tests {
 
     #[test]
     fn umlauts_survive_the_round_trip() {
-        let wide = to_wide("Könitzer");
+        let wide = to_wide("Zürich");
         assert_eq!(*wide.last().unwrap(), 0);
-        assert_eq!(from_wide(&wide), "Könitzer");
+        assert_eq!(from_wide(&wide), "Zürich");
     }
 
     #[test]

@@ -4,7 +4,6 @@ description = "Visuals for Mochi: window borders, per-window transparency, the s
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-authors.workspace = true
 repository.workspace = true
 publish.workspace = true
 
