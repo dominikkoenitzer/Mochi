@@ -302,7 +302,7 @@ pub fn expand_env(raw: &str) -> String {
 /// otherwise take the watch with it and the second save would go unnoticed.
 ///
 /// Between the watcher and the window manager sits a thread that collects the
-/// burst one save produces and reports it once, after [`DEBOUNCE`] of quiet.
+/// burst one save produces and reports it once, after a quarter second of quiet.
 /// Counting from the *first* event of a burst instead, and dropping the rest,
 /// loses a save that lands just after one: the events that would have reported
 /// it were already spent, and nothing comes along later to make up for it.
