@@ -303,3 +303,35 @@ fn a_wait_that_never_comes_true_times_out_with_a_useful_error() {
     // The window is untouched by a wait that gave up.
     assert!(mochi_testbed::window_exists(hwnd));
 }
+
+#[test]
+fn a_window_with_a_menu_bar_spawns_like_any_other_and_starts_outside_menu_mode() {
+    if !desktop_available() {
+        return;
+    }
+
+    let batch = TestWindows::spawn_with(&SpawnOptions {
+        count: 1,
+        menu_bar: true,
+        ..SpawnOptions::new(1, 0)
+    })
+    .expect("one test window with a menu bar");
+    let hwnd = batch.handles()[0];
+
+    let window = batch.windows().pop().expect("the window is still there");
+    assert!(window.visible, "0x{hwnd:x} is not visible");
+    assert!(!window.frame.is_empty(), "0x{hwnd:x} has no frame");
+
+    // Nothing has pressed a key, so the menu that is now hanging on this
+    // window has not been entered. What a bare Alt does to it is measured
+    // end to end in `crates/mochi/tests/e2e_testbed.rs`, where there is a
+    // foreground window to press it against.
+    assert!(
+        !mochi_testbed::in_menu_mode(hwnd),
+        "0x{hwnd:x} claims to be in a menu before anything touched it"
+    );
+    assert!(
+        !mochi_testbed::in_menu_mode(0),
+        "a handle that is not a window cannot be in a menu"
+    );
+}

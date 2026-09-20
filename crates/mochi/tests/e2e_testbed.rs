@@ -1330,6 +1330,10 @@ mod keys {
     pub const F16: u16 = 0x7F;
     /// `VK_LMENU`, the left Alt key.
     pub const LEFT_ALT: u16 = 0xA4;
+    /// `VK_ESCAPE`. The only key here a person could also mean, and it is sent
+    /// for one purpose: to leave a menu this test itself opened, into a window
+    /// this test itself spawned and checked is in the foreground first.
+    pub const ESCAPE: u16 = 0x1B;
 }
 
 /// Presses a key, with one modifier held around it, the way a person would.
@@ -1571,7 +1575,160 @@ fn hotkeys_drive_the_daemon_and_stay_out_of_the_way() {
 }
 
 // ---------------------------------------------------------------------------
-// test seven: a long session, because the worst failure mode is a window that
+// test seven: what a swallowed `alt + key` binding leaves behind in the
+// application that was in front. Nearly every binding a person writes holds
+// Alt, and an application sees Alt go down, never sees the key the hook
+// swallowed, and then sees Alt come up: the sequence `DefWindowProc` reads as
+// "open the menu bar".
+// ---------------------------------------------------------------------------
+
+/// Refuses to inject anything unless the window under test is in the
+/// foreground.
+///
+/// Checked again immediately before every single injection, not once at the
+/// start: an Alt press that landed in somebody else's window would open a menu
+/// on the desktop the user is sitting at, and it would measure that window
+/// rather than this one.
+fn only_when_foreground(hwnd: i64) -> Result<(), String> {
+    check(
+        mochi_testbed::foreground_window() == hwnd,
+        format!(
+            "{hwnd:#x} is not the foreground window ({:#x} is), so nothing may be injected",
+            mochi_testbed::foreground_window()
+        ),
+    )
+}
+
+/// Leaves the menu, if the last keystroke opened one, and says whether it is
+/// gone. Never leaves menu mode behind for the next step to trip over.
+fn leave_menu(hwnd: i64) -> bool {
+    if !mochi_testbed::in_menu_mode(hwnd) {
+        return true;
+    }
+    if only_when_foreground(hwnd).is_ok() {
+        tap(keys::ESCAPE, None);
+    }
+    !mochi_testbed::in_menu_mode(hwnd)
+}
+
+#[test]
+fn an_alt_binding_does_not_leave_the_application_in_menu_mode() {
+    skip_unless_allowed!("an_alt_binding_does_not_leave_the_application_in_menu_mode");
+
+    let scratch = temp_dir().join("menu-mode");
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).expect("could not make the menu scratch directory");
+    let file = scratch.join("hotkeys");
+    std::fs::write(&file, "alt + f13 : toggle-pause\n").expect("could not write the hotkey file");
+
+    let mut daemon = Daemon::start_with("menu-mode", &["--hotkeys", &file.to_string_lossy()]);
+    let log = daemon.log();
+
+    // One window, and it has a real menu bar: a window without one has no menu
+    // to enter, so it would answer "no menu mode" to every sequence and prove
+    // nothing at all.
+    let windows = TestWindows::spawn_with(&SpawnOptions {
+        menu_bar: true,
+        ..SpawnOptions::new(1, 0)
+    })
+    .expect("could not spawn the test window");
+    let hwnd = windows.handles()[0];
+
+    let mut steps = Steps::default();
+
+    steps.step("the window with the menu bar is in front", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 1)
+            .map_err(|_| format!("state shows {} windows", managed_count()))?;
+        check(
+            hotkey_count() == 1,
+            format!("the daemon holds {} bindings, not one", hotkey_count()),
+        )?;
+        mochi_testbed::focus_window(hwnd).map_err(|e| e.to_string())?;
+        wait_for(STEP, || mochi_testbed::foreground_window() == hwnd).map_err(|_| {
+            format!(
+                "{hwnd:#x} never reached the foreground, so no key may be injected: \
+                 the foreground is {:#x}",
+                mochi_testbed::foreground_window()
+            )
+        })?;
+        check(
+            !mochi_testbed::in_menu_mode(hwnd),
+            format!("{hwnd:#x} was already in a menu before anything was pressed"),
+        )
+    });
+
+    // The baseline. Without it the step below is worthless: a window that
+    // never enters menu mode would pass it for the wrong reason.
+    steps.step("a bare alt does open the menu bar on this window", || {
+        only_when_foreground(hwnd)?;
+        tap(keys::LEFT_ALT, None);
+        let opened = mochi_testbed::in_menu_mode(hwnd);
+        let left = leave_menu(hwnd);
+        check(
+            opened,
+            format!(
+                "BASELINE BROKEN: a bare alt did not put {hwnd:#x} into menu mode. \
+                 This test can then prove nothing about what a binding does, \
+                 and the step below would pass whatever the hook is doing."
+            ),
+        )?;
+        check(left, "escape did not get out of the menu again".to_owned())
+    });
+
+    steps.step("a swallowed alt binding does not open it", || {
+        only_when_foreground(hwnd)?;
+        check(paused() == Some(false), "the daemon came up paused")?;
+
+        tap(keys::F13, Some(keys::LEFT_ALT));
+        let fired = paused() == Some(true);
+        let menu = mochi_testbed::in_menu_mode(hwnd);
+
+        // Put the desktop and the daemon back the way they were, whichever way
+        // the measurement went, before anything is reported.
+        let left = leave_menu(hwnd);
+        if only_when_foreground(hwnd).is_ok() {
+            tap(keys::F13, Some(keys::LEFT_ALT));
+        }
+        let back = leave_menu(hwnd);
+
+        check(
+            fired,
+            "alt + f13 never reached the daemon, so this step says nothing \
+             about what the press left behind"
+                .to_owned(),
+        )?;
+        check(
+            !menu,
+            format!(
+                "alt + f13 left {hwnd:#x} in menu mode: the application saw alt go down \
+                 and come back up with nothing in between, and opened its menu bar"
+            ),
+        )?;
+        check(
+            left && back,
+            "the window stayed in a menu afterwards".to_owned(),
+        )?;
+        check(
+            paused() == Some(false),
+            "the second alt + f13 did not resume tiling".to_owned(),
+        )
+    });
+
+    steps.step("stop leaves the window visible", || {
+        daemon.stop();
+        wait_for(Duration::from_secs(5), || {
+            infos(&windows).iter().all(|w| w.visible && !w.cloaked)
+        })
+        .map_err(|_| "the window stayed hidden after stop".to_owned())
+    });
+
+    drop(windows);
+    let _ = std::fs::remove_dir_all(&scratch);
+    steps.finish(&log);
+}
+
+// ---------------------------------------------------------------------------
+// test eight: a long session, because the worst failure mode is a window that
 // is gone and cannot be brought back
 // ---------------------------------------------------------------------------
 

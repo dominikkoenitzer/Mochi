@@ -30,13 +30,14 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, HICON,
-    IDC_ARROW, IsIconic, LoadCursorW, MINMAXINFO, MSG, PostQuitMessage, RegisterClassW, SW_SHOWNA,
-    SWP_NOSIZE, SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WINDOWPOS,
-    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_SETTEXT, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WNDCLASSW,
-    WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+    AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateMenu, CreatePopupMenu,
+    CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
+    GetClientRect, GetMessageW, GetWindowLongPtrW, HICON, HMENU, IDC_ARROW, IsIconic, LoadCursorW,
+    MF_POPUP, MF_STRING, MINMAXINFO, MSG, PostQuitMessage, RegisterClassW, SW_SHOWNA, SWP_NOSIZE,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_LONG_PTR_INDEX, WINDOWPOS, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY,
+    WM_PAINT, WM_SETTEXT, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WNDCLASSW, WS_EX_TOOLWINDOW,
+    WS_OVERLAPPEDWINDOW,
 };
 use windows::core::PCWSTR;
 
@@ -121,6 +122,12 @@ pub struct SpawnOptions {
     /// Create the windows with an empty title. The usual manageability rules
     /// skip a window without one.
     pub no_title: bool,
+    /// Hang a real menu bar on each window: one popup with one item, which is
+    /// all it takes for `DefWindowProc` to treat Alt the way an application
+    /// with a menu does. A test that wants to know whether something left the
+    /// application in menu mode needs a window that has a menu to enter.
+    /// [`crate::in_menu_mode`] is how that is read back.
+    pub menu_bar: bool,
 }
 
 impl Default for SpawnOptions {
@@ -135,6 +142,7 @@ impl Default for SpawnOptions {
             min_size: None,
             owned: false,
             no_title: false,
+            menu_bar: false,
         }
     }
 }
@@ -225,6 +233,7 @@ impl TestWindows {
                 min_size: options.min_size.unwrap_or(DEFAULT_MIN_SIZE),
                 enforce_min: options.min_size.is_some(),
                 owned: options.owned,
+                menu_bar: options.menu_bar,
             };
 
             let (tx, rx) = mpsc::channel::<std::result::Result<i64, String>>();
@@ -450,6 +459,7 @@ struct WindowSpec {
     min_size: (i32, i32),
     enforce_min: bool,
     owned: bool,
+    menu_bar: bool,
 }
 
 /// Per-window state, owned by the window: created before `CreateWindowExW`,
@@ -555,12 +565,47 @@ unsafe fn create_owner_window(module: HINSTANCE) -> Result<HWND> {
     .map_err(|e| Error::win32("CreateWindowExW (owner)", &e))
 }
 
+/// The command id of the one item on the menu bar. Nothing ever handles it:
+/// what a test needs from a menu is that it can be *entered*, not that it does
+/// anything once it is.
+const MENU_ITEM_ID: usize = 1000;
+
+/// A small but entirely real menu bar: one popup with one item in it.
+///
+/// This is the whole reason a test window can answer the Alt question.
+/// `DefWindowProc` only opens a menu on a window that has one, so a window
+/// without a menu bar would say "no menu mode" to every input sequence and
+/// prove nothing. The menu belongs to the window from `CreateWindowExW`
+/// onwards and is destroyed with it.
+unsafe fn create_menu_bar() -> Result<HMENU> {
+    unsafe {
+        let bar = CreateMenu().map_err(|e| Error::win32("CreateMenu", &e))?;
+        let popup = CreatePopupMenu().map_err(|e| Error::win32("CreatePopupMenu", &e))?;
+        let item = to_wide("&Item");
+        let title = to_wide("&File");
+        let built = AppendMenuW(popup, MF_STRING, MENU_ITEM_ID, PCWSTR(item.as_ptr()))
+            .and_then(|()| AppendMenuW(bar, MF_POPUP, popup.0 as usize, PCWSTR(title.as_ptr())));
+        if let Err(e) = built {
+            let _ = DestroyMenu(popup);
+            let _ = DestroyMenu(bar);
+            return Err(Error::win32("AppendMenuW", &e));
+        }
+        Ok(bar)
+    }
+}
+
 unsafe fn create_window(spec: &WindowSpec) -> Result<HWND> {
     ensure_class()?;
 
     let module =
         unsafe { GetModuleHandleW(None) }.map_err(|e| Error::win32("GetModuleHandleW", &e))?;
     let module = HINSTANCE(module.0);
+
+    let menu = if spec.menu_bar {
+        Some(unsafe { create_menu_bar() }?)
+    } else {
+        None
+    };
 
     let owner = if spec.owned {
         Some(unsafe { create_owner_window(module) }?)
@@ -597,7 +642,9 @@ unsafe fn create_window(spec: &WindowSpec) -> Result<HWND> {
             // An owner turns this into an owned popup, which the usual
             // manageability rules skip.
             owner,
-            None,
+            // A real menu bar when the spawn asked for one, so that Alt has
+            // something to open.
+            menu,
             Some(module),
             Some(state.cast::<c_void>()),
         )
@@ -622,6 +669,10 @@ unsafe fn create_window(spec: &WindowSpec) -> Result<HWND> {
             // One failed window leaks a few bytes, once.
             if let Some(owner) = owner {
                 let _ = unsafe { DestroyWindow(owner) };
+            }
+            // A menu only belongs to the window once the window exists.
+            if let Some(menu) = menu {
+                let _ = unsafe { DestroyMenu(menu) };
             }
             Err(Error::win32("CreateWindowExW", &e))
         }
@@ -956,6 +1007,9 @@ mod tests {
         assert_eq!(options.monitor, 0);
         assert_eq!(options.title_prefix, DEFAULT_TITLE_PREFIX);
         assert!(!options.emit_events);
+        // A menu bar changes what Alt does to a window, so it is never on by
+        // accident: only the test that asks about menus gets one.
+        assert!(!options.menu_bar);
     }
 
     #[test]

@@ -27,12 +27,13 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClassNameW,
-    GetForegroundWindow, GetLayeredWindowAttributes, GetWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA,
-    MONITORINFOF_PRIMARY, PostMessageW, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, WM_CLOSE,
+    BringWindowToTop, EnumWindows, GUI_INMENUMODE, GUITHREADINFO, GW_OWNER, GWL_EXSTYLE, GWL_STYLE,
+    GWLP_USERDATA, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
+    GetLayeredWindowAttributes, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, MONITORINFOF_PRIMARY,
+    PostMessageW, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+    SetWindowTextW, ShowWindow, WM_CLOSE,
 };
 use windows::core::PCWSTR;
 
@@ -371,6 +372,31 @@ fn owner_raw(hwnd: HWND) -> Option<i64> {
 #[must_use]
 pub fn foreground_window() -> i64 {
     as_i64(unsafe { GetForegroundWindow() })
+}
+
+/// True when the thread that owns this window is sitting in a menu.
+///
+/// `GUI_INMENUMODE` out of `GetGUIThreadInfo`, which is the only honest way to
+/// see this from outside: a window whose menu bar has been activated looks
+/// exactly like any other window to `GetWindowRect` and friends, but its thread
+/// is inside the menu loop and the next keystroke goes to the menu instead of
+/// to the application.
+///
+/// The one thing this answers is what a bare Alt does to a window spawned with
+/// [`crate::SpawnOptions::menu_bar`]. False for a window that has no menu bar,
+/// for a window that is gone, and for a thread that never entered a menu.
+#[must_use]
+pub fn in_menu_mode(hwnd: i64) -> bool {
+    let thread = unsafe { GetWindowThreadProcessId(as_hwnd(hwnd), None) };
+    if thread == 0 {
+        return false;
+    }
+    let mut info = GUITHREADINFO {
+        cbSize: size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetGUIThreadInfo(thread, &raw mut info) }.is_ok()
+        && info.flags.contains(GUI_INMENUMODE)
 }
 
 unsafe fn class_name(hwnd: HWND) -> String {

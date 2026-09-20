@@ -235,6 +235,11 @@ mod imp {
                 }),
                 owned,
                 no_title,
+                // No flag for this one: a menu bar exists for the tests that
+                // ask what a keystroke does to a window that has one, and a
+                // hand driven tiling session has no use for it. The control
+                // pipe carries it for a host that does.
+                menu_bar: false,
             }),
             Command::List => {
                 print(&json!(mochi_testbed::list_windows()?));
