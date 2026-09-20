@@ -132,14 +132,18 @@ impl Visuals {
                 Some(manager) => manager.set_alpha(alpha),
                 None => self.transparency = Some(TransparencyManager::new(alpha)),
             }
-        } else if let Some(mut manager) = self.transparency.take()
-            && let Err(e) = manager.clear_all()
-        {
-            tracing::error!(error = %e, "could not clear transparency");
+            return;
         }
-        if !on {
-            self.unfade_all();
-        }
+        let still = match self.transparency.take() {
+            Some(mut manager) => {
+                if let Err(e) = manager.clear_all() {
+                    tracing::error!(error = %e, "could not clear transparency");
+                }
+                Self::still_faded(&self.faded, Some(&manager))
+            }
+            None => BTreeSet::new(),
+        };
+        self.unfade_all(&still);
     }
 
     fn apply_animation_settings(&mut self, config: &Config) {
@@ -183,10 +187,15 @@ impl Visuals {
             let jobs = placements
                 .iter()
                 .map(|&(target, to)| {
+                    // The perceived frame, not `GetWindowRect`: `to` is a
+                    // layout rectangle and `Platform::set_positions`
+                    // compensates for the invisible resize border on every
+                    // frame, so starting from the window rect would have the
+                    // window jump outward by that border and ease back.
                     let from = self
                         .platform
                         .window_info(target)
-                        .map(|info| info.rect)
+                        .map(|info| info.visible_frame())
                         .unwrap_or(to);
                     self.animation.job(handle(target), from, to)
                 })
@@ -241,10 +250,14 @@ impl Visuals {
             if let Err(e) = manager.update(&wanted) {
                 tracing::error!(error = %e, "could not update transparency");
             }
+            // Everything the manager still has faded, which is the unfocused
+            // set plus anything it could not put back: a window whose restore
+            // failed is still translucent, so the crash record has to keep it.
             let now: BTreeSet<Hwnd> = targets
                 .unfocused
                 .iter()
                 .copied()
+                .chain(self.faded.iter().copied())
                 .filter(|&target| manager.is_faded(handle(target)))
                 .collect();
             self.sync_fade_record(now);
@@ -266,17 +279,36 @@ impl Visuals {
         self.faded = now;
     }
 
-    /// Un-records every window this instance had marked as faded, without
+    /// Un-records the windows this instance had marked as faded, without
     /// touching the windows themselves. Used once a setting turns
     /// transparency off and [`TransparencyManager::clear_all`] has already put
     /// them back.
-    fn unfade_all(&mut self) {
+    ///
+    /// `still_faded` is what `clear_all` could not put back. Those windows are
+    /// still translucent, so they stay in the crash record.
+    fn unfade_all(&mut self, still_faded: &BTreeSet<Hwnd>) {
         if let Ok(mut hidden) = self.hidden.lock() {
-            for &target in &self.faded {
+            for &target in self.faded.difference(still_faded) {
                 hidden.unfade(target);
             }
         }
-        self.faded.clear();
+        self.faded = still_faded.clone();
+    }
+
+    /// The windows this instance faded that `manager` still has faded, because
+    /// putting them back failed.
+    fn still_faded(
+        faded: &BTreeSet<Hwnd>,
+        manager: Option<&TransparencyManager>,
+    ) -> BTreeSet<Hwnd> {
+        let Some(manager) = manager else {
+            return BTreeSet::new();
+        };
+        faded
+            .iter()
+            .copied()
+            .filter(|&target| manager.is_faded(handle(target)))
+            .collect()
     }
 
     /// Clears every visual: destroys the border frames, puts every faded
@@ -294,7 +326,8 @@ impl Visuals {
         {
             tracing::error!(error = %e, "could not clear transparency");
         }
-        self.unfade_all();
+        let still = Self::still_faded(&self.faded, self.transparency.as_ref());
+        self.unfade_all(&still);
         if let Some(animator) = &self.animator {
             let _ = animator.cancel_all();
         }
@@ -331,6 +364,7 @@ impl Visuals {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::WindowInfo;
 
     const FOCUSED: Hwnd = Hwnd(1);
     const OTHER: Hwnd = Hwnd(2);
@@ -398,5 +432,143 @@ mod tests {
     fn handle_and_hwnd_round_trip() {
         let original = Hwnd(0x1234);
         assert_eq!(hwnd_of(handle(original)), original);
+    }
+
+    /// A platform that knows one window and records every move it is asked
+    /// for, so an animated layout can be inspected without a desktop.
+    struct RecordingPlatform {
+        window: WindowInfo,
+        moves: Mutex<Vec<WindowPlacement>>,
+    }
+
+    impl RecordingPlatform {
+        fn new(window: WindowInfo) -> Self {
+            Self {
+                window,
+                moves: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// The first placement the animation produced, waiting for the
+        /// animation thread to get round to it.
+        fn first_move(&self) -> WindowPlacement {
+            for _ in 0..200 {
+                if let Some(first) = self.moves.lock().expect("not poisoned").first() {
+                    return *first;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("the animation never moved the window");
+        }
+    }
+
+    impl Platform for RecordingPlatform {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn monitors(&self) -> anyhow::Result<Vec<crate::platform::MonitorInfo>> {
+            Ok(Vec::new())
+        }
+
+        fn windows(&self) -> anyhow::Result<Vec<WindowInfo>> {
+            Ok(vec![self.window.clone()])
+        }
+
+        fn window_info(&self, hwnd: Hwnd) -> anyhow::Result<WindowInfo> {
+            if hwnd == self.window.hwnd {
+                Ok(self.window.clone())
+            } else {
+                Err(anyhow::anyhow!("no such window"))
+            }
+        }
+
+        fn foreground_window(&self) -> Option<Hwnd> {
+            None
+        }
+
+        fn window_at(&self, _x: i32, _y: i32) -> Option<Hwnd> {
+            None
+        }
+
+        fn cursor_position(&self) -> anyhow::Result<(i32, i32)> {
+            Ok((0, 0))
+        }
+
+        fn set_positions(&self, placements: &[WindowPlacement]) -> anyhow::Result<()> {
+            self.moves
+                .lock()
+                .expect("not poisoned")
+                .extend_from_slice(placements);
+            Ok(())
+        }
+
+        fn set_cloaked(&self, _hwnd: Hwnd, _cloaked: bool) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn show(&self, _hwnd: Hwnd, _state: crate::platform::ShowState) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn focus(&self, _hwnd: Hwnd) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn close(&self, _hwnd: Hwnd) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_transparency(&self, _hwnd: Hwnd, _alpha: Option<u8>) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_topmost(&self, _hwnd: Hwnd, _topmost: bool) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_cursor_position(&self, _x: i32, _y: i32) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The perceived frame of a window whose invisible resize border sticks
+    /// out by seven pixels on three sides, which is what an ordinary Windows
+    /// window looks like.
+    const SEEN: Rect = Rect::new(100, 100, 900, 700);
+    const WINDOW_RECT: Rect = Rect::new(93, 100, 907, 707);
+
+    fn animated_config() -> Config {
+        serde_json::from_str(
+            r#"{"animation":{"enabled":true,"duration":250,"style":"Linear","fps":60}}"#,
+        )
+        .expect("the animation block has to load")
+    }
+
+    /// The first frame of an animated move is where the user already sees the
+    /// window. Starting from `GetWindowRect` instead makes the platform
+    /// compensate for the invisible border a second time, so every move begins
+    /// with the window jumping outward.
+    #[test]
+    fn an_animated_move_starts_at_the_perceived_frame() {
+        let target = Hwnd(0x1234);
+        let mut info = WindowInfo::placeholder(target);
+        info.rect = WINDOW_RECT;
+        info.frame = SEEN;
+        let platform = Arc::new(RecordingPlatform::new(info));
+        let hidden = Arc::new(Mutex::new(Hidden::default()));
+        let mut visuals = Visuals::new(Arc::clone(&platform) as Arc<dyn Platform>, hidden);
+        visuals.set_settings(&animated_config());
+        assert!(visuals.is_animating(), "the animator has to be running");
+
+        visuals.apply_layout(&[(target, Rect::new(1000, 100, 1800, 700))]);
+
+        let first = platform.first_move();
+        assert_eq!(first.hwnd, target);
+        assert_eq!(
+            first.rect, SEEN,
+            "the animation starts where the window already is"
+        );
+        visuals.stop();
     }
 }
