@@ -122,12 +122,17 @@ fn main() -> Result<()> {
     if args.no_hotkeys {
         tracing::info!("--no-hotkeys: this daemon binds no keys");
     } else {
-        manager.start_hotkeys(config::resolve_hotkeys_path(args.hotkeys.as_deref())?);
+        let candidates = config::hotkey_candidates(args.hotkeys.as_deref())?;
+        manager.start_hotkeys(
+            config::resolve_hotkeys_path(args.hotkeys.as_deref())?,
+            candidates,
+        );
     }
+    let others = config::hotkey_candidates(args.hotkeys.as_deref())?;
     let hotkey_watcher = manager
         .hotkey_path()
         .map(Path::to_path_buf)
-        .map(|path| config::ConfigWatcher::start(path, tx.clone()))
+        .map(|path| config::ConfigWatcher::start_any(path, others, tx.clone()))
         .transpose()?;
     if let Some(watcher) = hotkey_watcher.as_ref() {
         tracing::debug!(watching = %watcher.path().display(), "hotkey watcher");
