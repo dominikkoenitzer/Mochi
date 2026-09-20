@@ -140,6 +140,15 @@ fn main() -> Result<()> {
     let mut pipe = ipc::PipeServer::start(tx.clone())?;
 
     // The loop owns the state until something asks it to stop.
+    // A panic on any producer thread stops the daemon instead of leaving it
+    // running with that thread missing.
+    {
+        let stopper = tx.clone();
+        safety::set_shutdown_hook(move || {
+            let _ = stopper.send(Event::Shutdown(ShutdownReason::Panicked));
+        });
+    }
+
     let result = manager.run();
 
     // The desktop comes back FIRST, before anything is torn down.
