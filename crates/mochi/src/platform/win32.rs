@@ -26,11 +26,11 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, BringWindowToTop, DeferWindowPos, EndDeferWindowPos, EnumChildWindows,
     EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
-    GetCursorPos, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IsIconic,
-    IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, PostMessageW, SET_WINDOW_POS_FLAGS, SW_HIDE,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
+    GetCursorPos, GetForegroundWindow, GetShellWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+    IsIconic, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, PostMessageW, SET_WINDOW_POS_FLAGS,
+    SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
     SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE,
     WindowFromPoint,
 };
@@ -451,6 +451,53 @@ fn z_order_args(z: ZOrder) -> (Option<HWND>, SET_WINDOW_POS_FLAGS) {
 const MOVE_FLAGS: SET_WINDOW_POS_FLAGS =
     SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0 | SWP_FRAMECHANGED.0);
 
+/// Whether [`take_foreground`] also pulls the window to the top of the z-order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Raise {
+    Yes,
+    No,
+}
+
+/// Hands the keyboard to `target`, thread-input dance included.
+///
+/// Windows only lets the foreground thread give focus away. Attaching our input
+/// queue to both the outgoing and the incoming thread borrows that right for the
+/// duration of the call. Returns whether `SetForegroundWindow` accepted it.
+fn take_foreground(target: HWND, raise: Raise) -> bool {
+    let current = unsafe { GetCurrentThreadId() };
+    let target_thread = unsafe { GetWindowThreadProcessId(target, None) };
+    let foreground = unsafe { GetForegroundWindow() };
+    let foreground_thread = if foreground.is_invalid() {
+        0
+    } else {
+        unsafe { GetWindowThreadProcessId(foreground, None) }
+    };
+
+    let attached_foreground = foreground_thread != 0
+        && foreground_thread != current
+        && unsafe { AttachThreadInput(current, foreground_thread, true) }.as_bool();
+    let attached_target = target_thread != 0
+        && target_thread != current
+        && target_thread != foreground_thread
+        && unsafe { AttachThreadInput(current, target_thread, true) }.as_bool();
+
+    if raise == Raise::Yes && unsafe { IsIconic(target) }.as_bool() {
+        let _ = unsafe { ShowWindow(target, SW_RESTORE) };
+    }
+    let ok = unsafe { SetForegroundWindow(target) }.as_bool();
+    if raise == Raise::Yes {
+        let _ = unsafe { BringWindowToTop(target) };
+    }
+
+    if attached_target {
+        let _ = unsafe { AttachThreadInput(current, target_thread, false) };
+    }
+    if attached_foreground {
+        let _ = unsafe { AttachThreadInput(current, foreground_thread, false) };
+    }
+    ok
+}
+
 impl Platform for Win32Platform {
     fn name(&self) -> &'static str {
         "win32"
@@ -607,44 +654,25 @@ impl Platform for Win32Platform {
         if !is_window(h) {
             return Err(anyhow!("{h} is not a window"));
         }
-        let target = hwnd(h);
-        let current = unsafe { GetCurrentThreadId() };
-        let target_thread = unsafe { GetWindowThreadProcessId(target, None) };
-        let foreground = unsafe { GetForegroundWindow() };
-        let foreground_thread = if foreground.is_invalid() {
-            0
-        } else {
-            unsafe { GetWindowThreadProcessId(foreground, None) }
-        };
-
-        // Windows only lets the foreground thread hand out focus. Attaching our
-        // input queue to both the outgoing and the incoming thread borrows that
-        // right for the duration of the call.
-        let attached_foreground = foreground_thread != 0
-            && foreground_thread != current
-            && unsafe { AttachThreadInput(current, foreground_thread, true) }.as_bool();
-        let attached_target = target_thread != 0
-            && target_thread != current
-            && target_thread != foreground_thread
-            && unsafe { AttachThreadInput(current, target_thread, true) }.as_bool();
-
-        if unsafe { IsIconic(target) }.as_bool() {
-            let _ = unsafe { ShowWindow(target, SW_RESTORE) };
-        }
-        let ok = unsafe { SetForegroundWindow(target) }.as_bool();
-        let _ = unsafe { BringWindowToTop(target) };
-
-        if attached_target {
-            let _ = unsafe { AttachThreadInput(current, target_thread, false) };
-        }
-        if attached_foreground {
-            let _ = unsafe { AttachThreadInput(current, foreground_thread, false) };
-        }
-
-        if ok {
+        if take_foreground(hwnd(h), Raise::Yes) {
             Ok(())
         } else {
             Err(anyhow!("SetForegroundWindow refused to focus {h}"))
+        }
+    }
+
+    fn focus_desktop(&self) -> Result<()> {
+        let shell = unsafe { GetShellWindow() };
+        if shell.is_invalid() {
+            return Err(anyhow!("there is no shell window to hand the keyboard to"));
+        }
+        // Not raised. The desktop belongs underneath everything, and asking for
+        // it to be brought to the top is the one thing here that could put it
+        // over the windows still visible on the other screen.
+        if take_foreground(shell, Raise::No) {
+            Ok(())
+        } else {
+            Err(anyhow!("SetForegroundWindow refused to focus the desktop"))
         }
     }
 
