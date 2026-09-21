@@ -163,7 +163,17 @@ function Get-MochiCommand {
 # Only a command that runs mochic is ours to overwrite or to remove.
 function Test-MochiRunValue {
     param([Parameter(Mandatory)][AllowEmptyString()][string] $Value)
-    return ($Value -match '(?i)\bmochic(\.exe)?\b')
+    # CultureInvariant is load bearing, not decoration. Case-insensitive
+    # matching without it follows the machine's culture, and Turkish and
+    # Azeri do not case 'I' the way the rest of the world does: an upper
+    # case MOCHIC lowercases to a dotless letter and stops matching. On
+    # those machines -Disable would decide Mochi's own Run value belonged
+    # to somebody else and refuse to remove it, leaving the user unable to
+    # turn off an autostart they own.
+    return [regex]::IsMatch(
+        $Value,
+        '\bmochic(\.exe)?\b',
+        [Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant')
 }
 
 function Backup-RunValue {
