@@ -169,7 +169,7 @@ jobs:
       # Always available, so a workflow_dispatch without a tag still produces a
       # zip that can be downloaded and tried.
       - name: Upload the zip as a workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.PACKAGE_NAME }}
           path: |
