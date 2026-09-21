@@ -22,8 +22,15 @@ pub struct Entry {
     /// The handle, as a plain number.
     pub hwnd: isize,
     /// The process that owns the window, to catch handle reuse.
+    ///
+    /// Defaulted, like every field below. A record written by a different
+    /// build must not be thrown away wholesale over one field it does not
+    /// recognise: the entries in it name windows that are off screen right
+    /// now, and losing them means losing the windows.
+    #[serde(default)]
     pub pid: u32,
     /// The window class, to catch handle reuse within one process.
+    #[serde(default)]
     pub class: String,
     /// How the window was taken off screen, or `None` for a window Mochi
     /// only faded: that one is still on screen and needs its alpha cleared,
@@ -35,6 +42,7 @@ pub struct Entry {
     #[serde(default)]
     pub behaviour: Option<HidingBehaviour>,
     /// Whether Mochi also made the window translucent.
+    #[serde(default)]
     pub faded: bool,
 }
 
@@ -75,8 +83,20 @@ pub fn save(path: &Path, entries: &[Entry]) {
     };
 
     let temporary = path.with_extension("json.new");
-    if let Err(e) = std::fs::write(&temporary, bytes) {
+    // Written and FLUSHED before the rename. `fs::write` only hands the bytes
+    // to the cache: NTFS journals the rename's metadata, not the file's data,
+    // so a power loss can leave a correctly named record full of zeros, which
+    // does not parse, which means every window a previous session hid stays
+    // hidden with nothing naming it. The claim above this function that "the
+    // file on disk is always one whole record" is only true with this call.
+    let written = std::fs::File::create(&temporary).and_then(|mut file| {
+        use std::io::Write as _;
+        file.write_all(&bytes)?;
+        file.sync_all()
+    });
+    if let Err(e) = written {
         tracing::error!(error = %e, "could not write the off screen record");
+        let _ = std::fs::remove_file(&temporary);
         return;
     }
     if let Err(e) = std::fs::rename(&temporary, path) {
@@ -101,17 +121,66 @@ pub fn load(path: &Path) -> Option<Vec<Entry>> {
             return None;
         }
     };
+    // Parsed entry by entry, not as one document. The whole file used to go
+    // through `Vec<Entry>`, so a single malformed entry, or one field a
+    // different build wrote, lost EVERY window named in it rather than the one.
+    // The entries are independent facts about independent windows, so they are
+    // recovered independently.
+    if let Ok(raw) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) {
+        let total = raw.len();
+        let entries: Vec<Entry> = raw
+            .into_iter()
+            .filter_map(|value| match serde_json::from_value::<Entry>(value) {
+                Ok(entry) => Some(entry),
+                Err(e) => {
+                    tracing::error!(error = %e, "an entry in the off screen record could not be read");
+                    None
+                }
+            })
+            .collect();
+        if entries.len() < total {
+            tracing::error!(
+                kept = entries.len(),
+                lost = total - entries.len(),
+                path = %path.display(),
+                "part of the off screen record could not be read;                  a window a previous session hid may still be off screen"
+            );
+        }
+        return Some(entries);
+    }
+
     match serde_json::from_slice::<Vec<Entry>>(&bytes) {
         Ok(entries) => Some(entries),
         Err(e) => {
+            // Moved aside, not left in place. Leaving it was the old behaviour
+            // and it only looked safe: this session carries on with an empty
+            // record, and the very first window it hides rewrites the file, so
+            // the damaged one survived for about as long as it took the user to
+            // change workspace. Whatever it named was then off screen, out of
+            // the model, out of the record and invisible to `restore-windows`.
+            // Under a name of its own it survives, and the log says where.
+            let aside = quarantine(path);
             tracing::error!(
                 error = %e,
                 path = %path.display(),
-                "the off screen record is damaged and is being kept, not deleted:                  a window a previous session hid may still be off screen"
+                kept = %aside.as_deref().unwrap_or(path).display(),
+                "the off screen record is damaged; it has been moved aside rather than                  overwritten, because a window a previous session hid may still be off screen"
             );
             None
         }
     }
+}
+
+/// Moves an unreadable record out of the way under a name of its own.
+///
+/// Returns where it went, or `None` when it could not be moved, in which case
+/// the caller has said what it knows and there is nothing further to do.
+fn quarantine(path: &Path) -> Option<std::path::PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let aside = path.with_extension(format!("damaged-{stamp}.json"));
+    std::fs::rename(path, &aside).ok().map(|()| aside)
 }
 
 /// Whether a recorded entry still names the window its handle points at.
@@ -148,8 +217,8 @@ pub struct Recovered {
 /// Returns what came back and what is still owed.
 pub fn recover(platform: &dyn Platform, path: &Path) -> Recovered {
     let Some(entries) = load(path) else {
-        // Unreadable. It stays on disk: the next save overwrites it, and until
-        // then it is the only sign that something may be hidden.
+        // Unreadable, and `load` has already moved it aside under a name this
+        // session will not write to, so the evidence outlives the next save.
         return Recovered::default();
     };
     if entries.is_empty() {
@@ -255,6 +324,23 @@ mod tests {
         }
     }
 
+    /// Removes the set-aside copies an earlier run of the same test left.
+    fn clear_quarantine(path: &Path) {
+        let Some(dir) = path.parent() else { return };
+        let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&stem) && name.contains("damaged-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
     fn temp(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("mochi-recover-{name}.json"));
         let _ = std::fs::remove_file(&path);
@@ -283,27 +369,121 @@ mod tests {
     }
 
     #[test]
+    fn one_unreadable_entry_does_not_lose_the_others() {
+        // A record written by a different build, or with one entry mangled.
+        // Parsed as a single document, the one bad entry lost every window the
+        // file named; they are independent facts about independent windows and
+        // are recovered independently. The middle one here carries a field of
+        // the wrong type, which no default can rescue.
+        let path = temp("partial");
+        let json = r#"[
+            {"hwnd": 1, "pid": 7, "class": "A", "behaviour": "Cloak", "faded": false},
+            {"hwnd": "not a number", "pid": 7, "class": "B", "faded": false},
+            {"hwnd": 3, "pid": 7, "class": "C", "behaviour": "Cloak", "faded": false}
+        ]"#;
+        std::fs::write(&path, json).expect("write");
+
+        let entries = load(&path).expect("the readable entries survive");
+        let hwnds: Vec<isize> = entries.iter().map(|e| e.hwnd).collect();
+        assert_eq!(hwnds, vec![1, 3], "a bad entry took good ones with it");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_entry_from_another_build_still_names_its_window() {
+        // Only `hwnd` is really required now. A build that adds a field, or one
+        // that drops one, must still hand back the handle: that is the part
+        // that gets the window back on screen.
+        let path = temp("future");
+        std::fs::write(
+            &path,
+            br#"[{"hwnd": 42, "behaviour": "Cloak", "something_new": true}]"#,
+        )
+        .expect("write");
+
+        let entries = load(&path).expect("it parses");
+        assert_eq!(entries.len(), 1, "the entry was thrown away");
+        assert_eq!(entries[0].hwnd, 42);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn a_damaged_record_is_kept_rather_than_deleted() {
         // A half-written record is the shape a kill leaves behind. Deleting it
         // destroys the only evidence that windows are off screen, so a read
         // that fails has to be distinguishable from a file that is not there.
         let path = temp("broken");
+        // `temp` clears the record itself; the quarantined copies of earlier
+        // runs share its stem and would otherwise accumulate and be counted.
+        clear_quarantine(&path);
         std::fs::write(&path, b"{ this is not json").unwrap();
         assert_eq!(load(&path), None);
 
         let platform = crate::platform::new(true);
         assert!(recover(platform.as_ref(), &path).back.is_empty());
-        assert!(
-            path.exists(),
-            "recover deleted a record it could not read, which is the only \
-             thing that knew where the windows went"
+
+        // Kept, under a name of its own. It used to be left exactly where it
+        // was, which only looked safe: this session carries on with an empty
+        // record and its first hide rewrites that path, so the evidence lasted
+        // only until the user next changed workspace. Moved aside, it outlives
+        // the session that found it.
+        let dir = path.parent().expect("a parent");
+        let stem = path
+            .file_stem()
+            .expect("a stem")
+            .to_string_lossy()
+            .to_string();
+        let kept: Vec<String> = std::fs::read_dir(dir)
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(&stem) && n.contains("damaged-"))
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "recover lost a record it could not read, which is the only thing",
         );
+        for name in kept {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn a_missing_record_is_not_an_error() {
         assert_eq!(load(&temp("missing")), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_damaged_record_is_moved_aside_instead_of_being_overwritten() {
+        // The precondition is real: a power loss between the write and the
+        // flush leaves a correctly named file full of zeros. Left in place, the
+        // very first window the new session hides rewrites it, and whatever it
+        // named is off screen with nothing naming it. This is the one file that
+        // knows where the user's windows went.
+        let dir = std::env::temp_dir().join(format!("mochi-damaged-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("off-screen.json");
+        std::fs::write(&path, b"not json at all, and not even close").expect("write");
+
+        assert!(load(&path).is_none(), "damaged json must not parse");
+        assert!(
+            !path.exists(),
+            "the damaged record was left where the next save would destroy it"
+        );
+
+        let kept: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("damaged-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "the evidence was not kept: {kept:?}");
+
+        // And a fresh save beside it cannot touch what was kept.
+        save(&path, &[entry(1, HidingBehaviour::Cloak)]);
+        assert!(kept[0].path().exists(), "the kept copy was overwritten");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

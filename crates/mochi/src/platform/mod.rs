@@ -116,6 +116,31 @@ pub trait Platform: Send + Sync {
     /// The mouse position in virtual screen coordinates.
     fn cursor_position(&self) -> Result<(i32, i32)>;
 
+    /// Whether Windows currently has the window maximized.
+    ///
+    /// Deliberately its own call rather than a field of [`WindowInfo`]: this is
+    /// asked on the location-change path, which is the flood path, and reading
+    /// a whole `WindowInfo` there would cost a process handle open and a dozen
+    /// cross-process calls per event. `IsZoomed` is a flag read.
+    fn is_maximized(&self, hwnd: Hwnd) -> bool;
+
+    /// Windows that have turned a call down since this was last asked, and so
+    /// can no longer be tiled.
+    ///
+    /// Whether Mochi is allowed to touch a window is only ever discovered by
+    /// trying, and trying happens deep inside a layout pass, often on the
+    /// animation thread. This is how that discovery gets back to the model,
+    /// which has to let the window go: one it cannot move keeps a tile it can
+    /// never be put in, so the tile stays empty, its border is drawn around
+    /// nothing and every other window on the screen is squeezed around a hole.
+    ///
+    /// Draining rather than reading, so each window is reported once. The
+    /// default is empty, which is right for every platform that has no such
+    /// notion.
+    fn take_unreachable(&self) -> Vec<Hwnd> {
+        Vec::new()
+    }
+
     // ---- writes ---------------------------------------------------------
 
     /// WRITE. Moves and resizes several windows in one `DeferWindowPos` batch.

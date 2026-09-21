@@ -117,11 +117,7 @@ impl WinEventHooks {
         } {
             tracing::warn!(error = %e, "could not post WM_QUIT to the WinEvent thread");
         }
-        if handle.join().is_err() {
-            tracing::error!("the WinEvent thread panicked");
-        } else {
-            tracing::debug!("winevent hooks removed");
-        }
+        super::join_before(handle, super::STOP_DEADLINE, "winevent");
     }
 }
 

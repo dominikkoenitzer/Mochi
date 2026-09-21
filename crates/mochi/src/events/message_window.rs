@@ -194,11 +194,7 @@ impl MessageWindow {
         } {
             tracing::warn!(error = %e, "could not post WM_QUIT to the message window thread");
         }
-        if handle.join().is_err() {
-            tracing::error!("the message window thread panicked");
-        } else {
-            tracing::debug!("hidden message window closed");
-        }
+        super::join_before(handle, super::STOP_DEADLINE, "message window");
     }
 }
 

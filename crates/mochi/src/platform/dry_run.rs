@@ -55,6 +55,11 @@ impl<P: Platform> Platform for DryRunPlatform<P> {
         self.inner.cursor_position()
     }
 
+    fn is_maximized(&self, hwnd: Hwnd) -> bool {
+        // A read, so it passes through: a dry run reports the desktop as it is.
+        self.inner.is_maximized(hwnd)
+    }
+
     fn set_positions(&self, placements: &[WindowPlacement]) -> Result<()> {
         for p in placements {
             tracing::info!(

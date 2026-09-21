@@ -212,6 +212,14 @@ pub struct WindowInfo {
     pub owner: Option<Hwnd>,
     /// Monitor the window currently sits on.
     pub monitor: Option<MonitorId>,
+    /// False when Windows has refused to let Mochi move, focus or draw on this
+    /// window, which is what happens when the window belongs to an elevated
+    /// process and Mochi does not.
+    ///
+    /// Such a window cannot be tiled: it would be given a tile it can never be
+    /// put in, so the tile stays empty, its border is drawn around nothing and
+    /// every other window on the screen is squeezed around a hole.
+    pub reachable: bool,
 }
 
 impl WindowInfo {
@@ -234,6 +242,10 @@ impl WindowInfo {
             maximized: false,
             owner: None,
             monitor: None,
+            // A blank window is reachable until something says otherwise, so
+            // that a test window and an event about a window that already died
+            // are judged on the rest of the fields.
+            reachable: true,
         }
     }
 
@@ -293,6 +305,9 @@ pub enum Unmanageable {
     ShellClass,
     /// The process belongs to the shell.
     ShellProcess,
+    /// The window belongs to an elevated process and Mochi does not, so
+    /// Windows turns down every call against it.
+    OutOfReach,
 }
 
 impl Unmanageable {
@@ -309,6 +324,7 @@ impl Unmanageable {
             Self::TooSmall => "too small",
             Self::ShellClass => "shell class",
             Self::ShellProcess => "shell process",
+            Self::OutOfReach => "elevated, out of reach",
         }
     }
 }
@@ -348,6 +364,13 @@ pub fn is_manageable(w: &WindowInfo) -> Result<(), Unmanageable> {
 /// still rejected when it is a child window, a shell window, invisible,
 /// cloaked or too small.
 pub fn is_manageable_with(w: &WindowInfo, allow_tool_window: bool) -> Result<(), Unmanageable> {
+    // First, because it is the one verdict that is about Mochi rather than
+    // about the window: there is no point deciding how to tile something
+    // Windows will not let us touch. It is deliberately not overridable, for
+    // the same reason.
+    if !w.reachable {
+        return Err(Unmanageable::OutOfReach);
+    }
     if w.has_style(style::WS_CHILD) {
         return Err(Unmanageable::Child);
     }
@@ -435,6 +458,25 @@ mod tests {
     fn a_normal_application_window_is_manageable() {
         assert_eq!(is_manageable(&app_window()), Ok(()));
         assert!(app_window().is_manageable());
+    }
+
+    #[test]
+    fn a_window_out_of_reach_is_not_a_tiling_candidate() {
+        // An elevated window while Mochi is not elevated: Windows turns down
+        // every move, focus and draw against it. Tiling it anyway hands it a
+        // tile it can never be put in, so the tile stays empty and its border
+        // is drawn around nothing.
+        let mut w = app_window();
+        w.reachable = false;
+        assert_eq!(is_manageable(&w), Err(Unmanageable::OutOfReach));
+    }
+
+    #[test]
+    fn being_out_of_reach_is_not_something_a_rule_may_overrule() {
+        // A `manage_rules` entry may insist that an untitled owned tool window
+        // is a real window. It may not insist that Windows will let us move
+        // one, which is a fact about Mochi's own privileges.
+        assert!(!Unmanageable::OutOfReach.is_overridable());
     }
 
     #[test]
