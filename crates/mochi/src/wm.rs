@@ -1412,11 +1412,26 @@ impl WindowManager {
     ///   every switch to an empty workspace. Windows then hands the foreground
     ///   to whatever it likes, which can be a window on another monitor.
     fn keyboard_was_left_behind(&self, changes: &Changes) -> bool {
-        if changes.focused_monitor_changed {
+        // The window holding the keyboard has just been taken off screen by
+        // this very change set. Whatever else is true, it cannot keep it.
+        if self
+            .foreground
+            .is_some_and(|held| changes.hide.iter().any(|id| handle(*id) == held))
+        {
             return true;
         }
+        if !changes.focused_monitor_changed {
+            return false;
+        }
+        // The model moved to another monitor and named no window to focus
+        // there. That strands the keyboard only when it is on a window Mochi
+        // put somewhere the user is no longer looking -- which means a window
+        // Mochi manages. A window it does not manage was never moved by it, is
+        // still on screen, and is where the user deliberately put the focus;
+        // taking the keyboard off that and handing it to the desktop undoes
+        // the user's own choice and gives them nothing back.
         self.foreground
-            .is_some_and(|held| changes.hide.iter().any(|id| handle(*id) == held))
+            .is_none_or(|held| self.core.is_managed(window_id(held)))
     }
 
     fn focus_hwnd(&mut self, hwnd: Hwnd) {
@@ -4883,6 +4898,43 @@ alt + j : focus down
         assert_eq!(
             wm.foreground, None,
             "the daemon still believes a cloaked window holds the keyboard"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_is_never_taken_off_a_window_mochi_does_not_manage() {
+        // The rescue exists for a window Mochi moved out from under the user:
+        // one it cloaked, or one left behind on a screen the user navigated
+        // away from. A window Mochi does not manage is none of those. It was
+        // never moved, it is still on screen, and the user is looking straight
+        // at it, so taking the keyboard off it and handing it to the desktop
+        // undoes a choice the user made and nothing else.
+        //
+        // Measured on a real desktop before this guard existed: with the
+        // foreground on a game an ignore rule had skipped, an unrelated window
+        // appearing on the other monitor sent the foreground to "Program
+        // Manager", where it stayed. The game could not be typed into at all.
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor"), window(2, "Browser")],
+            vec![main_screen(), portrait_screen()],
+        );
+        // A window of the user's that Mochi never took: an ignore rule skipped
+        // it, or Windows refuses to let Mochi touch it.
+        wm.foreground = Some(Hwnd(404));
+        assert!(!wm.state().is_managed(window_id(Hwnd(404))));
+        platform.desktop_focus.store(0, Ordering::SeqCst);
+
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+
+        assert_eq!(
+            platform.desktop_focus.load(Ordering::SeqCst),
+            0,
+            "the keyboard was taken off a window Mochi does not manage"
+        );
+        assert_eq!(
+            wm.foreground,
+            Some(Hwnd(404)),
+            "the user's own window lost the keyboard"
         );
     }
 
