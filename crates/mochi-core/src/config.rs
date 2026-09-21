@@ -839,6 +839,33 @@ fn configure_monitor(monitor_config: &MonitorConfig, monitor: &mut crate::model:
 
 #[cfg(test)]
 mod tests {
+    /// The configuration documentation offers a complete file to copy. If it
+    /// does not parse, the first thing a new user is told to do fails, and
+    /// nothing else in this crate would ever notice.
+    #[test]
+    fn the_smallest_file_the_documentation_offers_is_usable() {
+        const DOC: &str = include_str!("../../../docs/configuration.md");
+        let after = DOC
+            .split_once("## The smallest file that works")
+            .expect("the documentation no longer offers a smallest file")
+            .1;
+        let block = after
+            .split_once("```json\n")
+            .expect("that section no longer holds a json block")
+            .1
+            .split_once("```")
+            .expect("the json block is not closed")
+            .0;
+        let config = Config::from_json(block)
+            .unwrap_or_else(|e| panic!("the documented configuration does not parse: {e}"));
+        // Not merely valid JSON: the keys have to be the real ones. A typo in
+        // a documented key parses fine and silently does nothing, which is the
+        // failure this is here to catch.
+        assert_eq!(config.border, Some(true));
+        assert_eq!(config.border_width, Some(4));
+        assert_eq!(config.default_workspace_padding, Some(10));
+    }
+
     use super::*;
 
     use crate::layout::MIN_TILE_SIZE;
