@@ -5,6 +5,35 @@ alive, and a bound key does not spawn anything: the press is matched inside the
 daemon and turned straight into the command, so it acts on the frame it was
 pressed.
 
+## The file you start with
+
+`mochic quickstart` writes a hotkey file when there is none, and the install
+script runs it for you. It binds about fifty keys, all of them Mochi commands,
+and it doubles as the reference: every command worth a key appears in it at
+least once.
+
+Two things about it are worth knowing before Mochi is started for the first
+time.
+
+**The way out is `alt + shift + e`.** It stops Mochi, puts back every window it
+was hiding, takes the borders down and unbinds every one of these keys. A
+tiling window manager rearranges the whole screen the moment it starts, and
+nobody should have to read a manual to undo that.
+
+**The arrow keys are deliberately not bound.** `alt + left` and `alt + right`
+are Back and Forward in every browser on Windows, and `alt + up` is the parent
+folder in Explorer. Binding them takes those away everywhere, silently, for as
+long as Mochi runs. Focus moves with `alt + h/j/k/l` instead. The shipped file
+carries the four arrow lines commented out, so adding them back is deleting a
+`#`.
+
+To see what Mochi made of the file it actually read, including any line it
+could not parse:
+
+```
+mochic hotkeys
+```
+
 ## The file
 
 ```

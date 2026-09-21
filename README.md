@@ -52,9 +52,21 @@ no subprocess per key press.
 
 ```
 alt + h                 : focus left
-alt + shift + q         : close
-alt + shift + g         : toggle-game-mode
+alt + shift + q         : close the focused window
+alt + shift + e         : stop mochi and give the desktop back
 ```
+
+**If you want out, press `alt + shift + e`.** It stops Mochi, puts every window
+it was hiding back, takes the borders down and unbinds the keys. Nothing about
+the desktop is left changed. It is worth knowing before you start it for the
+first time, because a tiling window manager rearranges every window on screen
+the moment it comes up.
+
+The arrow keys are deliberately left alone. `alt + left` and `alt + right` are
+Back and Forward in every browser, and `alt + up` is the parent folder in
+Explorer; a window manager that binds them takes those away everywhere with
+nothing on screen to say why. The shipped file says how to add them if you
+would rather have them.
 
 The file lives at `%USERPROFILE%\.config\mochi\hotkeys` and is reloaded the
 moment it is saved. `mochic hotkeys` prints what Mochi made of it. Game mode is
@@ -65,10 +77,21 @@ The full reference is [docs/hotkeys.md](docs/hotkeys.md).
 
 ## Build
 
+On a machine that has never built Rust for Windows you need two things, and
+neither is Mochi's to install: [rustup](https://rustup.rs), and the Microsoft
+C++ build tools, which is the "Desktop development with C++" workload in the
+Visual Studio Installer. Rust on Windows links with `link.exe` and rustup does
+not bring it. Without it the build stops at `error: linker 'link.exe' not
+found`, which says nothing about what to go and install.
+
 ```
+git clone https://github.com/dominikkoenitzer/Mochi
+cd Mochi
 cargo build --release
 cargo test --workspace
 ```
+
+The first build takes a few minutes. Every one after that is seconds.
 
 ## Install
 
@@ -131,6 +154,16 @@ No admin rights, and none are wanted. Mochi runs as a normal user, which means
 Windows will not let it move a window belonging to a program running as
 administrator. It notices, says so once in the log, and leaves that window alone
 rather than tiling around a hole it cannot fill.
+
+When a window is not being tiled and it is not obvious why, ask:
+
+```
+mochic why
+```
+
+It explains what Mochi makes of the window in front and what can be done about
+it, in words rather than in the terms the log is written in. Every answer it can
+give names either a fix or the reason there is nothing to fix.
 
 Config keys are in [docs/configuration.md](docs/configuration.md), commands in
 [docs/cli.md](docs/cli.md), keys in [docs/hotkeys.md](docs/hotkeys.md). The log

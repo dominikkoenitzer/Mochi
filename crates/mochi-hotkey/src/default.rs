@@ -15,6 +15,10 @@ pub const DEFAULT: &str = r"# Mochi hotkeys. Saved changes are picked up at once
 # Syntax:   modifier + modifier + key : command
 # Commands: anything `mochic` takes, without the `mochic`. See `mochic --help`.
 #           A line that does not start with a Mochi command is run by the shell.
+#
+# The way out is alt + shift + e. It stops Mochi, puts every window it was
+# hiding back, takes the borders down and unbinds these keys, leaving the
+# desktop the way it found it. It is the last line of this file.
 .shell pwsh
 
 # Focus
@@ -22,10 +26,16 @@ alt + h                 : focus left
 alt + j                 : focus down
 alt + k                 : focus up
 alt + l                 : focus right
-alt + left              : focus left
-alt + down              : focus down
-alt + up                : focus up
-alt + right             : focus right
+
+# The arrow keys are deliberately not bound here. Alt with an arrow is already
+# taken across Windows: alt + left and alt + right are Back and Forward in
+# every browser, and alt + up is the parent folder in Explorer. A window
+# manager that binds them takes those away the moment it starts, everywhere,
+# with nothing on screen to say why. Add them if you would rather have them:
+#   alt + left : focus left
+#   alt + down : focus down
+#   alt + up   : focus up
+#   alt + right: focus right
 
 # Move the focused window. At a screen edge it crosses to the next monitor.
 alt + shift + h         : move left
@@ -98,6 +108,72 @@ mod tests {
                 binding.source
             );
         }
+    }
+
+    #[test]
+    fn the_shipped_file_leaves_the_windows_wide_alt_arrow_shortcuts_alone() {
+        // alt + left and alt + right are Back and Forward in every browser on
+        // Windows, and alt + up is the parent folder in Explorer. Binding them
+        // takes those away from the user everywhere, silently, from the moment
+        // Mochi starts. Whoever adds them back has to delete this test first
+        // and read why.
+        let bindings = Bindings::parse(DEFAULT).expect("the shipped hotkeys parse");
+        for key in ["alt + left", "alt + right", "alt + up", "alt + down"] {
+            assert!(
+                bindings
+                    .get(key.parse::<Trigger>().expect("the test spells its triggers right"))
+                    .is_none(),
+                "{key} is bound, and it belongs to Windows"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arrow_lines_the_file_offers_work_when_the_hash_is_deleted() {
+        // The file tells the reader they can have the arrow keys back by
+        // uncommenting four lines. That instruction has to be true, including
+        // the indentation those lines are written with.
+        let restored: String = DEFAULT
+            .lines()
+            .map(|line| line.strip_prefix('#').unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("
+");
+        let bindings = Bindings::parse_lossy(&restored).0;
+        for (key, command) in [
+            ("alt + left", "focus left"),
+            ("alt + down", "focus down"),
+            ("alt + up", "focus up"),
+            ("alt + right", "focus right"),
+        ] {
+            assert_eq!(
+                bindings
+                    .get(key.parse::<Trigger>().expect("spelled right"))
+                    .map(|binding| binding.source.clone())
+                    .as_deref(),
+                Some(command),
+                "uncommenting did not give back {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shipped_file_always_has_a_way_out() {
+        // A window manager that rearranges every window the moment it starts
+        // has to be stoppable from the keyboard by someone who has not read
+        // the manual. This is the one binding that must never go missing.
+        let bindings = Bindings::parse(DEFAULT).expect("the shipped hotkeys parse");
+        assert_eq!(
+            bindings
+                .get("alt + shift + e".parse::<Trigger>().expect("spelled right"))
+                .map(|binding| binding.source.clone())
+                .as_deref(),
+            Some("stop"),
+        );
+        assert!(
+            DEFAULT.contains("The way out is alt + shift + e"),
+            "the file no longer says how to get out of it"
+        );
     }
 
     #[test]
