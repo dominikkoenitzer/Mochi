@@ -383,9 +383,13 @@ fn is_subcommand(word: &str) -> bool {
 
     NAMES
         .get_or_init(|| {
-            use clap::CommandFactory;
-
-            mochi_client::cli::Cli::command()
+            // Through the shared grammar, never `Cli::command()` here. Building
+            // it is one enormous derive-generated stack frame, and building it
+            // on whatever thread happens to ask first overflowed the daemon's
+            // main thread on startup in an unoptimised build: it died loading
+            // the hotkey file, before it ever opened its pipe, with nothing in
+            // the log but the crash.
+            mochi_client::cli::grammar()
                 .get_subcommands()
                 .flat_map(|sub| {
                     std::iter::once(sub.get_name().to_owned())
