@@ -710,9 +710,14 @@ impl Cmd {
 /// The second reason is that a hotkey file is parsed a line at a time, so the
 /// whole grammar used to be rebuilt once per binding: fifty-odd times on every
 /// start and every reload.
-fn parse_argv(argv: Vec<String>) -> Result<Cli, clap::Error> {
+/// The command grammar, built once on a stack chosen for it.
+///
+/// Public because the hotkey parser needs the subcommand names and must not
+/// build the grammar itself: doing that on whatever thread it happens to be
+/// called from is what overflowed the daemon's main thread at startup.
+pub fn grammar() -> &'static clap::Command {
     static GRAMMAR: std::sync::OnceLock<clap::Command> = std::sync::OnceLock::new();
-    let grammar = GRAMMAR.get_or_init(|| {
+    GRAMMAR.get_or_init(|| {
         // Neither failure is one a caller could act on: the spawn only fails
         // if the process cannot make a thread at all, and the join only if
         // building the grammar panicked, which would be a bug in this file.
@@ -725,8 +730,11 @@ fn parse_argv(argv: Vec<String>) -> Result<Cli, clap::Error> {
             .ok()
             .and_then(|worker| worker.join().ok())
             .unwrap_or_else(Cli::command)
-    });
-    let matches = grammar.clone().try_get_matches_from(argv)?;
+    })
+}
+
+fn parse_argv(argv: Vec<String>) -> Result<Cli, clap::Error> {
+    let matches = grammar().clone().try_get_matches_from(argv)?;
     Cli::from_arg_matches(&matches)
 }
 
