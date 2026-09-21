@@ -418,7 +418,19 @@ fn check(explicit: Option<&Path>) -> std::process::ExitCode {
         Ok(text) => text,
         Err(reason) => {
             println!("\n{reason}");
-            println!("\nnot usable: nothing was checked");
+            // The hotkey file is a different file with different problems,
+            // and being told about them one run at a time is exactly the loop
+            // this command exists to end. It is read here too, and still only
+            // warns: a missing mochi.json does not stop the keyboard working.
+            let mut found = Findings::default();
+            check_hotkeys(&mut found);
+            for note in &found.notes {
+                println!("  {note}");
+            }
+            for warning in &found.warnings {
+                println!("warning: {warning}");
+            }
+            println!("\nnot usable: the configuration could not be read");
             return std::process::ExitCode::FAILURE;
         }
     };
@@ -457,7 +469,99 @@ fn check(explicit: Option<&Path>) -> std::process::ExitCode {
         }
     }
 
+    // The hotkey file, checked at the same time. It is the other half of a
+    // working desktop and there was no offline way to look at it: a typo costs
+    // one binding, a missing file costs all of them, and a MISSING file is
+    // deliberately not an error in the daemon, so the only symptom is that the
+    // keyboard quietly does nothing. Everything here is a warning, because a
+    // broken hotkey file still starts a desktop.
+    check_hotkeys(&mut found);
+
     report(&label, found)
+}
+
+/// The hotkey file the daemon would load, and the whkdrc it falls back to.
+fn hotkey_path() -> Option<PathBuf> {
+    let explicit = std::env::var("MOCHI_HOTKEYS")
+        .ok()
+        .filter(|v| !v.is_empty());
+    if let Some(path) = explicit {
+        return Some(PathBuf::from(expand_env(&path)));
+    }
+    let profile = std::env::var("USERPROFILE").ok()?;
+    let keys = PathBuf::from(profile).join(".config").join("mochi");
+    let named = keys.join("hotkeys");
+    if named.exists() {
+        return Some(named);
+    }
+    let legacy = keys.join("whkdrc");
+    if legacy.exists() {
+        return Some(legacy);
+    }
+    Some(named)
+}
+
+/// Adds what the hotkey file says to the findings.
+fn check_hotkeys(found: &mut Findings) {
+    let Some(path) = hotkey_path() else {
+        return;
+    };
+    let label = path.display().to_string();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            found.warnings.push(format!(
+                "no hotkey file at {label}. The daemon treats that as \"bind nothing\"                  rather than an error, so every key would silently do nothing."
+            ));
+            return;
+        }
+        Err(e) => {
+            found
+                .warnings
+                .push(format!("{label} could not be read: {e}"));
+            return;
+        }
+    };
+
+    // Lossy, exactly like the daemon: a bad line costs that binding alone.
+    let (bindings, errors) = mochi_hotkey::Bindings::parse_lossy(&text);
+    found.notes.push(format!(
+        "hotkeys: {label} ({} {})",
+        bindings.len(),
+        if bindings.len() == 1 {
+            "binding"
+        } else {
+            "bindings"
+        }
+    ));
+    if bindings.is_empty() && errors.is_empty() {
+        found.warnings.push(format!(
+            "{label} binds nothing at all. Every line is a comment or blank,              so no key reaches Mochi."
+        ));
+    }
+    for error in &errors {
+        found.warnings.push(format!("{label}: {error}"));
+    }
+
+    // A typo in a Mochi command is indistinguishable from a deliberate shell
+    // binding, because the parser is right not to claim a name it does not own.
+    // `focus nowhere` becomes `cmd /c focus nowhere`, which fails silently every
+    // time the key is pressed. This is the only place that says so.
+    for binding in bindings.iter() {
+        let mochi_hotkey::Action::Shell { line, .. } = &binding.action else {
+            continue;
+        };
+        if let Some(reason) = mochi_hotkey::shell_fallback_reason(line) {
+            found.warnings.push(format!(
+                concat!(
+                    "{}: line {}: `{}` starts with a Mochi command but does not parse as ",
+                    "one ({}), so it is handed to the shell instead and fails silently ",
+                    "every time the key is pressed"
+                ),
+                label, binding.line, line, reason
+            ));
+        }
+    }
 }
 
 /// Prints the findings and answers with the exit code they call for.
@@ -614,6 +718,41 @@ fn check_config_text(label: &str, text: &str) -> Findings {
             if lists == 1 { "list" } else { "lists" }
         )
     });
+
+    // Settings that parse and reach no behaviour. A rule list that does nothing
+    // is already reported further down; these are whole config keys, and a user
+    // who sets one gets no feedback at all from anywhere otherwise.
+    if config.stackbar.is_some() {
+        found.warnings.push(format!(
+            concat!(
+                "{} configures `stackbar`. Mochi draws borders and nothing else: ",
+                "the block parses so a config copied from elsewhere keeps ",
+                "validating, and no tab bar is ever drawn."
+            ),
+            label
+        ));
+    }
+    let per_workspace_behaviour = config
+        .monitors
+        .iter()
+        .flatten()
+        .flat_map(|monitor| monitor.workspaces.iter())
+        .filter(|workspace| workspace.window_container_behaviour.is_some())
+        .count();
+    if per_workspace_behaviour > 0 {
+        let plural = if per_workspace_behaviour == 1 {
+            "workspace"
+        } else {
+            "workspaces"
+        };
+        found.warnings.push(format!(
+            concat!(
+                "{} sets `window_container_behaviour` on {} {}. Only the top level ",
+                "key is read; the per workspace one is accepted and then dropped."
+            ),
+            label, per_workspace_behaviour, plural
+        ));
+    }
 
     // Every broken rule, not the first: a file usually carries a handful, and
     // finding them one reload at a time is the loop this command exists to end.
