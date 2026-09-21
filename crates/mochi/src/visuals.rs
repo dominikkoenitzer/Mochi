@@ -545,6 +545,9 @@ mod tests {
         fn is_maximized(&self, _hwnd: Hwnd) -> bool {
             false
         }
+        fn is_on_screen(&self, _hwnd: Hwnd) -> bool {
+            true
+        }
 
         fn set_positions(&self, placements: &[WindowPlacement]) -> anyhow::Result<()> {
             self.moves
