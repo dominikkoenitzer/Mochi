@@ -83,6 +83,7 @@ The groups below follow the order of the hotkey file.
 | Command | Arguments | Does |
 |---|---|---|
 | `state` | none | Print the whole daemon state as JSON. |
+| `why` | `--json` | Explain what Mochi makes of the window in front and what to do about it: whether it is being tiled and where, or the reason it is being left alone and the command that would change that. The one thing to run when a window is not tiling and it is not obvious why. `--json` prints the document the paragraph is made of. |
 | `query` | target | Print one value. Targets: `focused-monitor-index`, `focused-workspace-index`, `focused-container-index`, `focused-window-index` (the index inside the focused container), `focused-workspace-name`, `monitor-count`, `window-count`, `paused`, `dry-run`, `config-path`, `version`. |
 | `subscribe` | name | Create a pipe of that name, register it, and print every event to stdout as one JSON line until Ctrl-C. The one command to watch what the daemon is doing. |
 | `subscribe-pipe` | name | Send every event to a named pipe the subscriber created itself, for a bar or a service that owns its own pipe. |
