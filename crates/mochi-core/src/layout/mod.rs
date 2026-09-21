@@ -344,6 +344,33 @@ impl Layout {
             }
         }
 
+        // Nothing downstream may be handed a tile a window cannot exist in.
+        //
+        // Tiling the area exactly is what every layout here is for, and this
+        // is the one place it gives way, because the alternative is worse. A
+        // rectangle of zero or negative size reaches `SetWindowPos` as a width
+        // of zero: the window is still managed, still focusable, still in the
+        // ring, and completely invisible, which the user cannot tell from a
+        // window that failed to open.
+        //
+        // It only bites when the area genuinely cannot be divided that far,
+        // and the way to get there is a minimum tile size of zero: every cut
+        // halves what is left, so with no floor to stop it the remainder
+        // decays exponentially and runs out of pixels. Measured on a 4K
+        // screen, a minimum of 0 produces its first empty tile at 26 windows,
+        // 1 at 60 and 2 at 100 - raising the floor only moves it, which is why
+        // this is a guarantee about the output rather than arithmetic in the
+        // splitter. For every real configuration it changes nothing: a tile
+        // that is already a pixel or more is left exactly as it was.
+        for rect in &mut rects {
+            if rect.width() < 1 {
+                *rect = Rect::new(rect.left, rect.top, rect.left + 1, rect.bottom);
+            }
+            if rect.height() < 1 {
+                *rect = Rect::new(rect.left, rect.top, rect.right, rect.top + 1);
+            }
+        }
+
         rects
     }
 }
@@ -573,6 +600,58 @@ fn grid_columns(len: usize) -> usize {
         columns += 1;
     }
     columns
+}
+
+#[cfg(test)]
+mod invariant_tests {
+    use super::*;
+
+    /// No layout, at any window count, with any minimum, may hand back a tile
+    /// a window cannot exist in.
+    ///
+    /// A rectangle of zero or negative size reaches `SetWindowPos` as a width
+    /// of zero: the window stays managed, focusable and in the ring, and is
+    /// completely invisible. Before this was guaranteed, a minimum tile size of
+    /// zero produced its first empty tile at 26 windows on a 4K screen.
+    #[test]
+    fn no_layout_ever_emits_a_tile_a_window_cannot_exist_in() {
+        // His 4K work area, and a small one, because running out of pixels is
+        // the whole point of the test.
+        for area in [Rect::new(36, 36, 3804, 2052), Rect::new(0, 0, 320, 240)] {
+            for layout in [
+                Layout::Bsp,
+                Layout::Columns,
+                Layout::Rows,
+                Layout::VerticalStack,
+                Layout::HorizontalStack,
+                Layout::UltrawideVerticalStack,
+                Layout::Grid,
+            ] {
+                for min in [0, 1, 2, 64] {
+                    for len in [1usize, 2, 7, 26, 60, 100] {
+                        let deltas = vec![None; len];
+                        let rects = layout.calculate_with_min(
+                            area,
+                            len,
+                            10,
+                            Flip::NONE,
+                            &deltas,
+                            MinSize::square(min),
+                        );
+                        assert_eq!(rects.len(), len, "{layout:?} returned the wrong count");
+                        for (i, r) in rects.iter().enumerate() {
+                            assert!(
+                                r.width() >= 1 && r.height() >= 1,
+                                "{layout:?} min={min} len={len}: tile {i} is {}x{}",
+                                r.width(),
+                                r.height()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

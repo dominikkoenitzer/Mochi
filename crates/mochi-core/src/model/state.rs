@@ -332,9 +332,13 @@ impl State {
     /// The work area a workspace tiles into, with every offset applied.
     #[must_use]
     pub fn work_area_for(&self, monitor: usize, workspace: usize) -> Option<Rect> {
-        self.monitors
-            .get(monitor)
-            .map(|m| m.work_area_for(workspace, self.work_area_offset))
+        self.monitors.get(monitor).map(|m| {
+            m.work_area_for(
+                workspace,
+                self.work_area_offset,
+                self.padding_scale(monitor),
+            )
+        })
     }
 
     /// The rectangle a window currently occupies according to the last layout

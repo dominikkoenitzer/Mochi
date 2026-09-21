@@ -214,6 +214,16 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        // A maximize, a monocle or a floating focus is in front of the ring, so
+        // the ring is not what the user is looking at. Without this, the
+        // command moves the focus to a window that is currently hidden behind
+        // that mode: the daemon is told to foreground a cloaked window, it
+        // jumps in front of the maximized one, and with mouse-follows-focus the
+        // pointer warps onto a tile nothing is showing. Every other op that
+        // works through the ring already refuses here.
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let target = self.workspace_mut(monitor, workspace)?;
         target.cycle_container_focus(direction);
         let id = target.focused_window_id();
@@ -230,6 +240,16 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        // A maximize, a monocle or a floating focus is in front of the ring, so
+        // the ring is not what the user is looking at. Without this, the
+        // command moves the focus to a window that is currently hidden behind
+        // that mode: the daemon is told to foreground a cloaked window, it
+        // jumps in front of the maximized one, and with mouse-follows-focus the
+        // pointer warps onto a tile nothing is showing. Every other op that
+        // works through the ring already refuses here.
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
         let Some(id) = target
@@ -265,6 +285,16 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        // A maximize, a monocle or a floating focus is in front of the ring, so
+        // the ring is not what the user is looking at. Without this, the
+        // command moves the focus to a window that is currently hidden behind
+        // that mode: the daemon is told to foreground a cloaked window, it
+        // jumps in front of the maximized one, and with mouse-follows-focus the
+        // pointer warps onto a tile nothing is showing. Every other op that
+        // works through the ring already refuses here.
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
         let Some(container) = target.focused_container_mut() else {
@@ -410,6 +440,16 @@ impl State {
             return Ok(Changes::none());
         }
         let (monitor, workspace) = self.focused_indices()?;
+        // A maximize, a monocle or a floating focus is in front of the ring, so
+        // the ring is not what the user is looking at. Without this, the
+        // command moves the focus to a window that is currently hidden behind
+        // that mode: the daemon is told to foreground a cloaked window, it
+        // jumps in front of the maximized one, and with mouse-follows-focus the
+        // pointer warps onto a tile nothing is showing. Every other op that
+        // works through the ring already refuses here.
+        if self.focus_outside_the_ring(monitor, workspace) {
+            return Ok(Changes::none());
+        }
         let target = self.workspace_mut(monitor, workspace)?;
         if !target.focus_container(0) {
             return Ok(Changes::none());
@@ -1822,6 +1862,53 @@ mod tests {
             changes.restore.contains(&id),
             "the window was left maximized on screen: {changes:?}"
         );
+    }
+
+    #[test]
+    fn no_ring_command_focuses_a_window_hidden_behind_a_mode() {
+        // The invariant nothing asserted: a change set must never name a window
+        // that is currently hidden. A maximize or a monocle is in front of the
+        // ring, so every command that works through the ring has to refuse
+        // while one is up. Four of them did not, and `Changes::settle` cannot
+        // save them: it only clears a focus that appears in `hide`, and these
+        // windows were already hidden before the command ran, so nothing about
+        // the visible set changes.
+        //
+        // What the user saw: press cycle-stack or focus-next while a window is
+        // maximized, and the daemon is told to foreground a cloaked window,
+        // which then jumps in front of the maximized one.
+        for maximize in [true, false] {
+            let mut state = with_windows(3);
+            let changes = if maximize {
+                state.toggle_maximize()
+            } else {
+                state.toggle_monocle()
+            }
+            .expect("the mode goes on");
+            let _ = changes;
+
+            let hidden = state
+                .workspace(0, 0)
+                .expect("a workspace")
+                .hidden_window_ids();
+            assert!(!hidden.is_empty(), "the mode should be covering something");
+
+            for (name, result) in [
+                ("cycle_stack", state.cycle_stack(CycleDirection::Next)),
+                ("focus_stack_window", state.focus_stack_window(0)),
+                ("cycle_focus", state.cycle_focus(CycleDirection::Next)),
+                ("promote_focus", state.promote_focus()),
+            ] {
+                let changes = result.expect("the op should not error");
+                if let Some(focus) = changes.focus {
+                    assert!(
+                        !hidden.contains(&focus),
+                        "{name} asked to focus {focus:?}, which is hidden behind a                          {} ",
+                        if maximize { "maximize" } else { "monocle" }
+                    );
+                }
+            }
+        }
     }
 
     #[test]
