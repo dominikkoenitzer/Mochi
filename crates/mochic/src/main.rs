@@ -1260,10 +1260,18 @@ fn advice(reason: &str, exe: &str) -> (String, Option<String>) {
 
 /// Renders the daemon's explanation of one window as a short paragraph.
 fn why_paragraph(why: &serde_json::Value) -> String {
-    let text = |key: &str| why.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+    let text = |key: &str| {
+        why.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+    };
     let (title, exe, class, hwnd) = (text("title"), text("exe"), text("class"), text("hwnd"));
 
-    let named = if title.is_empty() { "(no title)" } else { title };
+    let named = if title.is_empty() {
+        "(no title)"
+    } else {
+        title
+    };
     let mut out = format!("{named}\n  {exe}, class {class}, window {hwnd}\n\n");
 
     if why.get("managed").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -1297,7 +1305,11 @@ fn why_paragraph(why: &serde_json::Value) -> String {
 /// that is tiled perfectly: the bindings simply stop working inside it, with
 /// nothing on screen and nothing in the log to say why.
 fn keyboard_note(why: &serde_json::Value) -> String {
-    if why.get("hotkeys_blocked").and_then(serde_json::Value::as_bool) != Some(true) {
+    if why
+        .get("hotkeys_blocked")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
         return String::new();
     }
     let mut out = String::from("\n");
@@ -1314,7 +1326,12 @@ fn keyboard_note(why: &serde_json::Value) -> String {
 /// sees it internally: "a hole in the layout" is the thing they can look at and
 /// check, "a managed window that fails is_on_screen" is not.
 fn doctor_report(doctor: &serde_json::Value) -> String {
-    let count = |key: &str| doctor.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let count = |key: &str| {
+        doctor
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
     let empty = Vec::new();
     let findings = doctor
         .get("findings")
@@ -1342,7 +1359,11 @@ fn doctor_report(doctor: &serde_json::Value) -> String {
                 .unwrap_or("")
         };
         let title = text("title");
-        let named = if title.is_empty() { "(no title)" } else { title };
+        let named = if title.is_empty() {
+            "(no title)"
+        } else {
+            title
+        };
         out.push_str(&format!("  {named}  [{} {}]\n", text("exe"), text("hwnd")));
         out.push_str(&field("", text("detail")));
     }
@@ -1350,7 +1371,9 @@ fn doctor_report(doctor: &serde_json::Value) -> String {
     // swallowing their key presses is advice that wastes their time and
     // teaches them the command does nothing.
     if findings.iter().any(|f| f["kind"] != "hotkeys-blocked") {
-        out.push_str("\nA layout that is merely stale is fixed by `mochic retile`. A finding that\n");
+        out.push_str(
+            "\nA layout that is merely stale is fixed by `mochic retile`. A finding that\n",
+        );
         out.push_str("survives that is a defect and worth reporting.\n");
     }
     out
@@ -1414,11 +1437,23 @@ mod tests {
         // person as the bare wording from the log, which is the exact thing
         // this command exists to stop happening.
         for reason in [
-            "not visible", "cloaked", "child window", "tool window",
-            "no-activate window", "owned window", "no title", "too small",
-            "shell class", "shell process", "elevated, out of reach",
-            "always on top", "click-through overlay",
-            "paused", "rule", "manage-class", "unknown",
+            "not visible",
+            "cloaked",
+            "child window",
+            "tool window",
+            "no-activate window",
+            "owned window",
+            "no title",
+            "too small",
+            "shell class",
+            "shell process",
+            "elevated, out of reach",
+            "always on top",
+            "click-through overlay",
+            "paused",
+            "rule",
+            "manage-class",
+            "unknown",
         ] {
             let (explanation, _) = super::advice(reason, "some.exe");
             assert!(
@@ -1432,9 +1467,15 @@ mod tests {
     fn a_long_explanation_wraps_and_stays_under_the_label() {
         let out = super::field("Why", &"word ".repeat(40));
         for line in out.lines().skip(1) {
-            assert!(line.starts_with("       "), "continuation not indented: {line:?}");
+            assert!(
+                line.starts_with("       "),
+                "continuation not indented: {line:?}"
+            );
         }
-        assert!(out.lines().all(|l| l.len() <= 80), "a line ran too wide:\n{out}");
+        assert!(
+            out.lines().all(|l| l.len() <= 80),
+            "a line ran too wide:\n{out}"
+        );
     }
 
     use super::*;
