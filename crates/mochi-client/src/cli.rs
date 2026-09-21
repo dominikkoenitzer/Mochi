@@ -61,7 +61,11 @@ pub enum Cmd {
         path: Option<PathBuf>,
     },
     /// Print the JSON schema of the configuration file
-    Schema,
+    Schema {
+        /// Write the schema to this file, in UTF-8, instead of to stdout
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+    },
     /// Pause and resume window management
     TogglePause,
     /// Hand the whole keyboard to a game, and take it back again
@@ -480,7 +484,7 @@ impl Cmd {
         let command = match self {
             // These three never reach a daemon: two of them run before one
             // exists, the third only prints a file.
-            Cmd::Start { .. } | Cmd::Quickstart | Cmd::Schema | Cmd::Check { .. } => {
+            Cmd::Start { .. } | Cmd::Quickstart | Cmd::Schema { .. } | Cmd::Check { .. } => {
                 return None;
             }
 
