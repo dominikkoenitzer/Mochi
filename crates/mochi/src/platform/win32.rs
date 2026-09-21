@@ -4,12 +4,16 @@
 //! that moves windows, and every one of them is a single method here so that
 //! `--dry-run` can shadow the lot.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::{LazyLock, PoisonError, RwLock};
 
 use anyhow::{Context, Result, anyhow};
 use mochi_core::Rect;
 
-use windows::Win32::Foundation::{COLORREF, CloseHandle, HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, CloseHandle, E_ACCESSDENIED, HWND, LPARAM, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAK, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
     DwmSetWindowAttribute,
@@ -59,6 +63,102 @@ const CLASS_BUFFER: usize = 257;
 /// `MAX_PATH` is a lie on modern Windows, so use a generous buffer.
 const PATH_BUFFER: usize = 1024;
 
+/// Windows this process is not allowed to touch, and the process each one
+/// belonged to when it refused.
+///
+/// UIPI turns down every window call a normal-integrity process makes against
+/// a window owned by an elevated one, and it turns it down for good: this is
+/// not a matter of timing, and retrying never starts working. Left unrecorded,
+/// one such window costs a failed call per animation frame and, far worse,
+/// takes the whole `DeferWindowPos` batch down with it, so every other window
+/// on the screen loses its atomic move and is dragged along one `SetWindowPos`
+/// at a time. A window that answers `E_ACCESSDENIED` once is written down here
+/// and left alone from then on.
+///
+/// The process id is kept because Windows reuses window handles: a refusal
+/// must not outlive the window that earned it and fall on whatever is created
+/// at the same handle next.
+static DENIED: LazyLock<RwLock<HashMap<isize, u32>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Refusals the model has not been told about yet.
+///
+/// [`DENIED`] answers "may I touch this window", which is all the write paths
+/// need. This is the other direction: the daemon drains it and lets go of the
+/// windows it names, because they are discovered mid-layout, on a thread that
+/// holds no model.
+static UNREPORTED: LazyLock<RwLock<Vec<Hwnd>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+
+/// The process that owns a window, or 0 when it has gone.
+fn owner_pid(h: HWND) -> u32 {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(h, Some(&raw mut pid)) };
+    pid
+}
+
+/// True when Windows has already refused to let Mochi touch this window.
+fn is_denied(h: Hwnd) -> bool {
+    let recorded = {
+        let denied = DENIED.read().unwrap_or_else(PoisonError::into_inner);
+        denied.get(&h.0).copied()
+    };
+    let Some(pid) = recorded else { return false };
+    if pid == owner_pid(hwnd(h)) {
+        return true;
+    }
+    // The handle has been handed to a different process, so the refusal
+    // belonged to a window that no longer exists.
+    DENIED
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&h.0);
+    false
+}
+
+/// Writes down a window Windows refused, and says so once.
+///
+/// Returns `true` when this was the first refusal for that window, which is
+/// the only one worth logging: the caller is on the animation thread and would
+/// otherwise write the same line sixty times a second.
+fn deny(h: Hwnd, call: &str) -> bool {
+    let pid = owner_pid(hwnd(h));
+    let first = DENIED
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(h.0, pid)
+        .is_none();
+    if first {
+        UNREPORTED
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(h);
+        tracing::warn!(
+            hwnd = %h,
+            exe = %file_name(&process_path(pid)),
+            call,
+            "windows refuses every call against this window because it belongs to an elevated              process and mochi does not; leaving it alone from now on"
+        );
+    }
+    first
+}
+
+/// True when a Win32 error is UIPI turning the call down.
+fn is_access_denied(e: &windows::core::Error) -> bool {
+    e.code() == E_ACCESSDENIED
+}
+
+/// What one attempt at a `DeferWindowPos` batch came to.
+enum Batch {
+    /// Applied, atomically, as asked.
+    Done,
+    /// A window refused the call and is now written down as unreachable. The
+    /// batch was abandoned; building it again without that window will work.
+    Rebuild,
+    /// The batch failed for a reason leaving it out will not fix, so the
+    /// placements have to be applied one at a time.
+    OneAtATime,
+}
+
 /// Talks to the real desktop.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Win32Platform;
@@ -69,6 +169,72 @@ impl Win32Platform {
         Self
     }
 
+    /// One attempt at a `DeferWindowPos` batch.
+    ///
+    /// Split out of [`Platform::set_positions`] so that the retry after a
+    /// refusal is a bounded loop rather than recursion.
+    fn try_batch(&self, placements: &[WindowPlacement]) -> Result<Batch> {
+        let mut hdwp = unsafe { BeginDeferWindowPos(placements.len() as i32) }
+            .context("BeginDeferWindowPos failed")?;
+
+        for p in placements {
+            if !is_window(p.hwnd) {
+                tracing::debug!(hwnd = %p.hwnd, "skipping a placement for a dead window");
+                continue;
+            }
+            // A window Windows has already refused is left out before the
+            // batch is built. Putting it in would fail the batch and drag
+            // every other window on the screen onto the one at a time path.
+            if is_denied(p.hwnd) {
+                continue;
+            }
+            let h = hwnd(p.hwnd);
+            let target = compensate_invisible_border(window_rect(h), dwm_frame(h), p.rect);
+            let (insert_after, z_flags) = z_order_args(p.z);
+            match unsafe {
+                DeferWindowPos(
+                    hdwp,
+                    h,
+                    insert_after,
+                    target.left,
+                    target.top,
+                    target.width(),
+                    target.height(),
+                    MOVE_FLAGS | z_flags,
+                )
+            } {
+                Ok(next) => hdwp = next,
+                Err(e) => {
+                    // Microsoft is explicit about this: "If a call to
+                    // DeferWindowPos fails, the application should abandon the
+                    // window-positioning operation and not call
+                    // EndDeferWindowPos." So the batch is dropped on the floor
+                    // rather than ended, which is why there is no cleanup here.
+                    if is_access_denied(&e) && deny(p.hwnd, "DeferWindowPos") {
+                        // Now that the window is written down, building the
+                        // batch again without it gives the rest of the screen
+                        // the atomic move it was about to lose.
+                        return Ok(Batch::Rebuild);
+                    }
+                    // Dropping the batch would leave every window in it where
+                    // it was, so the rest of the work is finished one window at
+                    // a time instead. A half applied layout is bad; a layout
+                    // that silently did nothing is worse, because the user
+                    // cannot tell it from a hang.
+                    tracing::warn!(
+                        hwnd = %p.hwnd,
+                        error = %e,
+                        "DeferWindowPos failed, finishing this layout one window at a time"
+                    );
+                    return Ok(Batch::OneAtATime);
+                }
+            }
+        }
+
+        unsafe { EndDeferWindowPos(hdwp) }.context("EndDeferWindowPos failed")?;
+        Ok(Batch::Done)
+    }
+
     /// Fallback for [`Platform::set_positions`] when a batch has to be abandoned.
     ///
     /// Slower and not atomic, but it moves the windows it can and reports the
@@ -76,7 +242,7 @@ impl Win32Platform {
     fn set_positions_individually(&self, placements: &[WindowPlacement]) -> Result<()> {
         let mut failed = 0usize;
         for p in placements {
-            if !is_window(p.hwnd) {
+            if !is_window(p.hwnd) || is_denied(p.hwnd) {
                 continue;
             }
             let h = hwnd(p.hwnd);
@@ -93,6 +259,13 @@ impl Win32Platform {
                     MOVE_FLAGS | z_flags,
                 )
             } {
+                if is_access_denied(&e) {
+                    // Not a failure worth counting: the window is out of reach
+                    // and is now written down as such, so no later pass will
+                    // spend a call on it.
+                    deny(p.hwnd, "SetWindowPos");
+                    continue;
+                }
                 failed += 1;
                 tracing::debug!(hwnd = %p.hwnd, error = %e, "SetWindowPos failed");
             }
@@ -238,7 +411,7 @@ fn window_title(h: HWND) -> String {
     if len <= 0 {
         String::new()
     } else {
-        from_wide(&buf[..len as usize])
+        from_wide(&buf[..(len as usize).min(buf.len())])
     }
 }
 
@@ -248,7 +421,7 @@ fn window_class(h: HWND) -> String {
     if len <= 0 {
         String::new()
     } else {
-        from_wide(&buf[..len as usize])
+        from_wide(&buf[..(len as usize).min(buf.len())])
     }
 }
 
@@ -276,7 +449,7 @@ fn process_path(pid: u32) -> String {
     };
     let _ = unsafe { CloseHandle(handle) };
     match result {
-        Ok(()) => from_wide(&buf[..len as usize]),
+        Ok(()) => from_wide(&buf[..(len as usize).min(buf.len())]),
         Err(_) => String::new(),
     }
 }
@@ -407,6 +580,7 @@ fn read_window(h: HWND) -> WindowInfo {
         maximized: unsafe { IsZoomed(h) }.as_bool(),
         owner,
         monitor,
+        reachable: !is_denied(from_hwnd(h)),
     }
 }
 
@@ -448,6 +622,15 @@ fn z_order_args(z: ZOrder) -> (Option<HWND>, SET_WINDOW_POS_FLAGS) {
 /// `SWP_NOSENDCHANGING` is deliberately absent: `DeferWindowPos` rejects it
 /// with `ERROR_INVALID_PARAMETER`, which would push every layout onto the slow
 /// path.
+///
+/// `SWP_FRAMECHANGED` is on EVERY move, including the frames partway through
+/// an animation, and that is deliberate. Dropping it from the frames in
+/// flight is an obvious saving - it makes the window recalculate its whole
+/// non-client area and repaint it, and `SetWindowPos` blocks on the
+/// application while that happens - but tried against the real desktop on
+/// 2026-09-21 it left Chromium windows sitting in the right tile having never
+/// painted anything. Do not take it out again without a way to prove, on a
+/// real browser window, that the window still draws.
 const MOVE_FLAGS: SET_WINDOW_POS_FLAGS =
     SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0 | SWP_FRAMECHANGED.0);
 
@@ -558,57 +741,42 @@ impl Platform for Win32Platform {
         Ok((p.x, p.y))
     }
 
+    fn is_maximized(&self, h: Hwnd) -> bool {
+        // SAFETY: IsZoomed tolerates any handle value and answers false for one
+        // that is not a window.
+        unsafe { IsZoomed(hwnd(h)) }.as_bool()
+    }
+
+    fn take_unreachable(&self) -> Vec<Hwnd> {
+        std::mem::take(&mut *UNREPORTED.write().unwrap_or_else(PoisonError::into_inner))
+    }
+
     fn set_positions(&self, placements: &[WindowPlacement]) -> Result<()> {
         if placements.is_empty() {
             return Ok(());
         }
-        let mut hdwp = unsafe { BeginDeferWindowPos(placements.len() as i32) }
-            .context("BeginDeferWindowPos failed")?;
-
-        for p in placements {
-            if !is_window(p.hwnd) {
-                tracing::debug!(hwnd = %p.hwnd, "skipping a placement for a dead window");
-                continue;
-            }
-            let h = hwnd(p.hwnd);
-            let target = compensate_invisible_border(window_rect(h), dwm_frame(h), p.rect);
-            let (insert_after, z_flags) = z_order_args(p.z);
-            match unsafe {
-                DeferWindowPos(
-                    hdwp,
-                    h,
-                    insert_after,
-                    target.left,
-                    target.top,
-                    target.width(),
-                    target.height(),
-                    MOVE_FLAGS | z_flags,
-                )
-            } {
-                Ok(next) => hdwp = next,
-                Err(e) => {
-                    // Microsoft is explicit about this: "If a call to
-                    // DeferWindowPos fails, the application should abandon the
-                    // window-positioning operation and not call
-                    // EndDeferWindowPos." So the batch is dropped on the floor
-                    // rather than ended, which is why there is no cleanup here.
-                    //
-                    // Dropping the batch would leave every window in it where it
-                    // was, so the rest of the work is finished one window at a
-                    // time instead. A half applied layout is bad; a layout that
-                    // silently did nothing is worse, because the user cannot
-                    // tell it from a hang.
-                    tracing::warn!(
-                        hwnd = %p.hwnd,
-                        error = %e,
-                        "DeferWindowPos failed, finishing this layout one window at a time"
-                    );
-                    return self.set_positions_individually(placements);
-                }
+        // Each rebuild follows exactly one window being written down as
+        // unreachable, and there are only so many windows in the batch, so
+        // this many attempts is a real bound. It is written as a bound rather
+        // than argued from the registry staying consistent: this runs on the
+        // animation thread, and the cost of the argument being wrong is a
+        // daemon that loops until the stack runs out.
+        for _ in 0..=placements.len() {
+            match self.try_batch(placements) {
+                Ok(Batch::Done) => return Ok(()),
+                Ok(Batch::Rebuild) => continue,
+                Ok(Batch::OneAtATime) => return self.set_positions_individually(placements),
+                Err(e) => return Err(e),
             }
         }
-
-        unsafe { EndDeferWindowPos(hdwp) }.context("EndDeferWindowPos failed")
+        // Every attempt claimed a fresh refusal, which cannot honestly happen
+        // more often than there are windows. Something is answering
+        // inconsistently; finish the job the slow way rather than spin.
+        tracing::warn!(
+            count = placements.len(),
+            "a batch kept reporting new refusals, finishing it one window at a time"
+        );
+        self.set_positions_individually(placements)
     }
 
     fn set_cloaked(&self, h: Hwnd, cloaked: bool) -> Result<()> {
@@ -682,6 +850,12 @@ impl Platform for Win32Platform {
     }
 
     fn set_transparency(&self, h: Hwnd, alpha: Option<u8>) -> Result<()> {
+        // Nothing to clear and nothing that can be faded: a window out of
+        // reach never became translucent in the first place, and the manager
+        // would otherwise retry it on every focus change for ever.
+        if is_denied(h) {
+            return Ok(());
+        }
         let target = hwnd(h);
         let current = unsafe { GetWindowLongPtrW(target, GWL_EXSTYLE) } as u32;
         match alpha {
@@ -695,8 +869,16 @@ impl Platform for Win32Platform {
                         )
                     };
                 }
-                unsafe { SetLayeredWindowAttributes(target, COLORREF(0), a, LWA_ALPHA) }
-                    .with_context(|| format!("SetLayeredWindowAttributes failed for {h}"))
+                match unsafe { SetLayeredWindowAttributes(target, COLORREF(0), a, LWA_ALPHA) } {
+                    Ok(()) => Ok(()),
+                    Err(e) if is_access_denied(&e) => {
+                        deny(h, "SetLayeredWindowAttributes");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        Err(e).with_context(|| format!("SetLayeredWindowAttributes failed for {h}"))
+                    }
+                }
             }
             None => {
                 if current & ex_style::WS_EX_LAYERED != 0 {
@@ -830,5 +1012,14 @@ mod tests {
     fn a_dead_handle_is_not_a_window() {
         assert!(!is_window(Hwnd::NULL));
         assert!(!is_window(Hwnd(0x7fff_ffff)));
+    }
+
+    #[test]
+    fn a_window_nothing_has_refused_is_reachable() {
+        // The registry is keyed by handle and process, so a handle nothing has
+        // ever refused must not be reported as out of reach — including the
+        // dead ones, whose owning process reads back as zero.
+        assert!(!is_denied(Hwnd::NULL));
+        assert!(!is_denied(Hwnd(0x7fff_ffff)));
     }
 }

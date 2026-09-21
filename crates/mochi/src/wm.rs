@@ -210,6 +210,14 @@ impl Hidden {
         self.write();
     }
 
+    /// How a window was taken off screen, without forgetting it.
+    ///
+    /// The read half of [`Hidden::show`], so a caller can find out what to
+    /// undo, undo it, and only then let go of the record.
+    pub fn behaviour_of(&self, hwnd: Hwnd) -> Option<HidingBehaviour> {
+        self.windows.get(&hwnd).copied()
+    }
+
     /// Forgets a window and reports how it had been hidden.
     pub fn show(&mut self, hwnd: Hwnd) -> Option<HidingBehaviour> {
         let previous = self.windows.remove(&hwnd);
@@ -591,8 +599,21 @@ impl WindowManager {
 
         wm.refresh_monitors();
         let _ = wm.load_config();
-        wm.foreground = wm.platform.foreground_window();
         wm.adopt_existing_windows();
+        // The model starts focused on the first monitor's first workspace,
+        // which is rarely the screen the user is looking at. Caching the
+        // foreground handle was not enough: nothing pointed the MODEL at it,
+        // so until the user happened to click something, every command that
+        // works from the focus acted on whichever monitor enumerated first. On
+        // a desk where that is a second screen with nothing on it, a focus or
+        // move binding pressed straight after a start did nothing at all.
+        //
+        // `window_focused` is the same path a real foreground event takes, and
+        // it deliberately does not ask Windows for the foreground back,
+        // because the window already has it.
+        if let Some(foreground) = wm.platform.foreground_window() {
+            wm.window_focused(foreground);
+        }
         wm.retile();
         Ok(wm)
     }
@@ -730,6 +751,30 @@ impl WindowManager {
             .notify(Notification::new(NotificationEvent::Stop));
         tracing::info!("the event loop has ended");
         Ok(())
+    }
+
+    /// Where every managed window actually is, read off the desktop.
+    ///
+    /// The model holds no rectangle, so `mochic state` could only ever report
+    /// the tile a window was ASSIGNED. That reads as perfectly placed for the
+    /// one case somebody is running the command to diagnose: a window that
+    /// could not be moved, could not be uncloaked, or simply ignored the
+    /// rectangle it was handed. This is measured, so the two can be compared.
+    ///
+    /// A window that cannot be read is left out rather than guessed at; that
+    /// is what one which has just died looks like.
+    fn on_screen(&self) -> crate::state::OnScreen {
+        self.core
+            .all_window_ids()
+            .filter_map(|id| {
+                let hwnd = handle(id);
+                let info = self.platform.window_info(hwnd).ok()?;
+                Some((
+                    id.get(),
+                    (info.visible_frame(), info.visible && !info.cloaked),
+                ))
+            })
+            .collect()
     }
 
     /// The tiling model, for tests and for `mochic state`.
@@ -1020,6 +1065,20 @@ impl WindowManager {
         None
     }
 
+    /// Lets go of every window Windows has started refusing.
+    ///
+    /// A window Mochi may not move cannot be tiled, and the refusal is only
+    /// ever discovered by trying, deep inside a layout pass and usually on the
+    /// animation thread, where there is no model to change. This is where the
+    /// model catches up: every event drains the platform's list first, so a
+    /// window that turns out to be out of reach loses its tile on the next
+    /// thing that happens rather than keeping an empty one until it closes.
+    fn drop_unreachable_windows(&mut self) {
+        for hwnd in self.platform.take_unreachable() {
+            self.unmanage(hwnd, "out of reach");
+        }
+    }
+
     /// Drops a window from the model, whatever the reason.
     fn unmanage(&mut self, hwnd: Hwnd, why: &str) {
         let id = window_id(hwnd);
@@ -1209,11 +1268,25 @@ impl WindowManager {
 
     /// Brings a window back, undoing whatever took it off screen.
     fn show_window(&mut self, hwnd: Hwnd) {
-        let previous = self
-            .hidden
-            .lock()
-            .ok()
-            .and_then(|mut hidden| hidden.show(hwnd));
+        // Read the record, do not take it. It is cleared further down, once
+        // the window is actually back on screen.
+        //
+        // Clearing first and uncloaking after leaves a gap: the uncloak is a
+        // cross-process call into the shell, so it takes tens of milliseconds
+        // and longer while explorer is busy, and for that whole time the
+        // window is off screen with nothing naming it. A `taskkill /f`, an End
+        // task, or the power going out inside that gap strands it: cloaked,
+        // out of the model, out of the record, and invisible to
+        // `restore-windows`, which reads the record. Every workspace switch
+        // comes through here, so the gap was opened dozens of times a day.
+        // Uncloaking first costs at most one redundant uncloak on the next
+        // start, which `recover` already tolerates.
+        //
+        // `record()`, not `lock().ok()`: this was the last reader that skipped
+        // itself on a poisoned mutex, which would make it believe a window it
+        // is holding was never hidden and leave it exactly where the ordering
+        // above was about to.
+        let previous = record(&self.hidden).behaviour_of(hwnd);
         let result = match previous {
             Some(HidingBehaviour::Cloak) => self.platform.set_cloaked(hwnd, false),
             Some(HidingBehaviour::Minimize) => self.platform.show(hwnd, ShowState::Restore),
@@ -1225,18 +1298,16 @@ impl WindowManager {
                 _ => Ok(()),
             },
         };
-        if let Err(e) = result {
-            tracing::error!(%hwnd, error = %e, "could not show a window");
-            // Write it back down. The record was cleared before the call, so a
-            // window that refused to come back was off screen with nothing
-            // holding it: not in the restore hook, not in the crash mirror,
-            // not reachable by `restore-windows`. Invisible and unrecoverable
-            // without another window manager, which is the one failure this
-            // record exists to prevent. `restore` already settles failures
-            // back the same way.
-            if let Some(behaviour) = previous {
-                record(&self.hidden).hide(hwnd, behaviour);
+        match result {
+            // Back on screen, so nothing is owed for it any more. This is the
+            // only place the entry goes, and it goes after the fact.
+            Ok(()) => {
+                record(&self.hidden).show(hwnd);
             }
+            // The entry was never removed, so a window that refused to come
+            // back is still named by the record and the next attempt, the
+            // restore hook and `restore-windows` all still know about it.
+            Err(e) => tracing::error!(%hwnd, error = %e, "could not show a window"),
         }
     }
 
@@ -1390,11 +1461,12 @@ impl WindowManager {
             if let Some(id) = container.focused_window_id()
                 && let Some(work_area) = self.core.work_area_for(monitor, workspace)
             {
-                // Scaled, like every other tile. `full_rect` pins the scale
-                // to 1.0, so on a 150% screen a monocle came out ten physical
-                // pixels larger per side than the tile it replaced, and the
-                // border followed the same wrong rectangle. On a 96 DPI screen
-                // the two agree, which is why it was invisible on one monitor.
+                // Scaled, like every other tile, and it has to be spelled
+                // out because getting it wrong was invisible on one monitor:
+                // at a scale of 1.0 a monocle came out ten physical pixels
+                // larger per side than the tile it replaced on a 150% screen,
+                // and the border followed the same wrong rectangle, while on a
+                // 96 DPI screen the two agreed exactly.
                 let rect = target.full_rect_scaled(
                     work_area,
                     self.core.default_workspace_padding,
@@ -1473,6 +1545,7 @@ impl WindowManager {
     // -----------------------------------------------------------------
 
     fn on_event(&mut self, event: Event) -> Flow {
+        self.drop_unreachable_windows();
         match event {
             Event::Window { kind, hwnd } => {
                 self.on_window_event(kind, hwnd);
@@ -1546,7 +1619,7 @@ impl WindowManager {
     /// Where window events become tree updates.
     fn on_window_event(&mut self, kind: WindowEventKind, hwnd: Hwnd) {
         match kind {
-            WindowEventKind::LocationChange => {}
+            WindowEventKind::LocationChange => self.follow_external_maximize(hwnd),
             WindowEventKind::Destroyed => {
                 if self.lives_in_the_tray(hwnd) {
                     // The application put its window away rather than closing:
@@ -1614,6 +1687,78 @@ impl WindowManager {
             WindowEventKind::MoveSizeStart => {}
             WindowEventKind::MoveSizeEnd => self.window_dropped(hwnd),
             WindowEventKind::NameChange => self.window_renamed(hwnd),
+        }
+    }
+
+    /// Keeps the model honest when the USER maximizes or restores a window.
+    ///
+    /// Windows has no event of its own for this; pressing the maximize button
+    /// arrives as an ordinary location change. Nothing read it, and
+    /// `WindowInfo::maximized` had no reader anywhere in the daemon, so the
+    /// model went on calling the window normally tiled while Windows had it
+    /// zoomed. A zoomed window ignores every rectangle `SetWindowPos` gives it,
+    /// so the window simply sat at full screen, refusing its tile, with nothing
+    /// logged and no command able to explain it.
+    ///
+    /// Adopted rather than undone: the user asked for the window to be big, and
+    /// Mochi has its own maximize that means exactly that. Undoing it would
+    /// mean a maximize button that visibly fights back.
+    ///
+    /// No ledger is needed to tell Mochi's own maximize from the user's, unlike
+    /// the cloak and minimize paths. The model is updated BEFORE the call that
+    /// maximizes the window is issued, so by the time the location change
+    /// arrives the model and Windows already agree, and agreeing is exactly
+    /// what this returns early on. A ledger was written first and it was worse
+    /// than redundant: it also suppressed the RESTORE direction.
+    fn follow_external_maximize(&mut self, hwnd: Hwnd) {
+        let id = window_id(hwnd);
+        // The cheap check first. This runs on the flood path: a window being
+        // dragged emits hundreds of these a second.
+        if !self.core.is_managed(id) {
+            return;
+        }
+        let Some((monitor, workspace)) = self.core.locate_window(id) else {
+            return;
+        };
+        let Ok(target) = self.core.workspace(monitor, workspace) else {
+            return;
+        };
+        // Monocle owns the screen already; a maximize underneath it is not
+        // something the model can hold, and `toggle_maximize` refuses anyway.
+        if target.is_monocle() {
+            return;
+        }
+
+        let model_says = target.maximized_window().map(|w| w.id) == Some(id);
+        let windows_says = self.platform.is_maximized(hwnd);
+        if model_says == windows_says {
+            return;
+        }
+        // Only the window the model is actually pointing at can be toggled, and
+        // maximizing a window is a click on it, so it is the focused one.
+        if self.core.focused_window_id() != Some(id) {
+            return;
+        }
+
+        match self.core.toggle_maximize() {
+            Ok(mut changes) => {
+                tracing::info!(
+                    %hwnd,
+                    maximized = windows_says,
+                    "following a maximize the user made"
+                );
+                if windows_says {
+                    // It is already maximized on screen. Telling Windows to do
+                    // it again is at best wasted and at worst a second round of
+                    // events to read.
+                    changes.maximize = None;
+                } else {
+                    // Likewise: the user already restored it.
+                    changes.restore.retain(|other| *other != id);
+                }
+                self.apply_changes(changes);
+            }
+            Err(e) => tracing::debug!(%hwnd, error = %e, "could not follow the maximize"),
         }
     }
 
@@ -1874,6 +2019,12 @@ impl WindowManager {
             return;
         };
         self.rebuild_monitors(&monitors);
+        // Before the retile, so the layout pass it triggers hands every border
+        // to its window again. A display change can leave a window on exactly
+        // the rectangle it already had while the DPI under it changed, and the
+        // per-pass diff would see an unchanged spec and send nothing, leaving
+        // the frame drawn at the old screen's measurements.
+        self.visuals.invalidate_borders();
         self.notify(NotificationEvent::MonitorsChanged {
             count: self.core.monitors().len(),
         });
@@ -2117,7 +2268,12 @@ impl WindowManager {
                 // `mochic state` listed bars that were gone for good.
                 self.session.subscribers = self.subscribers.names().to_vec();
                 Response::State {
-                    state: snapshot(&self.session, &self.core, self.foreground),
+                    state: snapshot(
+                        &self.session,
+                        &self.core,
+                        self.foreground,
+                        &self.on_screen(),
+                    ),
                 }
             }
             Command::Query { target } => self.query(target),
@@ -3189,6 +3345,10 @@ mod tests {
         /// Windows that refuse to be positioned, which is what an elevated
         /// window looks like to a process that is not elevated.
         refuses: Mutex<Vec<Hwnd>>,
+        /// The refusals [`Platform::take_unreachable`] has not handed over yet,
+        /// mirroring the real platform: a refusal is discovered by a failed
+        /// move and reported to the model exactly once.
+        unreported: Mutex<Vec<Hwnd>>,
         /// Windows that stop answering `window_info` once they are off screen,
         /// which is what a cloaked or hidden window often does.
         vanishing: Mutex<Vec<Hwnd>>,
@@ -3198,6 +3358,9 @@ mod tests {
         record_seen: Mutex<Vec<usize>>,
         /// Windows that cannot be uncloaked, the way an elevated one cannot.
         unrestorable: Mutex<Vec<Hwnd>>,
+        /// Windows Windows reports as maximized, which a test drives directly
+        /// to stand in for the user pressing the maximize button.
+        zoomed: Mutex<Vec<Hwnd>>,
     }
 
     impl FakePlatform {
@@ -3217,10 +3380,12 @@ mod tests {
                 placements: Mutex::new(Vec::new()),
                 history: Mutex::new(Vec::new()),
                 refuses: Mutex::new(Vec::new()),
+                unreported: Mutex::new(Vec::new()),
                 vanishing: Mutex::new(Vec::new()),
                 record_watch: Mutex::new(None),
                 record_seen: Mutex::new(Vec::new()),
                 unrestorable: Mutex::new(Vec::new()),
+                zoomed: Mutex::new(Vec::new()),
             }
         }
 
@@ -3232,6 +3397,16 @@ mod tests {
         /// next monitor event, exactly like a real display change.
         fn set_monitors(&self, monitors: Vec<MonitorInfo>) {
             *self.monitors.lock().unwrap() = monitors;
+        }
+
+        /// The user pressed the maximize button on this window.
+        fn user_maximizes(&self, hwnd: Hwnd) {
+            self.zoomed.lock().unwrap().push(hwnd);
+        }
+
+        /// And pressed restore again.
+        fn user_restores(&self, hwnd: Hwnd) {
+            self.zoomed.lock().unwrap().retain(|other| *other != hwnd);
         }
 
         /// Makes one window unpositionable from now on.
@@ -3306,6 +3481,10 @@ mod tests {
         fn cursor_position(&self) -> Result<(i32, i32)> {
             Ok((0, 0))
         }
+
+        fn is_maximized(&self, hwnd: Hwnd) -> bool {
+            self.zoomed.lock().unwrap().contains(&hwnd)
+        }
         fn set_positions(&self, placements: &[WindowPlacement]) -> Result<()> {
             // The real platform falls back to one window at a time when a
             // batch is refused, so the windows it can move still move and only
@@ -3321,6 +3500,8 @@ mod tests {
             if denied.is_empty() {
                 Ok(())
             } else {
+                let mut unreported = self.unreported.lock().unwrap();
+                unreported.extend(denied.iter().map(|&(hwnd, _)| hwnd));
                 Err(anyhow::anyhow!(
                     "{} of {} windows could not be positioned",
                     denied.len(),
@@ -3328,6 +3509,10 @@ mod tests {
                 ))
             }
         }
+        fn take_unreachable(&self) -> Vec<Hwnd> {
+            std::mem::take(&mut *self.unreported.lock().unwrap())
+        }
+
         fn set_cloaked(&self, hwnd: Hwnd, cloaked: bool) -> Result<()> {
             if let Some(path) = self.record_watch.lock().unwrap().clone() {
                 let count = crate::recover::load(&path).map_or(0, |entries| entries.len());
@@ -3387,6 +3572,33 @@ mod tests {
 
     fn manager(windows: Vec<WindowInfo>) -> (WindowManager, Arc<FakePlatform>) {
         manager_on(windows, vec![main_screen()])
+    }
+
+    /// A manager that starts with `hwnd` holding the foreground, the way a
+    /// desktop looks when the user was last working in that window.
+    ///
+    /// Startup points the model at whatever `Platform::foreground_window`
+    /// reports, and the fake answers that with the FIRST window it was given.
+    /// A test about the focus has to name the window it starts on rather than
+    /// lean on the order the windows happened to be adopted in.
+    fn manager_focused_on(
+        windows: Vec<WindowInfo>,
+        hwnd: Hwnd,
+    ) -> (WindowManager, Arc<FakePlatform>) {
+        let (mut wm, platform) = manager(windows);
+        wm.on_window_event(WindowEventKind::Foreground, hwnd);
+        (wm, platform)
+    }
+
+    /// [`manager_focused_on`] over several screens.
+    fn manager_on_focused_on(
+        windows: Vec<WindowInfo>,
+        monitors: Vec<MonitorInfo>,
+        hwnd: Hwnd,
+    ) -> (WindowManager, Arc<FakePlatform>) {
+        let (mut wm, platform) = manager_on(windows, monitors);
+        wm.on_window_event(WindowEventKind::Foreground, hwnd);
+        (wm, platform)
     }
 
     /// A manager over a chosen set of screens.
@@ -3525,8 +3737,37 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_start_focuses_the_screen_the_user_is_actually_on() {
+        // Startup cached the foreground handle in the daemon and told the
+        // MODEL nothing, so the model sat on the first monitor's first
+        // workspace however the desktop actually looked. Until the user
+        // happened to click something, every command that works from the focus
+        // acted on whichever screen enumerated first - and on a desk where
+        // that screen is a portrait panel with nothing on it, a focus or move
+        // binding pressed straight after a start did nothing at all.
+        let mut over_there = window(7, "On the portrait screen");
+        over_there.monitor = Some(MonitorId(2));
+        let (wm, _) = manager_on(
+            vec![over_there, window(1, "Editor")],
+            vec![main_screen(), portrait_screen()],
+        );
+
+        assert_eq!(wm.foreground, Some(Hwnd(7)), "the fake reports this one");
+        assert_eq!(
+            wm.state().focused_monitor_idx(),
+            1,
+            "the model is looking at a different screen than the user is"
+        );
+        assert_eq!(
+            wm.state().focused_window_id(),
+            Some(WindowId(7)),
+            "the model and the desktop disagree about what is focused"
+        );
+    }
+
+    #[test]
     fn focus_moves_between_the_tiles() {
-        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        let (mut wm, _) = manager_focused_on(vec![window(1, "One"), window(2, "Two")], Hwnd(2));
         assert_eq!(wm.state().focused_window_id(), Some(WindowId(2)));
 
         wm.handle_command(Command::Focus {
@@ -3555,7 +3796,10 @@ mod tests {
     fn cycle_focus_walks_the_container_ring_by_position() {
         // The point of this one next to `focus`: it never has to decide what
         // is to the left, so it works the same on every layout.
-        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two"), window(3, "Three")]);
+        let (mut wm, _) = manager_focused_on(
+            vec![window(1, "One"), window(2, "Two"), window(3, "Three")],
+            Hwnd(3),
+        );
         assert_eq!(wm.state().focused_window_id(), Some(WindowId(3)));
 
         assert_eq!(
@@ -3584,7 +3828,10 @@ mod tests {
 
     #[test]
     fn cycle_move_swaps_the_focused_window_along_the_ring() {
-        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two"), window(3, "Three")]);
+        let (mut wm, _) = manager_focused_on(
+            vec![window(1, "One"), window(2, "Two"), window(3, "Three")],
+            Hwnd(3),
+        );
         assert_eq!(wm.state().focused_window_id(), Some(WindowId(3)));
 
         assert_eq!(
@@ -3608,7 +3855,10 @@ mod tests {
 
     #[test]
     fn promote_focus_focuses_the_front_of_the_ring_without_moving_anything() {
-        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two"), window(3, "Three")]);
+        let (mut wm, _) = manager_focused_on(
+            vec![window(1, "One"), window(2, "Two"), window(3, "Three")],
+            Hwnd(3),
+        );
         let before = ring_order(&wm);
         assert_eq!(wm.state().focused_window_id(), Some(WindowId(3)));
 
@@ -3649,7 +3899,7 @@ mod tests {
 
     #[test]
     fn send_to_workspace_moves_the_window_and_leaves_the_focus_behind() {
-        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        let (mut wm, _) = manager_focused_on(vec![window(1, "One"), window(2, "Two")], Hwnd(2));
         assert_eq!(wm.state().focused_window_id(), Some(WindowId(2)));
 
         assert_eq!(
@@ -3672,9 +3922,10 @@ mod tests {
 
     #[test]
     fn send_to_monitor_moves_the_window_and_leaves_the_focus_behind() {
-        let (mut wm, _) = manager_on(
+        let (mut wm, _) = manager_on_focused_on(
             vec![window(1, "One"), window(2, "Two")],
             vec![main_screen(), portrait_screen()],
+            Hwnd(2),
         );
         assert_eq!(wm.state().focused_window_id(), Some(WindowId(2)));
 
@@ -3694,7 +3945,7 @@ mod tests {
 
     #[test]
     fn resize_edge_moves_the_edge_it_was_given_and_no_other() {
-        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        let (mut wm, _) = manager_focused_on(vec![window(1, "One"), window(2, "Two")], Hwnd(2));
         // The focused window is the right hand tile, so its right edge is the
         // edge of the screen and there is nothing on that side to push.
         let before = wm.state().rect_for_window(WindowId(2)).unwrap();
@@ -4275,7 +4526,8 @@ mod tests {
         // arrived at is empty. Left there, the daemon believes the foreground
         // is a window it has just cloaked, and Windows hands the keyboard to
         // whatever it likes, which can be a window on another monitor.
-        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        let (mut wm, platform) =
+            manager_focused_on(vec![window(1, "Editor"), window(2, "Browser")], Hwnd(2));
         platform.focused.lock().unwrap().clear();
         assert_eq!(wm.foreground, Some(Hwnd(2)), "it starts on a real window");
 
@@ -4316,15 +4568,15 @@ mod tests {
         // the desktop must not be touched, or every monitor change would drop
         // the keyboard on the way past.
         //
-        // The window on the far screen is listed first on purpose. The last
-        // window managed is the one the fake desktop reports as foreground, and
-        // a window that is already the foreground is deliberately not focused
-        // again, so a test that crosses TO it proves nothing.
+        // The test has to start on the main screen: a window that is already
+        // the foreground is deliberately not focused again, so crossing TO the
+        // window under test would prove nothing.
         let mut over_there = window(7, "On the portrait screen");
         over_there.monitor = Some(MonitorId(2));
-        let (mut wm, platform) = manager_on(
+        let (mut wm, platform) = manager_on_focused_on(
             vec![over_there, window(1, "Editor"), window(2, "Browser")],
             vec![main_screen(), portrait_screen()],
+            Hwnd(1),
         );
         platform.focused.lock().unwrap().clear();
 
@@ -4519,6 +4771,98 @@ mod tests {
         });
         wm.manage(&window(3, "Terminal"));
         assert_eq!(wm.state().workspace(0, 0).unwrap().containers().len(), 2);
+    }
+
+    #[test]
+    fn a_maximize_the_user_made_is_followed_into_the_model() {
+        // Nothing read `WindowInfo::maximized` anywhere in the daemon, so
+        // pressing the maximize button left Windows with the window zoomed and
+        // the model still calling it normally tiled. A zoomed window ignores
+        // every rectangle `SetWindowPos` gives it, so it sat at full screen
+        // refusing its tile, with nothing logged and no command able to explain
+        // it. Caught on the real desktop by comparing `rect` with `actual_rect`
+        // in `mochic state`.
+        let (mut wm, platform) =
+            manager_focused_on(vec![window(1, "Editor"), window(2, "Browser")], Hwnd(2));
+        assert!(
+            !wm.state().workspace(0, 0).unwrap().is_maximized(),
+            "nothing is maximized to begin with"
+        );
+
+        platform.user_maximizes(Hwnd(2));
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(2));
+
+        let workspace = wm.state().workspace(0, 0).unwrap();
+        assert!(workspace.is_maximized(), "the model did not follow");
+        assert_eq!(
+            workspace.maximized_window().map(|w| w.id),
+            Some(WindowId(2)),
+            "it followed the wrong window"
+        );
+
+        // And back again when the user restores it.
+        platform.user_restores(Hwnd(2));
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(2));
+        assert!(
+            !wm.state().workspace(0, 0).unwrap().is_maximized(),
+            "the model stayed maximized after the user restored it"
+        );
+    }
+
+    #[test]
+    fn mochis_own_maximize_is_not_mistaken_for_the_users() {
+        // The ledger's whole job. Mochi maximizing a window produces exactly
+        // the same location change the user's button does; without telling them
+        // apart, Mochi would read its own work as a user action and toggle
+        // straight back off again.
+        let (mut wm, platform) =
+            manager_focused_on(vec![window(1, "Editor"), window(2, "Browser")], Hwnd(2));
+
+        wm.handle_command(Command::ToggleMaximize);
+        assert!(wm.state().workspace(0, 0).unwrap().is_maximized());
+
+        // Windows now reports it zoomed, and the event arrives.
+        platform.user_maximizes(Hwnd(2));
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(2));
+
+        assert!(
+            wm.state().workspace(0, 0).unwrap().is_maximized(),
+            "Mochi followed its own maximize and toggled it back off"
+        );
+    }
+
+    #[test]
+    fn a_window_that_starts_refusing_loses_its_tile() {
+        // What an elevated window looks like to a Mochi that is not elevated:
+        // it can be read and enumerated, so it is managed like anything else,
+        // and only the first attempt to move it discovers that Windows will
+        // not allow it. Keeping it in the layout hands it a tile it can never
+        // be put in, so the tile stays empty, its border is drawn around
+        // nothing and the other window is squeezed into half a screen for it.
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Terminal")]);
+        let shared = wm.state().workspace(0, 0).unwrap();
+        assert_eq!(shared.containers().len(), 2);
+        let shared_width = shared.latest_layout()[0].width();
+
+        platform.refuse(Hwnd(2));
+        wm.retile();
+
+        // The next thing that happens is when the model catches up.
+        wm.on_event(Event::Window {
+            kind: WindowEventKind::Foreground,
+            hwnd: Hwnd(1),
+        });
+
+        let workspace = wm.state().workspace(0, 0).unwrap();
+        assert_eq!(
+            workspace.containers().len(),
+            1,
+            "the window Windows refuses to move still had a tile"
+        );
+        assert!(
+            workspace.latest_layout()[0].width() > shared_width,
+            "the window that is left should have the space back, not keep sharing              the screen with a tile nothing can be put in"
+        );
     }
 
     #[test]

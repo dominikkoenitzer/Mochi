@@ -180,6 +180,18 @@ impl State {
     }
 }
 
+/// Where a window actually is on screen, as opposed to where the model says
+/// it should be.
+///
+/// The model stores no rectangle: `rect` on a window in this snapshot is the
+/// TILE it was assigned, and every window of a stacked container reports the
+/// same one. That is useful, and it is not the same question as "where is this
+/// window". A window Mochi could not move, could not uncloak, or that ignored
+/// the rectangle it was given reads as perfectly placed, which is exactly the
+/// case somebody running `mochic state` is trying to diagnose. The daemon
+/// measures the real thing and hands it over here.
+pub type OnScreen = std::collections::HashMap<isize, (Rect, bool)>;
+
 /// The JSON document `mochic state` prints.
 ///
 /// The shape is monitors, then their workspaces, then the containers of each
@@ -194,7 +206,12 @@ impl State {
 ///   "monitors": [{ "index": 0, "workspaces": [{ "containers": [ ... ] }] }]
 /// }
 /// ```
-pub fn snapshot(session: &State, core: &CoreState, foreground: Option<Hwnd>) -> Value {
+pub fn snapshot(
+    session: &State,
+    core: &CoreState,
+    foreground: Option<Hwnd>,
+    on_screen: &OnScreen,
+) -> Value {
     json!({
         "version": session.version,
         "dry_run": session.dry_run,
@@ -211,7 +228,7 @@ pub fn snapshot(session: &State, core: &CoreState, foreground: Option<Hwnd>) -> 
             .monitors()
             .iter()
             .enumerate()
-            .map(|(index, monitor)| monitor_json(core, index, monitor))
+            .map(|(index, monitor)| monitor_json(core, index, monitor, on_screen))
             .collect::<Vec<_>>(),
         "settings": session.settings,
         "behaviour": {
@@ -231,7 +248,7 @@ pub fn snapshot(session: &State, core: &CoreState, foreground: Option<Hwnd>) -> 
     })
 }
 
-fn monitor_json(core: &CoreState, index: usize, monitor: &Monitor) -> Value {
+fn monitor_json(core: &CoreState, index: usize, monitor: &Monitor, on_screen: &OnScreen) -> Value {
     json!({
         "index": index,
         "id": monitor.id,
@@ -248,7 +265,7 @@ fn monitor_json(core: &CoreState, index: usize, monitor: &Monitor) -> Value {
             .workspaces()
             .iter()
             .enumerate()
-            .map(|(idx, workspace)| workspace_json(core, index, monitor, idx, workspace))
+            .map(|(idx, workspace)| workspace_json(core, index, monitor, idx, workspace, on_screen))
             .collect::<Vec<_>>(),
     })
 }
@@ -259,6 +276,7 @@ fn workspace_json(
     monitor: &Monitor,
     index: usize,
     workspace: &Workspace,
+    on_screen: &OnScreen,
 ) -> Value {
     let work_area = core
         .work_area_for(monitor_idx, index)
@@ -295,24 +313,29 @@ fn workspace_json(
             .iter()
             .enumerate()
             .map(|(idx, container)| {
-                container_json(container, idx, layout.get(idx).copied())
+                container_json(container, idx, layout.get(idx).copied(), on_screen)
             })
             .collect::<Vec<_>>(),
         "monocle_container": workspace
             .monocle_container()
-            .map(|container| container_json(container, 0, Some(full))),
+            .map(|container| container_json(container, 0, Some(full), on_screen)),
         "maximized_window": workspace
             .maximized_window()
-            .map(|window| window_json(window, Some(work_area), true)),
+            .map(|window| window_json(window, Some(work_area), true, on_screen)),
         "floating_windows": workspace
             .floating_windows()
             .iter()
-            .map(|window| window_json(window, None, true))
+            .map(|window| window_json(window, None, true, on_screen))
             .collect::<Vec<_>>(),
     })
 }
 
-fn container_json(container: &Container, index: usize, rect: Option<Rect>) -> Value {
+fn container_json(
+    container: &Container,
+    index: usize,
+    rect: Option<Rect>,
+    on_screen: &OnScreen,
+) -> Value {
     let focused = container.focused_window_id();
     json!({
         "index": index,
@@ -322,20 +345,34 @@ fn container_json(container: &Container, index: usize, rect: Option<Rect>) -> Va
         "windows": container
             .windows()
             .iter()
-            .map(|window| window_json(window, rect, Some(window.id) == focused))
+            .map(|window| window_json(window, rect, Some(window.id) == focused, on_screen))
             .collect::<Vec<_>>(),
     })
 }
 
-fn window_json(window: &Window, rect: Option<Rect>, visible: bool) -> Value {
+fn window_json(window: &Window, rect: Option<Rect>, shown: bool, on_screen: &OnScreen) -> Value {
+    let measured = on_screen.get(&window.id.get());
     json!({
         "hwnd": window.id.get(),
         "title": window.title,
         "exe": window.exe,
         "class": window.class,
         "path": window.path,
+        // Where the model says it belongs: the tile, shared by every window of
+        // a stacked container, and null for a floating one the model does not
+        // place.
         "rect": rect.map(rect_json),
-        "visible": visible,
+        // Where it actually is, read off the desktop. Absent when the window
+        // could not be read, which is what a window that has just died looks
+        // like. When this disagrees with `rect`, the window is not where Mochi
+        // believes it is, and that is worth knowing.
+        "actual_rect": measured.map(|&(rect, _)| rect_json(rect)),
+        // The model's answer: the window its container is showing. A stack
+        // shows one of its windows and hides the rest.
+        "visible": shown,
+        // The desktop's answer, which is not the same question: false for a
+        // window that is cloaked or hidden however that came about.
+        "on_screen": measured.map(|&(_, visible)| visible),
     })
 }
 
@@ -355,6 +392,58 @@ mod tests {
     use super::*;
     use mochi_core::model::Monitor as CoreMonitor;
     use mochi_core::{Layout, Window as CoreWindow};
+
+    #[test]
+    fn a_window_that_is_not_where_the_model_thinks_says_so() {
+        // The case this exists for. A window Mochi was not allowed to move
+        // stays where it opened, but the model still has it down for the tile
+        // it was assigned, so `rect` describes a window that is somewhere else
+        // entirely and the snapshot reads as a perfectly tiled desktop. That
+        // is precisely the state somebody runs `mochic state` to diagnose.
+        let mut core = core();
+        core.add_window(CoreWindow::new(0x111).with_exe("WindowsTerminal.exe"))
+            .unwrap();
+
+        let stranded = Rect::new(0, 0, 400, 300);
+        let mut measured = OnScreen::new();
+        measured.insert(0x111, (stranded, true));
+
+        let json = snapshot(&session(), &core, Some(Hwnd(0x111)), &measured);
+        let window = &json["monitors"][0]["workspaces"][0]["containers"][0]["windows"][0];
+
+        let tile = &window["rect"];
+        assert!(!tile.is_null(), "the model still assigns it a tile");
+        assert_eq!(window["actual_rect"]["right"], 400);
+        assert_eq!(window["actual_rect"]["bottom"], 300);
+        assert_ne!(
+            tile["right"], window["actual_rect"]["right"],
+            "the whole point: the two disagree and the snapshot shows it"
+        );
+        assert_eq!(window["on_screen"], true);
+    }
+
+    #[test]
+    fn a_window_that_could_not_be_read_reports_nothing_rather_than_a_guess() {
+        // A window that died between the model being read and the desktop
+        // being measured. Reporting the tile as though it were measured would
+        // be worse than reporting nothing.
+        let mut core = core();
+        core.add_window(CoreWindow::new(0x111)).unwrap();
+
+        let json = snapshot(&session(), &core, None, &nothing_measured());
+        let window = &json["monitors"][0]["workspaces"][0]["containers"][0]["windows"][0];
+
+        assert!(window["actual_rect"].is_null());
+        assert!(window["on_screen"].is_null());
+        assert!(!window["rect"].is_null(), "the model half still reports");
+    }
+
+    /// No window could be measured, which is what every test that does not
+    /// care about the real desktop wants: the snapshot still reports the
+    /// model, and `actual_rect` and `on_screen` come back null.
+    fn nothing_measured() -> OnScreen {
+        OnScreen::new()
+    }
 
     fn core() -> CoreState {
         let mut core = CoreState::new();
@@ -391,7 +480,7 @@ mod tests {
         )
         .unwrap();
 
-        let json = snapshot(&session(), &core, Some(Hwnd(0x222)));
+        let json = snapshot(&session(), &core, Some(Hwnd(0x222)), &nothing_measured());
 
         assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(json["dry_run"], true);
@@ -442,7 +531,7 @@ mod tests {
         core.add_window(CoreWindow::new(2)).unwrap();
         core.toggle_monocle().unwrap();
 
-        let json = snapshot(&session(), &core, None);
+        let json = snapshot(&session(), &core, None, &nothing_measured());
         let workspace = &json["monitors"][0]["workspaces"][0];
         assert_eq!(workspace["monocle"], true);
         assert_eq!(workspace["monocle_container"]["windows"][0]["hwnd"], 2);
@@ -455,7 +544,7 @@ mod tests {
 
         core.toggle_monocle().unwrap();
         core.toggle_float().unwrap();
-        let json = snapshot(&session(), &core, None);
+        let json = snapshot(&session(), &core, None, &nothing_measured());
         let workspace = &json["monitors"][0]["workspaces"][0];
         assert_eq!(workspace["monocle"], false);
         assert_eq!(workspace["floating_windows"][0]["hwnd"], 2);
@@ -467,7 +556,7 @@ mod tests {
         let mut core = core();
         core.window_container_behaviour = mochi_core::model::WindowContainerBehaviour::Append;
         core.mouse_follows_focus = false;
-        let json = snapshot(&session(), &core, None);
+        let json = snapshot(&session(), &core, None, &nothing_measured());
         assert_eq!(json["behaviour"]["window_hiding_behaviour"], "Cloak");
         assert_eq!(json["behaviour"]["cross_monitor_move_behaviour"], "Swap");
         assert_eq!(json["behaviour"]["window_container_behaviour"], "Append");
@@ -482,7 +571,9 @@ mod tests {
         core.add_window(CoreWindow::new(1)).unwrap();
         core.add_window(CoreWindow::new(2)).unwrap();
 
-        let workspace = snapshot(&session(), &core, None)["monitors"][0]["workspaces"][0].clone();
+        let workspace =
+            snapshot(&session(), &core, None, &nothing_measured())["monitors"][0]["workspaces"][0]
+                .clone();
         assert_eq!(workspace["containers"].as_array().unwrap().len(), 1);
         assert_eq!(workspace["containers"][0]["stack"], true);
         assert_eq!(workspace["containers"][0]["windows"][0]["visible"], false);
@@ -539,7 +630,7 @@ mod tests {
             .unwrap()
             .layout_rules
             .insert(1, Layout::Columns);
-        let json = snapshot(&session(), &core, None);
+        let json = snapshot(&session(), &core, None, &nothing_measured());
         assert_eq!(json["monitors"][0]["workspaces"][0]["layout"], "Columns");
     }
 }
