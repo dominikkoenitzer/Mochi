@@ -64,6 +64,7 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     let raw_hotkeys = matches!(cli.command, Cmd::Hotkeys { json: true });
+    let raw_why = matches!(cli.command, Cmd::Why { json: true });
     let Some(command) = cli.command.to_command() else {
         unreachable!("the subcommands without a protocol command returned above")
     };
@@ -84,6 +85,13 @@ fn run(cli: Cli) -> Result<()> {
         Response::Ok => {}
         Response::State { state } => println!("{}", serde_json::to_string_pretty(&state)?),
         Response::Query { answer } => println!("{}", scalar(&answer)),
+        Response::Why { why } => {
+            if raw_why {
+                println!("{}", serde_json::to_string_pretty(&why)?);
+            } else {
+                print!("{}", why_paragraph(&why));
+            }
+        }
         Response::Hotkeys { hotkeys } => {
             if raw_hotkeys {
                 println!("{}", serde_json::to_string_pretty(&hotkeys)?);
@@ -103,6 +111,7 @@ fn answer_kind(command: &Command) -> &'static str {
         Command::State => "state",
         Command::Query { .. } => "query",
         Command::Hotkeys => "hotkeys",
+        Command::Why => "why",
         _ => "ok",
     }
 }
@@ -114,6 +123,7 @@ fn response_kind(response: &Response) -> &'static str {
         Response::State { .. } => "state",
         Response::Query { .. } => "query",
         Response::Hotkeys { .. } => "hotkeys",
+        Response::Why { .. } => "why",
         Response::Error { .. } => "error",
     }
 }
@@ -1115,8 +1125,227 @@ fn expand_env(raw: &str) -> String {
     out
 }
 
+/// Wraps one labelled paragraph of `mochic why` output.
+///
+/// The label sits in a gutter and the text runs underneath it, so a long
+/// explanation stays readable in a terminal without the label being lost in
+/// the middle of it.
+fn field(label: &str, text: &str) -> String {
+    const WIDTH: usize = 68;
+    let indent = "       ";
+    let mut out = format!("  {label:<5}");
+    let mut column = 0;
+    for word in text.split_whitespace() {
+        if column > 0 && column + 1 + word.len() > WIDTH {
+            out.push('\n');
+            out.push_str(indent);
+            column = 0;
+        } else if column > 0 {
+            out.push(' ');
+            column += 1;
+        }
+        out.push_str(word);
+        column += word.len();
+    }
+    out.push('\n');
+    out
+}
+
+/// What a verdict means for the person at the keyboard, and what they can do.
+///
+/// The daemon answers with the short reason it decided by, the same one it
+/// writes to the log. Turning that into something a person can act on is
+/// `mochic`'s job, and it is the whole point of the command: `click-through
+/// overlay` is a perfectly true answer that helps nobody.
+fn advice(reason: &str, exe: &str) -> (String, Option<String>) {
+    let tile_it = || {
+        Some(format!(
+            "if this really is an application window, tell Mochi to tile it anyway: mochic manage-rule exe {exe}"
+        ))
+    };
+    match reason {
+        "paused" => (
+            "Mochi is paused, so it is not tiling anything at all.".into(),
+            Some("start it again: mochic toggle-pause".into()),
+        ),
+        "rule" => (
+            "your own configuration tells Mochi to leave it alone: one of the ignore rules in your mochi.json matches this window.".into(),
+            Some(format!(
+                "remove that rule from your mochi.json, or overrule it for this application: mochic manage-rule exe {exe}"
+            )),
+        ),
+        "elevated, out of reach" => (
+            "it belongs to a program running as administrator, and Mochi does not. Windows turns down every request a normal program makes to move such a window, so Mochi leaves it where it is rather than tiling around a hole it cannot fill.".into(),
+            Some("start that program without administrator rights. Running Mochi as administrator would also work and is a poor trade: it would hand a window manager the run of the whole machine.".into()),
+        ),
+        "click-through overlay" => (
+            "mouse clicks pass straight through it. That is how overlays are drawn, and an overlay is meant to sit over the other windows rather than take a place among them.".into(),
+            tile_it(),
+        ),
+        "always on top" => (
+            "it is set to stay above every other window and asks for no taskbar button, which is how overlays and heads-up displays are built.".into(),
+            tile_it(),
+        ),
+        "no-activate window" => (
+            "it refuses to be activated, so it can never hold the focus. On-screen keyboards and overlays are built this way.".into(),
+            tile_it(),
+        ),
+        "tool window" => (
+            "it is a tool window: the kind of palette or utility window that is given no taskbar button.".into(),
+            tile_it(),
+        ),
+        "owned window" => (
+            "it belongs to another window. Dialogs, palettes and popups are owned like this, and they are meant to float above the window they came from.".into(),
+            tile_it(),
+        ),
+        "no title" => (
+            "it has no title and asks for no taskbar button, so there is nothing here that a person would call a window.".into(),
+            tile_it(),
+        ),
+        "too small" => (
+            "it is smaller than the smallest window Mochi will tile. Windows a few pixels across are almost always something an application keeps around for its own reasons.".into(),
+            None,
+        ),
+        "child window" => (
+            "it is drawn inside another window rather than sitting on the desktop, so there is no such thing as tiling it.".into(),
+            None,
+        ),
+        "shell class" | "shell process" => (
+            "it is part of Windows itself: the desktop, the taskbar, or a menu. Mochi never touches those.".into(),
+            None,
+        ),
+        "not visible" => (
+            "Windows says it is not visible at the moment.".into(),
+            Some("nothing to do: Mochi will take it when it is shown.".into()),
+        ),
+        "cloaked" => (
+            "Windows is hiding it: it is on another virtual desktop, or it is an app the system has suspended.".into(),
+            Some("nothing to do: Mochi will take it when it comes back.".into()),
+        ),
+        "manage-class" => (
+            "this Mochi was started with --manage-class and this window's class was not one of the ones named, so it is being left alone on purpose.".into(),
+            None,
+        ),
+        "unknown" => (
+            "nothing is stopping Mochi from tiling it, so it has most likely only just appeared.".into(),
+            Some("if it stays where it is, lay the workspace out again: mochic retile".into()),
+        ),
+        other => (format!("Mochi gives the reason as: {other}."), None),
+    }
+}
+
+/// Renders the daemon's explanation of one window as a short paragraph.
+fn why_paragraph(why: &serde_json::Value) -> String {
+    let text = |key: &str| why.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+    let (title, exe, class, hwnd) = (text("title"), text("exe"), text("class"), text("hwnd"));
+
+    let named = if title.is_empty() { "(no title)" } else { title };
+    let mut out = format!("{named}\n  {exe}, class {class}, window {hwnd}\n\n");
+
+    if why.get("managed").and_then(serde_json::Value::as_bool) == Some(true) {
+        let number = |key: &str| {
+            why.get(key)
+                .and_then(serde_json::Value::as_u64)
+                .map_or_else(|| "?".to_string(), |n| n.to_string())
+        };
+        out.push_str(&format!(
+            "Mochi is tiling this window, on monitor {}, workspace {}.\n",
+            number("monitor"),
+            number("workspace"),
+        ));
+        return out;
+    }
+
+    out.push_str("Mochi is leaving this window alone.\n");
+    let (explanation, fix) = advice(text("reason"), exe);
+    out.push_str(&field("Why", &explanation));
+    if let Some(fix) = fix {
+        out.push_str(&field("Fix", &fix));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn why_explains_an_unmanaged_window_and_names_a_way_out() {
+        let why = serde_json::json!({
+            "hwnd": "0x30344", "title": "Administrator: Terminal",
+            "exe": "WindowsTerminal.exe", "class": "CASCADIA_HOSTING_WINDOW_CLASS",
+            "managed": false, "reason": "elevated, out of reach", "overridable": false,
+        });
+        let out = super::why_paragraph(&why);
+        assert!(out.contains("Administrator: Terminal"), "{out}");
+        assert!(out.contains("leaving this window alone"), "{out}");
+        assert!(out.contains("running as administrator"), "{out}");
+        assert!(out.contains("Fix"), "{out}");
+        // Never the raw verdict on its own: that is the log's wording, and a
+        // person reading it learns nothing they can act on.
+        assert!(!out.contains("elevated, out of reach"), "{out}");
+    }
+
+    #[test]
+    fn why_reports_a_managed_window_with_where_it_lives() {
+        let why = serde_json::json!({
+            "hwnd": "0x1a2b", "title": "GitHub", "exe": "brave.exe",
+            "class": "Chrome_WidgetWin_1", "managed": true,
+            "monitor": 1, "workspace": 3,
+        });
+        let out = super::why_paragraph(&why);
+        assert!(out.contains("is tiling this window"), "{out}");
+        assert!(out.contains("monitor 1"), "{out}");
+        assert!(out.contains("workspace 3"), "{out}");
+    }
+
+    #[test]
+    fn an_overridable_verdict_prints_a_command_that_can_be_pasted() {
+        for reason in [
+            "click-through overlay",
+            "always on top",
+            "tool window",
+            "owned window",
+            "no title",
+            "no-activate window",
+        ] {
+            let (_, fix) = super::advice(reason, "overlay.exe");
+            let fix = fix.unwrap_or_else(|| panic!("{reason} offered no way out"));
+            assert!(
+                fix.contains("mochic manage-rule exe overlay.exe"),
+                "{reason}: {fix}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_verdict_the_daemon_can_give_is_explained_in_words() {
+        // The daemon answers with `Unmanageable::as_str`, plus the reasons the
+        // explain path adds itself. A verdict with no case here would reach a
+        // person as the bare wording from the log, which is the exact thing
+        // this command exists to stop happening.
+        for reason in [
+            "not visible", "cloaked", "child window", "tool window",
+            "no-activate window", "owned window", "no title", "too small",
+            "shell class", "shell process", "elevated, out of reach",
+            "always on top", "click-through overlay",
+            "paused", "rule", "manage-class", "unknown",
+        ] {
+            let (explanation, _) = super::advice(reason, "some.exe");
+            assert!(
+                !explanation.starts_with("Mochi gives the reason as"),
+                "no explanation for the verdict {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_explanation_wraps_and_stays_under_the_label() {
+        let out = super::field("Why", &"word ".repeat(40));
+        for line in out.lines().skip(1) {
+            assert!(line.starts_with("       "), "continuation not indented: {line:?}");
+        }
+        assert!(out.lines().all(|l| l.len() <= 80), "a line ran too wide:\n{out}");
+    }
+
     use super::*;
 
     #[test]

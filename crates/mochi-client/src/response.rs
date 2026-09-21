@@ -25,6 +25,12 @@ pub enum Response {
         /// A single JSON scalar: number, string or boolean.
         answer: serde_json::Value,
     },
+    /// What Mochi makes of one window, as produced by `{"cmd":"why"}`.
+    Why {
+        /// Opaque explanation document. Its shape is owned by the daemon; the
+        /// paragraph `mochic why` prints is only a rendering of it.
+        why: serde_json::Value,
+    },
     /// The bindings the hotkey daemon holds, as produced by `{"cmd":"hotkeys"}`.
     Hotkeys {
         /// Opaque bindings document. Its shape is owned by the daemon; the

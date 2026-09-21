@@ -2379,6 +2379,7 @@ impl WindowManager {
                 }
             }
             Command::Query { target } => self.query(target),
+            Command::Why => self.explain_foreground(),
             Command::Stop => {
                 tracing::info!("stop requested");
                 return (Response::Ok, Flow::Stop);
@@ -2791,6 +2792,71 @@ impl WindowManager {
         }
         tracing::info!(game_mode = entering, "game mode");
         Response::Ok
+    }
+
+    /// `why`: explain what Mochi makes of the window in front.
+    ///
+    /// Mochi already decides this for every window, and already writes the
+    /// answer down -- in the log file, which is the one place someone who is
+    /// not already debugging Mochi will never look. This asks the same
+    /// question on purpose and answers it in words, so that "why is this
+    /// window not tiling" stops being a question only the author can answer.
+    fn explain_foreground(&self) -> Response {
+        let Some(hwnd) = self
+            .foreground
+            .or_else(|| self.platform.foreground_window())
+        else {
+            return Response::error("no window is focused");
+        };
+        let info = match self.platform.window_info(hwnd) {
+            Ok(info) => info,
+            Err(e) => return Response::error(e),
+        };
+        let mut why = serde_json::json!({
+            "hwnd": info.hwnd.to_string(),
+            "title": info.title,
+            "exe": info.exe,
+            "class": info.class,
+        });
+        let object = why.as_object_mut().expect("json! was given an object");
+
+        if let Some((monitor, workspace)) = self.core.locate_window(window_id(hwnd)) {
+            object.insert("managed".into(), true.into());
+            object.insert("monitor".into(), monitor.into());
+            object.insert("workspace".into(), workspace.into());
+            return Response::Why { why };
+        }
+        object.insert("managed".into(), false.into());
+
+        // Asked in the order the daemon itself asks, so the reason given is
+        // the one that actually decided this window's fate and not merely the
+        // first that happens to be true of it.
+        if self.core.is_paused {
+            object.insert("reason".into(), "paused".into());
+            return Response::Why { why };
+        }
+        if !self.manage_classes.is_empty() && !self.class_is_forced(&info.class) {
+            object.insert("reason".into(), "manage-class".into());
+            return Response::Why { why };
+        }
+        let verdict = is_manageable_with(&info, false);
+        let rescued = matches!(verdict, Err(reason)
+            if reason.is_overridable() && self.core.rules.should_manage(&rule_info(&info)));
+        match verdict {
+            Err(reason) if !rescued => {
+                object.insert("reason".into(), reason.as_str().into());
+                object.insert("overridable".into(), reason.is_overridable().into());
+            }
+            _ if self.rules_say_ignore(&info) => {
+                object.insert("reason".into(), "rule".into());
+            }
+            // Manageable, not ignored and still not in the model: it has only
+            // just appeared, or a previous attempt to take it failed.
+            _ => {
+                object.insert("reason".into(), "unknown".into());
+            }
+        }
+        Response::Why { why }
     }
 
     /// `manage`: take the foreground window whatever the heuristics think.

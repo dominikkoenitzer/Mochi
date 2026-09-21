@@ -276,6 +276,8 @@ pub enum Command {
     },
     /// Ask for the bindings the hotkey daemon currently holds.
     Hotkeys,
+    /// Ask what Mochi makes of the window in front, and why.
+    Why,
 
     // --- focus and movement ----------------------------------------------
     /// Move focus in a direction.
@@ -642,6 +644,7 @@ impl Command {
             Self::State => "state",
             Self::Query { .. } => "query",
             Self::Hotkeys => "hotkeys",
+            Self::Why => "why",
             Self::Focus { .. } => "focus",
             Self::CycleFocus { .. } => "cycle-focus",
             Self::Move { .. } => "move",

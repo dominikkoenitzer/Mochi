@@ -82,6 +82,12 @@ pub enum Cmd {
         #[arg(value_enum)]
         target: QueryTarget,
     },
+    /// Explain what Mochi makes of the window in front, and what to do about it
+    Why {
+        /// Print the raw explanation document instead of a paragraph
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the hotkey bindings the daemon holds
     Hotkeys {
         /// Print the raw bindings document instead of a table
@@ -494,6 +500,9 @@ impl Cmd {
             // Table or raw JSON is a decision `mochic` makes on its own, the
             // daemon answers the same document either way.
             Cmd::Hotkeys { json: _ } => Command::Hotkeys,
+            // Paragraph or raw JSON is a decision `mochic` makes on its own,
+            // the daemon answers the same document either way.
+            Cmd::Why { json: _ } => Command::Why,
             Cmd::SubscribePipe { name } => Command::SubscribePipe { name: name.clone() },
             Cmd::UnsubscribePipe { name } => Command::UnsubscribePipe { name: name.clone() },
             Cmd::Focus { direction } => Command::Focus {
