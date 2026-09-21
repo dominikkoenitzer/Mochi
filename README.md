@@ -117,6 +117,11 @@ Either way this runs it without changing any setting on the machine:
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
+**Open a new terminal afterwards.** The install adds its folder to the user
+PATH, and a shell that is already running does not see a PATH that changed
+under it. Without a new one the next command answers that `mochic` is not
+recognized, which reads like the install failed when it did not.
+
 This puts `mochi.exe` and `mochic.exe` in `%LOCALAPPDATA%\Programs\Mochi\bin`,
 adds that folder to the user PATH and writes a default `%USERPROFILE%\mochi.json`
 and hotkey file when there is none. `-Version v0.1.13` downloads that release
