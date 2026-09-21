@@ -14,9 +14,16 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # A second push to the default branch used to cancel the run for the first one, so that commit was never
-  # checked by anything. Only a superseded pull request push is safe to drop.
+  # Keyed on the commit for a push and on the branch for a pull request, which
+  # is what actually decides this. Relying on `cancel-in-progress` alone did
+  # not work: pushes to the default branch were still being cancelled the
+  # moment the next one arrived, before a single job had started, so on a busy
+  # day most commits on main were checked by nothing at all. Giving every push
+  # its own group means no push can supersede another, whatever the flag below
+  # evaluates to.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  # Still true for pull requests: a superseded push to a branch under review is
+  # the one case where dropping the older run costs nothing.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
