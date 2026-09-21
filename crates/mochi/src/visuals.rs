@@ -620,9 +620,22 @@ mod tests {
 
         let first = platform.first_move();
         assert_eq!(first.hwnd, target);
+
+        // Asserted on the bottom edge, which is timing-independent on purpose.
+        // `SEEN` and `WINDOW_RECT` differ by the invisible resize border, and
+        // the target shares SEEN's bottom edge, so a move that starts from the
+        // perceived frame holds that edge still for the whole animation while
+        // one starting from the window rect has to travel the seven pixels.
+        // Comparing the first frame to SEEN outright instead would be asserting
+        // that the animation thread is scheduled within a millisecond of the
+        // command, which is true in practice and is not on a loaded test runner.
         assert_eq!(
-            first.rect, SEEN,
-            "the animation starts where the window already is"
+            first.rect.bottom, SEEN.bottom,
+            "the animation did not start from the perceived frame: it compensated              for the invisible border a second time, so the window jumps outward              and eases back"
+        );
+        assert_ne!(
+            first.rect.bottom, WINDOW_RECT.bottom,
+            "it started from the window rect"
         );
         visuals.stop();
     }

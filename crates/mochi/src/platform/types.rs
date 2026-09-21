@@ -279,6 +279,27 @@ impl WindowInfo {
     }
 }
 
+/// The process that hosts every UWP window until the application inside it has
+/// created its own child.
+///
+/// Reading the executable off the frame itself makes Calculator, Settings and
+/// the Store all the same program, so an `exe` rule can neither pick one out nor
+/// leave the others alone. The real process is found by looking for a child
+/// window that belongs to somebody else, and that child does not exist yet the
+/// instant the frame appears.
+pub const FRAME_HOST: &str = "ApplicationFrameHost.exe";
+
+/// True when this window is still described by the UWP frame host rather than
+/// by the application inside it.
+///
+/// Such a window was judged on an identity that is not its own: every `exe` and
+/// `path` rule written for the real application misses it. It is worth a second
+/// look a beat later, by which time the child window normally exists.
+#[must_use]
+pub fn is_frame_host(exe: &str) -> bool {
+    exe.eq_ignore_ascii_case(FRAME_HOST)
+}
+
 /// Why a window is not a tiling candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unmanageable {
