@@ -135,7 +135,15 @@ impl Daemon {
             .expect("could not start the daemon");
 
         let daemon = Daemon { child, log };
-        wait_for(Duration::from_secs(10), mochi_client::is_running)
+        // Thirty, not ten. A shared CI runner starting an unoptimised daemon
+        // cold, while other jobs of the same matrix are compiling, does not
+        // reliably get there in ten seconds, and this timeout has been the
+        // whole of the end-to-end job's intermittent failures: the two hotkey
+        // tests, which start last when the machine is busiest. A test that
+        // goes red at random teaches everyone to ignore it, which costs more
+        // than the minute it saves. A daemon that is genuinely broken still
+        // never opens its pipe and still fails here.
+        wait_for(Duration::from_secs(30), mochi_client::is_running)
             .unwrap_or_else(|_| panic!("the daemon never opened its pipe; log: {}", daemon.log()));
         daemon
     }
