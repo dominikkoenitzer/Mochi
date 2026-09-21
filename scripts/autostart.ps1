@@ -362,7 +362,13 @@ function Show-AutostartStatus {
     $backups = Get-ItemProperty -Path $script:BackupKey -ErrorAction SilentlyContinue
     if ($null -ne $backups) {
         foreach ($property in $backups.PSObject.Properties) {
-            if ($property.Name.StartsWith($script:BackupPrefix)) {
+            # Every backup is stored as two values, the data and a companion
+            # `_Kind` holding the registry type it has to be restored as.
+            # Counting both reported one backed up Run value as two and sent
+            # the reader looking for a "<name>_Kind" entry that was never
+            # theirs.
+            if ($property.Name.StartsWith($script:BackupPrefix) -and
+                -not $property.Name.EndsWith('_Kind')) {
                 $name = $property.Name.Substring($script:BackupPrefix.Length)
                 Write-Detail "Run value backed up: $name = $($property.Value)"
                 $anyDisabled = $true
