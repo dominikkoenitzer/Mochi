@@ -476,6 +476,19 @@ pub struct WindowManager {
     routed: HashSet<Hwnd>,
     /// Windows Mochi dropped from the model because the user minimized them.
     minimized: HashSet<Hwnd>,
+    /// Rules a `mochic` command added, and the workspace rules with them.
+    ///
+    /// Kept because a reload REPLACES the rule sets rather than merging them:
+    /// `Config::apply_to` assigns `state.rules` outright, unlike every other
+    /// key, which is only written when the file names it. Without this, typing
+    /// `mochic ignore-rule exe wallpaper64.exe equals` and then editing any
+    /// unrelated key in mochi.json silently threw the rule away, and the
+    /// application it was keeping out started being tiled again with nothing
+    /// logged. The visuals are already deliberately sticky across a reload for
+    /// the same reason; rules were the one thing that was not.
+    added_rules: Vec<(RuleDecision, MatchingRule)>,
+    /// Workspace rules a `mochic` command added, rebuilt after every reload.
+    added_workspace_rules: Vec<WorkspaceRule>,
     /// The foreground window, as far as Mochi knows.
     foreground: Option<Hwnd>,
     /// The configuration the visuals were built from. Every tiling key ends
@@ -584,6 +597,8 @@ impl WindowManager {
             workspace_rules: Vec::new(),
             routed: HashSet::new(),
             minimized: HashSet::new(),
+            added_rules: Vec::new(),
+            added_workspace_rules: Vec::new(),
             foreground: None,
             visual_config: Config::default(),
             visuals,
@@ -810,6 +825,12 @@ impl WindowManager {
 
         loaded.config.apply_to(&mut self.core);
         self.core.rules.extend(loaded.app_rules);
+        // After the file and the community list, so a rule the user typed still
+        // wins the same arguments it won before the reload.
+        for (decision, rule) in std::mem::take(&mut self.added_rules) {
+            self.push_rule(decision, rule.clone());
+            self.added_rules.push((decision, rule));
+        }
         for broken in self.core.rules.drop_invalid() {
             tracing::warn!(error = %broken, "a rule was dropped");
         }
@@ -836,6 +857,10 @@ impl WindowManager {
                 initial_only,
             })
             .collect();
+        // Same reasoning as the rules above: the file's list replaces this one
+        // wholesale, so what a command added has to be put back.
+        self.workspace_rules
+            .extend(self.added_workspace_rules.iter().cloned());
 
         if let Some(mouse) = &self.mouse {
             mouse.set_enabled(self.core.focus_follows_mouse.is_some());
@@ -2602,10 +2627,37 @@ impl WindowManager {
 
     /// `set-hotkeys`: bind keys, or stop binding them without stopping tiling.
     fn set_hotkeys(&mut self, enable: bool) -> Response {
-        let Some(hotkeys) = self.hotkeys.as_mut() else {
+        let Some(gate) = self.hotkeys.as_ref().map(HotkeyDaemon::gate) else {
             return Response::error(NO_HOTKEYS);
         };
-        hotkeys.set_gate(if enable { Gate::All } else { Gate::Off });
+
+        // Asking for the keyboard while game mode holds it is a request to
+        // LEAVE game mode, not a way to end up half in it. Leaving here is what
+        // consumes the remembered pause.
+        //
+        // Without this the memory stays armed and still says `All`, so the next
+        // press of the game-mode key is read as ENTERING and overwrites it with
+        // the pause game mode itself set. From then on every round trip
+        // restores `paused = true`, and the toggle can never unpause again:
+        // the keyboard comes back, the desktop stays untiled, and `mochic
+        // state` reports `paused: true` with nothing to say why.
+        if gate == Gate::GameMode {
+            let (_, was_paused) = self.before_game_mode.take().unwrap_or((Gate::All, false));
+            tracing::info!(
+                game_mode = false,
+                "leaving game mode: the keyboard was asked for"
+            );
+            if self.core.is_paused != was_paused {
+                let (response, _) = self.handle_command(Command::TogglePause);
+                if !response.is_ok() {
+                    return response;
+                }
+            }
+        }
+
+        if let Some(hotkeys) = self.hotkeys.as_mut() {
+            hotkeys.set_gate(if enable { Gate::All } else { Gate::Off });
+        }
         Response::Ok
     }
 
@@ -2718,17 +2770,11 @@ impl WindowManager {
         self.run_op(CoreState::retile)
     }
 
-    fn add_rule(
-        &mut self,
-        identifier: mochi_client::RuleIdentifier,
-        id: String,
-        strategy: mochi_client::MatchingStrategy,
-        decision: RuleDecision,
-    ) -> Response {
-        let rule = MatchingRule::simple(identifier_of(identifier), id, strategy_of(strategy));
-        if let Err(e) = rule.validate() {
-            return Response::error(e);
-        }
+    /// Puts one rule in the list its decision belongs to.
+    ///
+    /// The single place that knows the mapping, so adding a rule now and
+    /// putting it back after a reload cannot drift apart.
+    fn push_rule(&mut self, decision: RuleDecision, rule: MatchingRule) {
         match decision {
             RuleDecision::Ignore => {
                 // Into both lists, exactly as the configuration file does it.
@@ -2741,6 +2787,21 @@ impl WindowManager {
             RuleDecision::Float => self.core.rules.floating_applications.push(rule),
             RuleDecision::Tile => self.core.rules.manage_rules.push(rule),
         }
+    }
+
+    fn add_rule(
+        &mut self,
+        identifier: mochi_client::RuleIdentifier,
+        id: String,
+        strategy: mochi_client::MatchingStrategy,
+        decision: RuleDecision,
+    ) -> Response {
+        let rule = MatchingRule::simple(identifier_of(identifier), id, strategy_of(strategy));
+        if let Err(e) = rule.validate() {
+            return Response::error(e);
+        }
+        self.push_rule(decision, rule.clone());
+        self.added_rules.push((decision, rule));
         // A rule that arrives after the window it describes has to catch up.
         self.reapply_rules();
         // And a manage rule is about windows that are not in the model at all,
@@ -2807,11 +2868,19 @@ impl WindowManager {
         if let Some(monitor) = self.core.monitors_mut().get_mut(monitor) {
             monitor.ensure_workspaces(workspace + 1);
         }
-        self.workspace_rules.push(WorkspaceRule {
+        let entry = WorkspaceRule {
             monitor,
             workspace,
             rule,
             initial_only,
+        };
+        // Remembered so a reload puts it back, the same as the rules above.
+        self.added_workspace_rules.push(entry.clone());
+        self.workspace_rules.push(WorkspaceRule {
+            monitor: entry.monitor,
+            workspace: entry.workspace,
+            rule: entry.rule.clone(),
+            initial_only: entry.initial_only,
         });
         Response::Ok
     }
@@ -4319,6 +4388,85 @@ mod tests {
         // file the user did not ask for.
         let named = std::path::PathBuf::from(r"D:\somewhere\keys");
         assert_eq!(hotkey_file_now(&named, &[]), named);
+    }
+
+    #[test]
+    fn a_rule_typed_at_the_keyboard_survives_a_reload() {
+        // `Config::apply_to` assigns `state.rules` outright rather than writing
+        // only what the file names, so every reload used to throw away whatever
+        // a `mochic` command had added. Typing `mochic ignore-rule exe
+        // wallpaper64.exe equals` and then editing any unrelated key in
+        // mochi.json silently lost the rule, and the application it was keeping
+        // out was tiled again with nothing logged.
+        let dir = std::env::temp_dir().join(format!("mochi-rule-reload-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let config = dir.join("mochi.json");
+        std::fs::write(&config, r#"{ "default_workspace_padding": 10 }"#).expect("write");
+
+        let platform = Arc::new(FakePlatform::new(vec![window(1, "Editor")]));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let session = crate::state::State::new(config.clone(), true);
+        let mut wm = WindowManager::new(platform, tx, rx, session).expect("a manager");
+
+        let (response, _) = wm.handle_command(Command::IgnoreRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "wallpaper64.exe".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert!(response.is_ok(), "the rule should be accepted");
+        let before = wm.state().rules.own_ignore_rules.len();
+        assert_eq!(before, 1, "the rule went into the user's own list");
+
+        // The user edits something else entirely and saves.
+        std::fs::write(&config, r#"{ "default_workspace_padding": 20 }"#).expect("rewrite");
+        wm.reload_config().expect("the file parses");
+
+        assert_eq!(
+            wm.state().rules.own_ignore_rules.len(),
+            before,
+            "the reload threw away a rule the user typed"
+        );
+        assert_eq!(
+            wm.state().default_workspace_padding,
+            20,
+            "and the file's own change should still have been applied"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn asking_for_the_keyboard_during_game_mode_does_not_poison_the_memory() {
+        // The natural reaction to "my hotkeys are dead" is `set-hotkeys
+        // enable`. That used to set the gate to All and leave the game-mode
+        // memory armed and still saying All, so the NEXT press of the toggle
+        // was read as ENTERING and overwrote the memory with the pause game
+        // mode itself had set. From then on every round trip restored
+        // `paused = true`: the keyboard came back, the desktop stayed untiled,
+        // and the toggle could never unpause again.
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        wm.start_hotkeys(PathBuf::from("test"), Vec::new());
+        assert!(!wm.state().is_paused, "not paused to begin with");
+
+        wm.handle_command(Command::ToggleGameMode);
+        assert!(wm.state().is_paused, "game mode pauses tiling");
+
+        // The user asks for their keyboard back.
+        wm.handle_command(Command::SetHotkeys {
+            state: mochi_client::BooleanState::Enable,
+        });
+        assert!(
+            !wm.state().is_paused,
+            "asking for the keyboard should leave game mode, tiling and all"
+        );
+
+        // And a full round trip afterwards still ends up unpaused.
+        wm.handle_command(Command::ToggleGameMode);
+        assert!(wm.state().is_paused, "it enters again");
+        wm.handle_command(Command::ToggleGameMode);
+        assert!(
+            !wm.state().is_paused,
+            "the toggle could no longer unpause: the memory was poisoned"
+        );
     }
 
     #[test]

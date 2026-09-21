@@ -194,22 +194,44 @@ impl Visuals {
             return;
         }
         if let Some(animator) = &self.animator {
-            let jobs = placements
+            let jobs: Vec<_> = placements
                 .iter()
-                .map(|&(target, to)| {
+                .filter_map(|&(target, to)| {
                     // The perceived frame, not `GetWindowRect`: `to` is a
                     // layout rectangle and `Platform::set_positions`
                     // compensates for the invisible resize border on every
                     // frame, so starting from the window rect would have the
                     // window jump outward by that border and ease back.
-                    let from = self
-                        .platform
-                        .window_info(target)
-                        .map(|info| info.visible_frame())
-                        .unwrap_or(to);
-                    self.animation.job(handle(target), from, to)
+                    match self.platform.window_info(target) {
+                        Ok(info) => {
+                            let from = info.visible_frame();
+                            // A window already at its target is not animated.
+                            // It would otherwise get a full `SWP_FRAMECHANGED`
+                            // move on every frame of the animation, which makes
+                            // it recalculate and repaint its whole non-client
+                            // area, and `EndDeferWindowPos` blocks on its
+                            // message pump while it does. A layout usually
+                            // moves one or two windows and leaves the rest
+                            // exactly where they were, so this is most of the
+                            // batch. The border path already refuses the same
+                            // work for a border whose rectangle did not change.
+                            if from == to {
+                                return None;
+                            }
+                            Some(self.animation.job(handle(target), from, to))
+                        }
+                        // The read failed, which is what a window that has just
+                        // died looks like. It is still placed, starting from
+                        // its target: this is the one case where `from` is a
+                        // guess, and skipping on `from == to` here would mean
+                        // never moving a window whose info could not be read.
+                        Err(_) => Some(self.animation.job(handle(target), to, to)),
+                    }
                 })
                 .collect();
+            if jobs.is_empty() {
+                return;
+            }
             if let Err(e) = animator.animate(jobs) {
                 tracing::error!(error = %e, "could not animate a layout, applying it directly");
                 self.apply_direct(placements);
@@ -602,6 +624,65 @@ mod tests {
             first.rect, SEEN,
             "the animation starts where the window already is"
         );
+        visuals.stop();
+    }
+
+    #[test]
+    fn a_window_whose_info_cannot_be_read_is_still_placed() {
+        // The trap in the optimisation above, and it is a silent one. `from`
+        // falls back to `to` when the window cannot be read, so a naive
+        // "skip when from == to" would stop placing exactly the windows whose
+        // read failed, and they would never be moved again by any layout.
+        let known = Hwnd(0x1234);
+        let unreadable = Hwnd(0x9999);
+        let mut info = WindowInfo::placeholder(known);
+        info.rect = WINDOW_RECT;
+        info.frame = SEEN;
+        let platform = Arc::new(RecordingPlatform::new(info));
+        let hidden = Arc::new(Mutex::new(Hidden::default()));
+        let mut visuals = Visuals::new(Arc::clone(&platform) as Arc<dyn Platform>, hidden);
+        visuals.set_settings(&animated_config());
+
+        let to = Rect::new(1000, 100, 1800, 700);
+        visuals.apply_layout(&[(unreadable, to)]);
+
+        let first = platform.first_move();
+        assert_eq!(
+            first.hwnd, unreadable,
+            "a window that could not be read was dropped from the layout"
+        );
+        assert_eq!(first.rect, to, "and it should be placed at its target");
+        visuals.stop();
+    }
+
+    #[test]
+    fn a_window_already_at_its_target_is_not_animated() {
+        // A layout usually moves one or two windows and leaves the rest exactly
+        // where they were. Every one of those used to get a full
+        // `SWP_FRAMECHANGED` move on every frame, so it recalculated and
+        // repainted its whole non-client area for nothing, and
+        // `EndDeferWindowPos` blocked on its message pump while it did.
+        let target = Hwnd(0x1234);
+        let mut info = WindowInfo::placeholder(target);
+        info.rect = WINDOW_RECT;
+        info.frame = SEEN;
+        let platform = Arc::new(RecordingPlatform::new(info));
+        let hidden = Arc::new(Mutex::new(Hidden::default()));
+        let mut visuals = Visuals::new(Arc::clone(&platform) as Arc<dyn Platform>, hidden);
+        visuals.set_settings(&animated_config());
+
+        // Asked for exactly where it already is.
+        visuals.apply_layout(&[(target, SEEN)]);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert!(
+            platform.moves.lock().expect("not poisoned").is_empty(),
+            "a window that was not moving was moved anyway"
+        );
+
+        // And a window that really does move is still animated.
+        visuals.apply_layout(&[(target, Rect::new(1000, 100, 1800, 700))]);
+        let first = platform.first_move();
+        assert_eq!(first.rect, SEEN, "it starts where the window already is");
         visuals.stop();
     }
 }
