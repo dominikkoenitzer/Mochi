@@ -16,7 +16,10 @@ mod dry_run;
 mod win32;
 
 pub use dry_run::DryRunPlatform;
-pub use types::{Hwnd, MonitorInfo, Unmanageable, WindowInfo, is_manageable, is_manageable_with};
+pub use types::{
+    FRAME_HOST, Hwnd, MonitorInfo, Unmanageable, WindowInfo, is_frame_host, is_manageable,
+    is_manageable_with,
+};
 pub use win32::Win32Platform;
 
 /// Nothing on this system can cloak this window: the shell has no view for it
