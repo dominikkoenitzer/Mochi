@@ -162,6 +162,14 @@ pub fn validate_pipe_name(name: &str) -> Result<()> {
     let bad = name.is_empty()
         || name == "."
         || name == ".."
+        // The daemon's own control pipe. `subscribe-pipe mochi` is a plausible
+        // typo, and it has the daemon open its own command channel and frame
+        // every notification into it. Nothing can be synthesised from that (a
+        // notification carries no `cmd` field and cannot deserialise as a
+        // command) but the worker answering each one with an error nobody reads
+        // eventually blocks, and every real subscriber then misses events for
+        // the two seconds it takes the write to time out.
+        || name.eq_ignore_ascii_case(crate::PIPE_SUFFIX)
         || name.len() > 200
         || name
             .chars()
@@ -211,5 +219,21 @@ mod tests {
         drop(sub);
         // Creating it again proves the handle was really closed.
         create_pipe(&name).expect("recreate");
+    }
+
+    #[test]
+    fn a_subscriber_may_not_claim_the_daemons_own_pipe() {
+        // `mochic subscribe-pipe mochi` is a plausible typo, and it had the
+        // daemon open its own command channel and frame every notification into
+        // it. Nothing can be synthesised that way, but the worker answering
+        // each one with an error nobody reads eventually blocks, and every real
+        // subscriber then misses events for the two seconds the write takes to
+        // time out.
+        assert!(validate_pipe_name(crate::PIPE_SUFFIX).is_err());
+        assert!(validate_pipe_name("MOCHI").is_err(), "case does not matter");
+
+        // And an ordinary subscriber name is still fine.
+        assert!(validate_pipe_name("mochi-bar").is_ok());
+        assert!(validate_pipe_name("my-status-bar").is_ok());
     }
 }

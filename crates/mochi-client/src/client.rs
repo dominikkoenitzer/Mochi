@@ -13,6 +13,12 @@ pub const PIPE_NAME: &str = r"\\.\pipe\mochi";
 /// Prefix every Mochi pipe shares. Subscriber pipes are `PIPE_PREFIX` + name.
 pub const PIPE_PREFIX: &str = r"\\.\pipe\";
 
+/// The daemon's own pipe name, without the prefix.
+///
+/// A subscriber may not claim it: writing the notification stream into the
+/// command channel makes the daemon talk to itself.
+pub const PIPE_SUFFIX: &str = "mochi";
+
 /// Everything that can go wrong while talking to the daemon.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

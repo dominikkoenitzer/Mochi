@@ -669,6 +669,26 @@ impl Cmd {
     }
 }
 
+/// True when `name` is a subcommand a key can be bound to.
+///
+/// `mochic start` and its kind are run by the client itself and never travel to
+/// the daemon, so they are not bindable. That matters to a checker: `start` is
+/// also the Windows shell command for launching a program, so a perfectly good
+/// `start wt` binding shares its first word with a Mochi subcommand. Without
+/// this, warning about lines that name a Mochi command and do not parse as one
+/// flags every terminal launcher in every hotkey file.
+#[must_use]
+pub fn is_bindable_subcommand(name: &str) -> bool {
+    let argv = [String::from("mochic"), name.to_owned()];
+    match Cli::try_parse_from(argv) {
+        // Parsed with no arguments: bindable only if it maps to a command.
+        Ok(cli) => cli.command.to_command().is_some(),
+        // Did not parse on its own, which is the ordinary case for a command
+        // that takes arguments, so the name itself is still bindable.
+        Err(_) => true,
+    }
+}
+
 /// Parses one hotkey binding's words (`["focus", "left"]`, no leading `mochic`)
 /// into the command it sends. The error is one line, meant for a human reading
 /// a config error, and names what was wrong.

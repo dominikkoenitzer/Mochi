@@ -53,46 +53,62 @@ pub fn read_message<R: BufRead, T: DeserializeOwned>(reader: &mut R) -> std::io:
 ///
 /// Returns `Ok(None)` at end of stream.
 pub fn read_line<R: BufRead>(reader: &mut R) -> std::io::Result<Option<String>> {
-    let mut line = String::new();
+    let mut bytes = Vec::new();
     loop {
-        line.clear();
-        let outcome = {
+        bytes.clear();
+        // `read_until`, not `read_line`. `read_line` consumes the bytes and
+        // validates UTF-8 only afterwards, and on failure it hands back nothing
+        // that says whether the newline was among the bytes it ate. Discarding
+        // to the next newline on the guess that it was not swallowed the WHOLE
+        // of the next message when it was: one stray non-UTF-8 byte on its own
+        // line cost the message that followed it, and from then on every
+        // response was attributed to the command after the one it answered.
+        // Reading the raw bytes makes the question answerable: the newline is
+        // there or it is not.
+        let read = {
             let mut limited = std::io::Read::take(&mut *reader, MAX_MESSAGE_BYTES as u64);
-            limited.read_line(&mut line)
-        };
-        let read = match outcome {
-            Ok(read) => read,
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                // `read_line` consumes the bytes and validates UTF-8 only
-                // afterwards, so a line carrying one byte that is not UTF-8
-                // fails with the reader left mid-line. Propagating straight
-                // out would leave the tail of that line in the stream to be
-                // framed as a message of its own, which is exactly what the
-                // length check below refuses to allow. Same reasoning, same
-                // remedy.
-                discard_to_newline(reader)?;
-                return Err(e);
-            }
-            Err(e) => return Err(e),
+            limited.read_until(b'\n', &mut bytes)?
         };
         if read == 0 {
             return Ok(None);
         }
-        if read >= MAX_MESSAGE_BYTES && !line.ends_with('\n') {
-            // The peer is still mid-line. Everything up to the next newline is
-            // the rest of that one over-long message, so it is thrown away here
-            // rather than left in the stream: starting the next read where the
-            // limit happened to fall would frame the tail as a message of its
-            // own, and `MAX_MESSAGE_BYTES` of padding followed by
-            // `{"cmd":"stop"}` is one line on the wire that must never become a
-            // command.
-            discard_to_newline(reader)?;
+
+        if bytes.last() != Some(&b'\n') {
+            // No newline, so this is not a whole message, and there are exactly
+            // two ways to get here.
+            if read >= MAX_MESSAGE_BYTES {
+                // Over-long: the peer is still mid-line. Everything up to the
+                // next newline is the rest of that one message and is thrown
+                // away rather than left in the stream, because starting the
+                // next read where the limit happened to fall would frame the
+                // tail as a message of its own, and `MAX_MESSAGE_BYTES` of
+                // padding followed by a stop command is one line on the wire
+                // that must never become a command.
+                discard_to_newline(reader)?;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "message exceeds the maximum line length",
+                ));
+            }
+            // Or the stream ended mid-line. A truncated write is not a message
+            // either: a stop command with its newline lost is not an
+            // instruction to stop, and it used to be obeyed as one.
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "message exceeds the maximum line length",
+                "the stream ended in the middle of a message",
             ));
         }
-        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+
+        // A whole line in hand, newline included, so a failure here needs
+        // nothing discarded: the stream already sits at the next message.
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "message is not valid UTF-8",
+            ));
+        };
+
+        let trimmed = text.trim_end_matches('\n').trim_end_matches('\r');
         if !trimmed.is_empty() {
             return Ok(Some(trimmed.to_owned()));
         }
@@ -222,6 +238,47 @@ mod tests {
             read_message::<_, Command>(&mut reader).unwrap(),
             None,
             "the tail of an over-long line was framed as a command"
+        );
+    }
+
+    #[test]
+    fn a_bad_line_does_not_swallow_the_good_one_after_it() {
+        // The half that was missed. The existing test covers an UNTERMINATED
+        // bad line, where discarding to the next newline is right. This is the
+        // terminated one: the newline was already eaten with the bad byte, so
+        // discarding again ate the whole of the next message. A pipelining
+        // script lost a command silently and then read every response one
+        // command out of step.
+        let mut reader = std::io::BufReader::new(&b"\xFF\n{\"cmd\":\"retile\"}\n"[..]);
+
+        let first = read_line(&mut reader);
+        assert!(first.is_err(), "a non-UTF-8 line must be refused");
+
+        let second = read_line(&mut reader)
+            .expect("the stream should still be framed")
+            .expect("the message after it is still there");
+        assert_eq!(
+            second, "{\"cmd\":\"retile\"}",
+            "the good line was swallowed"
+        );
+    }
+
+    #[test]
+    fn a_message_without_its_newline_is_not_a_message() {
+        // A truncated write is not an instruction. This one used to be obeyed:
+        // the length guard only fired for an over-long line, so a SHORT line
+        // that ended at EOF fell straight through and was executed.
+        let mut reader = std::io::BufReader::new(&b"{\"cmd\":\"stop\"}"[..]);
+        assert!(
+            read_line(&mut reader).is_err(),
+            "an unterminated line was accepted as a whole message"
+        );
+
+        // And a properly terminated one is still accepted, of course.
+        let mut good = std::io::BufReader::new(&b"{\"cmd\":\"stop\"}\n"[..]);
+        assert_eq!(
+            read_line(&mut good).expect("reads").expect("a message"),
+            "{\"cmd\":\"stop\"}"
         );
     }
 
