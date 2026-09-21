@@ -177,7 +177,15 @@ impl BorderWindow {
             self.painted = Some(wanted);
         }
 
-        self.restack(target)?;
+        // A frame that cannot be slotted in next to its target has nowhere
+        // correct to be. Leaving it on screen is the worst of the options:
+        // `restack` is also what moves it out of the topmost band, so a frame
+        // whose restack failed stays floating over every other window, drawn
+        // around a rectangle its target never reached. Take it down instead.
+        if let Err(error) = self.restack(target) {
+            self.hide();
+            return Err(error);
+        }
         self.visible = true;
         Ok(())
     }

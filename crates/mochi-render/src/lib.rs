@@ -212,3 +212,48 @@ pub enum RenderError {
 
 /// The crate result type.
 pub type Result<T> = std::result::Result<T, RenderError>;
+
+impl RenderError {
+    /// True when Windows turned the call down rather than failing it.
+    ///
+    /// UIPI refuses every window call a normal-integrity process makes against
+    /// a window owned by an elevated one, and it refuses it permanently: there
+    /// is nothing to wait for and nothing to retry. Every manager in this
+    /// crate uses this to tell "try again later" apart from "never again", so
+    /// that one elevated window on screen does not cost a failed Win32 call
+    /// and a log line on every pass for as long as it is open.
+    #[must_use]
+    pub fn is_refusal(&self) -> bool {
+        #[cfg(windows)]
+        {
+            matches!(
+                self,
+                Self::Win32(e) if e.code() == windows::Win32::Foundation::E_ACCESSDENIED
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::{E_ACCESSDENIED, E_INVALIDARG};
+
+    #[test]
+    fn only_access_denied_counts_as_a_refusal() {
+        // The distinction every manager in this crate acts on: a refusal is
+        // permanent and must be written down, anything else is worth another
+        // go. Getting it the wrong way round either spams the log for ever or
+        // silently gives up on a window over a transient failure.
+        assert!(
+            RenderError::Win32(windows::core::Error::from_hresult(E_ACCESSDENIED)).is_refusal()
+        );
+        assert!(!RenderError::Win32(windows::core::Error::from_hresult(E_INVALIDARG)).is_refusal());
+        assert!(!RenderError::ThreadGone("border").is_refusal());
+        assert!(!RenderError::ThreadStart("border", "nope".into()).is_refusal());
+    }
+}
