@@ -149,15 +149,33 @@ jobs:
               throw "$($stragglers.Count) mochi-testwin process(es) survived the run"
           }
           Write-Output 'no mochi-testwin process left'
+      # Copied by a shell step rather than globbed straight from the upload.
+      # `${{ env.TEMP }}` reads the workflow's own env block, which has no TEMP
+      # in it, so the pattern expanded to an absolute path with nothing in
+      # front of it, matched nothing, and `if-no-files-found: ignore` made that
+      # look like success. The artefact was empty for every failure it existed
+      # to explain. Only a shell step can see the process environment, which is
+      # where the harness actually writes.
+      - name: Collect the daemon logs
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path e2e-logs | Out-Null
+          $from = Join-Path $env:TEMP 'mochi-e2e'
+          if (Test-Path $from) {
+              Copy-Item -Path (Join-Path $from '*.log') -Destination e2e-logs -ErrorAction SilentlyContinue
+          }
+          $found = @(Get-ChildItem e2e-logs -Filter *.log -ErrorAction SilentlyContinue)
+          Write-Output "collected $($found.Count) daemon log(s) from $from"
       - name: Upload the daemon logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs
-          # The harness writes under the process TEMP, which is not the
-          # runner's temp directory.
-          path: ${{ env.TEMP }}/mochi-e2e/*.log
-          if-no-files-found: ignore
+          path: e2e-logs/
+          # Warn, not ignore: an empty diagnostic artefact is how this went
+          # unnoticed.
+          if-no-files-found: warn
           retention-days: 7
 
   # Only on the timer, because this is the job allowed to fail for a reason
