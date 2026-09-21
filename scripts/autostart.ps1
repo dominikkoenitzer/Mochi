@@ -60,6 +60,7 @@ param(
     [string] $DisableStartupItem,
     [string] $EnableStartupItem,
     [string] $MochicPath = (Join-Path $env:LOCALAPPDATA 'Programs\Mochi\bin\mochic.exe'),
+    [switch] $Watchdog,
     [switch] $ShowConsole
 )
 
@@ -70,6 +71,7 @@ $script:RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $script:BackupKey = 'HKCU:\Software\Mochi'
 $script:BackupPrefix = 'RunBackup_'
 $script:MochiValue = 'Mochi'
+$script:WatchdogTask = 'MochiWatchdog'
 # Asked for, not assumed. Group Policy folder redirection on a managed machine
 # moves the Start Menu elsewhere, and a hardcoded path then reports "found no
 # autostart to disable" while the shortcut sits where it always was, so the user
@@ -395,10 +397,55 @@ if ($Enable -and $Disable) { throw 'pick either -Enable or -Disable' }
 if ($DisableStartupItem -and $EnableStartupItem) { throw 'pick either -DisableStartupItem or -EnableStartupItem' }
 
 $acted = $false
+
+# Mochi exits and nothing brings it back. The Run value only fires at login,
+# so a daemon that stops at eleven in the morning leaves the desktop untiled
+# until the machine is restarted, and the user is given no sign that anything
+# has happened at all.
+#
+# `mochic start` answers 'mochi is already running' in about thirty
+# milliseconds when it is, so asking every few minutes costs nothing and needs
+# no watchdog process of its own. LIMITED keeps the task at normal rights: a
+# window manager started with highest privileges can move every window on the
+# machine, which is not a trade worth making to restart one.
+function Enable-MochiWatchdog {
+    if (-not (Test-Path -LiteralPath $MochicPath)) {
+        Write-Detail "no mochic at $MochicPath, not registering the watchdog"
+        return
+    }
+    if (-not $PSCmdlet.ShouldProcess($script:WatchdogTask, 'register a scheduled task')) { return }
+    $out = schtasks /create /tn $script:WatchdogTask /tr "`"$MochicPath`" start" `
+        /sc minute /mo 5 /rl LIMITED /f 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Detail "could not register the watchdog: $out"
+        return
+    }
+    Write-Detail 'watchdog registered, checks every 5 minutes'
+}
+
+function Disable-MochiWatchdog {
+    $existing = schtasks /query /tn $script:WatchdogTask 2>&1
+    if ($LASTEXITCODE -ne 0) { return }
+    if (-not $PSCmdlet.ShouldProcess($script:WatchdogTask, 'remove the scheduled task')) { return }
+    $out = schtasks /delete /tn $script:WatchdogTask /f 2>&1
+    if ($LASTEXITCODE -ne 0) { Write-Detail "could not remove the watchdog: $out"; return }
+    Write-Detail 'watchdog removed'
+}
+
+function Show-WatchdogStatus {
+    schtasks /query /tn $script:WatchdogTask 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Detail "watchdog: registered, restarts Mochi within 5 minutes if it stops"
+    } else {
+        Write-Detail 'watchdog: not registered (-Watchdog turns it on)'
+    }
+}
 if ($DisableStartupItem) { Write-Step "disabling the $DisableStartupItem autostart"; Disable-OtherAutostart -Name $DisableStartupItem; $acted = $true }
 if ($EnableStartupItem) { Write-Step "restoring the $EnableStartupItem autostart"; Enable-OtherAutostart -Name $EnableStartupItem; $acted = $true }
 if ($Enable) { Write-Step 'enabling Mochi autostart'; Enable-MochiAutostart; $acted = $true }
 if ($Disable) { Write-Step 'disabling Mochi autostart'; Disable-MochiAutostart; $acted = $true }
+if ($Disable) { Disable-MochiWatchdog }
+if ($Watchdog) { Write-Step 'enabling the Mochi watchdog'; Enable-MochiWatchdog; $acted = $true }
 
 if (-not $acted) {
     Write-Output 'Autostart status, nothing changed.'
