@@ -21,6 +21,13 @@ pub const DEFAULT: &str = r"# Mochi hotkeys. Saved changes are picked up at once
 # desktop the way it found it. It is the last line of this file.
 .shell pwsh
 
+# Nothing here sits on alt with a bare letter except the focus keys. Alt with
+# a letter is how Windows opens a menu -- alt+f is File, alt+d is the address
+# bar in every browser -- and a window manager that takes those away does it
+# everywhere, from the moment it starts, with nothing on screen to say why.
+# Where a key could say what it does, it does: alt with plus and minus for
+# bigger and smaller, alt with comma and period for previous and next.
+
 # Focus
 alt + h                 : focus left
 alt + j                 : focus down
@@ -48,28 +55,28 @@ alt + shift + up        : move up
 alt + shift + right     : move right
 
 # Resize: u and p for width, i and o for height
-alt + u                 : resize-axis horizontal decrease
-alt + p                 : resize-axis horizontal increase
-alt + i                 : resize-axis vertical decrease
-alt + o                 : resize-axis vertical increase
+alt + shift + u         : resize-axis horizontal decrease
+alt + shift + p         : resize-axis horizontal increase
+alt + shift + i         : resize-axis vertical decrease
+alt + shift + o         : resize-axis vertical increase
 
 # Window state
 alt + shift + space     : toggle-float
-alt + f                 : toggle-maximize
+alt + plus              : toggle-maximize
 alt + shift + f         : toggle-monocle
-alt + m                 : minimize
+alt + minus             : minimize
 alt + shift + q         : close
 
 # Layout
-alt + v                 : cycle-layout next
-alt + x                 : flip-layout horizontal
-alt + y                 : flip-layout vertical
-alt + return            : promote
+alt + shift + v         : cycle-layout next
+alt + shift + x         : flip-layout horizontal
+alt + shift + y         : flip-layout vertical
+alt + shift + return    : promote
 
 # Workspaces
-alt + a                 : cycle-workspace previous
-alt + s                 : cycle-workspace next
-alt + d                 : focus-last-workspace
+alt + comma             : cycle-workspace previous
+alt + period            : cycle-workspace next
+alt + grave             : focus-last-workspace
 alt + [1,2,3,4,5,6,7,8,9]         : focus-workspace [0,1,2,3,4,5,6,7,8]
 alt + shift + [1,2,3,4,5,6,7,8,9] : move-to-workspace [0,1,2,3,4,5,6,7,8]
 
@@ -181,6 +188,29 @@ mod tests {
         };
         assert_eq!(bound("pause").as_deref(), Some("toggle-pause"));
         assert_eq!(bound("alt + f12").as_deref(), Some("toggle-pause"));
+    }
+
+    #[test]
+    fn nothing_but_the_focus_keys_sits_on_a_bare_alt_letter() {
+        // Alt with a letter is how Windows opens a menu: alt+f is File, alt+d
+        // is the address bar in every browser. Binding those takes them away
+        // in every application, from the moment Mochi starts, with nothing on
+        // screen to say why -- it presents as the application being broken.
+        // Only h/j/k/l are worth the cost, because they are the one set a
+        // tiling user reaches for constantly and the convention everywhere.
+        let bindings = Bindings::parse(DEFAULT).expect("the shipped hotkeys parse");
+        for letter in 'a'..='z' {
+            let trigger = format!("alt + {letter}");
+            let Ok(parsed) = trigger.parse::<Trigger>() else {
+                continue;
+            };
+            if bindings.get(parsed).is_some() {
+                assert!(
+                    matches!(letter, 'h' | 'j' | 'k' | 'l'),
+                    "alt + {letter} is bound, and Windows wants it"
+                );
+            }
+        }
     }
 
     #[test]
