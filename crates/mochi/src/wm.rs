@@ -5199,6 +5199,24 @@ alt + j : focus down
     }
 
     #[test]
+    fn the_doctor_reports_a_hidden_window_it_can_no_longer_put_back() {
+        let mut stuck = window(5, "Hidden and out of reach");
+        stuck.exe = String::new();
+        stuck.cloaked = true;
+        let (wm, _platform) = manager(vec![window(1, "Editor"), stuck]);
+        record(&wm.hidden).hide(Hwnd(5), HidingBehaviour::Cloak);
+
+        let Response::Doctor { doctor } = wm.diagnose() else {
+            panic!("doctor answered with the wrong kind of response");
+        };
+        let findings = doctor["findings"].as_array().expect("a list");
+        assert!(
+            findings.iter().any(|f| f["kind"] == "cannot-restore"),
+            "a window Mochi hid and can no longer reach went unreported: {doctor:#}"
+        );
+    }
+
+    #[test]
     fn the_doctor_is_quiet_when_the_model_and_the_desktop_agree() {
         // The other half: a check that always finds something is a check
         // nobody reads.
