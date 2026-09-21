@@ -419,6 +419,19 @@ pub fn restore(platform: &dyn Platform, hidden: &Mutex<Hidden>) {
             HidingBehaviour::Hide => platform.show(hwnd, ShowState::ShowNoActivate),
         };
         if let Err(e) = result {
+            // A window that now outranks Mochi will refuse this call today and
+            // every time after, so writing it down again only guarantees the
+            // same error at the next stop and the next start. The record is
+            // what `mochic stop` keeps its promises from, and a promise that
+            // can never be kept is worse than an honest refusal: it hides the
+            // one window the user actually has to go and rescue by hand.
+            if platform.outranks_us(hwnd) {
+                tracing::warn!(
+                    %hwnd,
+                    "restore: mochi took this window off screen and can no longer put it back,                      because the window now outranks it. Bring it back from the taskbar or with                      alt+tab. Mochi is letting go of it rather than promising again"
+                );
+                continue;
+            }
             tracing::error!(%hwnd, error = %e, "restore: could not show a window");
             owed.push((hwnd, behaviour));
         }
