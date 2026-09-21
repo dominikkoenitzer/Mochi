@@ -545,7 +545,10 @@ mod tests {
         fn is_maximized(&self, _hwnd: Hwnd) -> bool {
             false
         }
-        fn is_on_screen(&self, _hwnd: Hwnd) -> bool {
+        fn outranks_us(&self, _hwnd: Hwnd) -> bool {
+            false
+        }
+                fn is_on_screen(&self, _hwnd: Hwnd) -> bool {
             true
         }
 

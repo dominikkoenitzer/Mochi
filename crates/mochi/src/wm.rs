@@ -2909,6 +2909,24 @@ impl WindowManager {
             }
         }
 
+        // Nothing above this is about the keyboard, and this is the finding
+        // that cost the most to work out by hand. A low-level keyboard hook in
+        // a normal process is given no key presses at all while a window that
+        // outranks it holds the focus, so every binding stops working inside
+        // that one window and there is nothing on screen, and nothing in the
+        // log, to say so. It reads exactly like the hotkeys being broken.
+        for info in self.platform.windows().unwrap_or_default() {
+            if info.visible && !info.title.is_empty() && self.platform.outranks_us(info.hwnd) {
+                findings.push(serde_json::json!({
+                    "kind": "hotkeys-blocked",
+                    "hwnd": info.hwnd.to_string(),
+                    "title": info.title,
+                    "exe": info.exe,
+                    "detail": "this window runs as administrator and Mochi does not, so Windows gives Mochi no key presses at all while it has the focus: every Mochi hotkey is dead in this window".to_owned(),
+                }));
+            }
+        }
+
         Response::Doctor {
             doctor: serde_json::json!({
                 "managed": self.core.all_window_ids().count(),
@@ -2943,6 +2961,13 @@ impl WindowManager {
             "class": info.class,
         });
         let object = why.as_object_mut().expect("json! was given an object");
+
+        // Said for a managed window as much as an unmanaged one: the keyboard
+        // is a separate question from the tiling, and a window can be tiled
+        // perfectly while none of the keys work in it.
+        if self.platform.outranks_us(hwnd) {
+            object.insert("hotkeys_blocked".into(), true.into());
+        }
 
         if let Some((monitor, workspace)) = self.core.locate_window(window_id(hwnd)) {
             object.insert("managed".into(), true.into());
@@ -3835,7 +3860,17 @@ mod tests {
         fn is_maximized(&self, hwnd: Hwnd) -> bool {
             self.zoomed.lock().unwrap().contains(&hwnd)
         }
-        fn is_on_screen(&self, hwnd: Hwnd) -> bool {
+        fn outranks_us(&self, hwnd: Hwnd) -> bool {
+            // Mirrors the real thing: the executable is unreadable for exactly
+            // the windows whose process Mochi may not open.
+            self.windows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|w| w.hwnd == hwnd)
+                .is_some_and(|w| w.exe.is_empty())
+        }
+                fn is_on_screen(&self, hwnd: Hwnd) -> bool {
             // A handle the fake desktop no longer holds answers true, the way
             // the real one does: that window is gone, not hidden.
             self.windows
@@ -5122,6 +5157,32 @@ alt + j : focus down
         assert_eq!(findings.len(), 1, "{doctor:#}");
         assert_eq!(findings[0]["kind"], "hole");
         assert_eq!(findings[0]["title"], "Browser");
+    }
+
+    #[test]
+    fn the_doctor_says_when_a_window_is_swallowing_every_hotkey() {
+        // The finding that cost the most to work out by hand, and the one
+        // nothing else can tell you. A low-level keyboard hook in a normal
+        // process is given no key presses at all while a window that outranks
+        // it holds the focus. Every binding stops working, but only inside
+        // that one window, and neither the screen nor the log says a word. It
+        // is indistinguishable from the hotkeys being broken.
+        let mut admin = window(9, "Administrator: Terminal");
+        // An unreadable executable is exactly what a process Mochi may not
+        // open looks like, which is the same boundary that blocks the hook.
+        admin.exe = String::new();
+        let (mut wm, _platform) = manager(vec![window(1, "Editor"), admin]);
+
+        let Response::Doctor { doctor } = wm.handle_command(Command::Doctor).0 else {
+            panic!("doctor answered with the wrong kind of response");
+        };
+        let findings = doctor["findings"].as_array().expect("a list");
+        let blocked: Vec<_> = findings
+            .iter()
+            .filter(|f| f["kind"] == "hotkeys-blocked")
+            .collect();
+        assert_eq!(blocked.len(), 1, "{doctor:#}");
+        assert_eq!(blocked[0]["title"], "Administrator: Terminal");
     }
 
     #[test]
