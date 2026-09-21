@@ -364,6 +364,8 @@ function Show-AutostartStatus {
         Write-Detail "$script:RunKey\$script:MochiValue = $mochi"
     }
 
+    Show-WatchdogStatus
+
     Write-Step 'startup items moved aside by this script'
     $anyDisabled = $false
     $off = @(Get-ChildItem -LiteralPath $script:StartupDir -Filter '*.lnk.disabled' -ErrorAction SilentlyContinue)
