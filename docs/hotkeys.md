@@ -84,9 +84,9 @@ These are the canonical names, the spelling `mochic hotkeys` prints back:
 | Function keys | `f1` to `f24` |
 | Arrows | `left`, `right`, `up`, `down` |
 | Editing and navigation | `space`, `enter`, `tab`, `esc`, `backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown` |
-| Locks and system | `pause`, `capslock`, `printscreen`, `scrolllock`, `apps` |
+| Locks and system | `pause`, `capslock`, `numlock`, `printscreen`, `scrolllock`, `apps` |
 | Numeric keypad | `numpad0` to `numpad9`, `multiply`, `add`, `subtract`, `decimal`, `divide` |
-| Punctuation | `semicolon`, `plus`, `comma`, `minus`, `period`, `slash`, `backtick`, `lbracket`, `backslash`, `rbracket`, `quote`, `oem_8` |
+| Punctuation | `semicolon`, `plus`, `comma`, `minus`, `period`, `slash`, `backtick`, `lbracket`, `backslash`, `rbracket`, `quote`, `oem_8`, `oem_102` |
 | Media and volume | `volumemute`, `volumedown`, `volumeup`, `medianext`, `mediaprev`, `mediastop`, `mediaplaypause` |
 | Browser | `browserback`, `browserforward`, `browserrefresh`, `browserstop`, `browsersearch`, `browserfavorites`, `browserhome` |
 | Launch | `launchmail`, `launchmedia`, `launchapp1`, `launchapp2` |
@@ -95,6 +95,12 @@ The punctuation names are the US engraving of each Windows OEM code, because
 that is what Windows reports whatever the layout says. On a Swiss or German
 keyboard `backslash` is the key Windows calls `VK_OEM_5`, wherever the
 engraving puts it, and `oem_8` has no US label at all.
+
+`oem_102` is the extra key an ISO keyboard has and a US one does not: left of
+`Y` or `Z` on German, Swiss, Austrian and Nordic layouts, left of `W` on AZERTY,
+left of `Z` on UK and Irish, engraved `<>|` on most of them. It had no name at
+all until 2026-09-21, which made it the one key on those keyboards that no
+hotkey file could reach.
 
 These spellings are accepted as well and come back as the canonical one:
 
@@ -113,13 +119,26 @@ These spellings are accepted as well and come back as the canonical one:
 | `oem_5` | `backslash` |
 | `oem_6` | `rbracket` |
 | `oem_7` | `quote` |
+| `oem_plus` | `plus` |
+| `oem_comma` | `comma` |
+| `oem_minus` | `minus` |
+| `oem_period` | `period` |
 
 The `oem_*` aliases are there because a file written to the common hotkey file
 conventions spells punctuation by its Windows code name.
 
 The keypad Enter has no name of its own: it shares `VK_RETURN` with the main
-one and Windows tells them apart only by a flag. `mochic hotkeys` prints what
-Mochi made of the file, which is the fastest way to check a name.
+one and Windows tells them apart only by a flag.
+
+The keypad number keys have the same limitation in reverse, and it is worth
+knowing before you bind one. Windows only reports `numpad0` to `numpad9` while
+NumLock is ON. With it off the same physical keys report themselves as
+`insert`, `end`, `down`, `left` and so on, so a `numpad4` binding does nothing
+and an `alt + left` binding fires from the keypad instead. Nothing warns about
+either, because as far as the hook can see they are simply different keys. On a
+laptop or a keyboard where NumLock is invisible, bind something else. `mochic hotkeys` prints what
+Mochi made of the file, which is the fastest way to check a name, and
+`mochic check` reads the file without a daemon running.
 
 ## What a key press does
 

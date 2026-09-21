@@ -75,7 +75,7 @@ $script:TempWork = $null
 # Mochi reads either name from that directory, so a summary that always
 # printed the first one would point at a file that is not there.
 function Get-HotkeyPath {
-    if ((-not (Test-Path $script:HotkeyPath)) -and (Test-Path $script:LegacyHotkeyPath)) {
+    if ((-not (Test-Path -LiteralPath $script:HotkeyPath)) -and (Test-Path -LiteralPath $script:LegacyHotkeyPath)) {
         return $script:LegacyHotkeyPath
     }
     return $script:HotkeyPath
@@ -216,6 +216,18 @@ function Update-UserPath {
     } else {
         $updated = "$raw;$Directory"
     }
+    # Said out loud rather than discovered later. Writing through the registry
+    # rather than `setx` already avoids the 1024 character truncation that is
+    # the worst version of this, but a user PATH past about 2047 characters is
+    # still silently cut short by the legacy System Properties dialog and by
+    # some older tools, and the symptom is programs that stop being found for
+    # no visible reason. Mochi is not going to be the one that pushed it over
+    # without a word.
+    if ($updated.Length -gt 2047) {
+        Write-Detail "warning: the user PATH would become $($updated.Length) characters"
+        Write-Detail '  values past ~2047 are truncated by the old System Properties dialog'
+        Write-Detail '  add it yourself, or use -SkipPath and the full path to mochic.exe'
+    }
     if ($PSCmdlet.ShouldProcess('user PATH', "add $Directory")) {
         Set-UserPathRaw -Value $updated -Kind $kind
         Write-Detail 'added to the user PATH, open a new shell to pick it up'
@@ -224,7 +236,7 @@ function Update-UserPath {
 
 function Get-RepoRoot {
     $root = Split-Path -Parent $PSScriptRoot
-    if (-not (Test-Path (Join-Path $root 'Cargo.toml'))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'Cargo.toml'))) {
         throw "no Cargo.toml above $PSScriptRoot, run this from a checkout or pass -Version"
     }
     return $root
@@ -283,7 +295,7 @@ function Save-ReleaseAsset {
         if ($LASTEXITCODE -ne 0) {
             throw "gh release download failed with exit code $LASTEXITCODE. Is $Tag published, and are you signed in with ``gh auth login``?"
         }
-        $haveSum = Test-Path $sum
+        $haveSum = Test-Path -LiteralPath $sum
         if (-not $haveSum) {
             Write-Detail 'no SHA256 file published for this release, skipping the checksum'
         }
@@ -312,7 +324,7 @@ function Save-ReleaseAsset {
     }
 
     $extract = Join-Path $work 'extract'
-    if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+    if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
     Expand-Archive -Path $zip -DestinationPath $extract -Force
     $script:SourceDir = $extract
     $script:TempWork = $work
@@ -322,7 +334,7 @@ function Save-ReleaseAsset {
 # binaries are copied, so a real run does not leave them behind in %TEMP%.
 function Remove-TempWork {
     if (-not $script:TempWork) { return }
-    if (Test-Path $script:TempWork) {
+    if (Test-Path -LiteralPath $script:TempWork) {
         try {
             Remove-Item -LiteralPath $script:TempWork -Recurse -Force
             Write-Detail "cleaned up $script:TempWork"
@@ -331,6 +343,51 @@ function Remove-TempWork {
         }
     }
     $script:TempWork = $null
+}
+
+# Where an install went, so that an uninstall can find it.
+#
+# -InstallRoot is a parameter with a default, so -Uninstall on its own always
+# recomputed the DEFAULT location. A user who installed to D:\Apps\Mochi and
+# later ran -Uninstall got "mochi.exe was not there", "user PATH is already
+# clean" and a tidy summary, having removed nothing at all, with the binaries
+# and the PATH entry still live.
+$script:StateKey = 'HKCU:\Software\Mochi'
+
+function Save-InstallRoot {
+    param([Parameter(Mandatory)] [string] $Root)
+    try {
+        if (-not (Test-Path $script:StateKey)) {
+            New-Item -Path $script:StateKey -Force | Out-Null
+        }
+        New-ItemProperty -Path $script:StateKey -Name 'InstallRoot' -Value $Root `
+            -PropertyType String -Force | Out-Null
+    } catch {
+        # Not fatal: the install itself worked, only the uninstall hint is lost.
+        Write-Detail "could not record the install location: $($_.Exception.Message)"
+    }
+}
+
+function Get-RecordedInstallRoot {
+    try {
+        $value = (Get-ItemProperty -Path $script:StateKey -Name 'InstallRoot' -ErrorAction Stop).InstallRoot
+        if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+        return $value
+    } catch {
+        return $null
+    }
+}
+
+function Clear-InstallRoot {
+    try {
+        Remove-ItemProperty -Path $script:StateKey -Name 'InstallRoot' -ErrorAction Stop
+        $key = Get-Item -Path $script:StateKey -ErrorAction Stop
+        if ($key.ValueCount -eq 0 -and $key.SubKeyCount -eq 0) {
+            Remove-Item -Path $script:StateKey -Force
+        }
+    } catch {
+        # Nothing recorded, or already gone.
+    }
 }
 
 function Install-Mochi {
@@ -352,13 +409,13 @@ function Install-Mochi {
     }
 
     foreach ($binary in $script:Binaries) {
-        if (-not (Test-Path (Join-Path $source $binary))) {
+        if (-not (Test-Path -LiteralPath (Join-Path $source $binary))) {
             throw "$binary not found in $source"
         }
     }
 
     Write-Step "installing to $script:BinDir"
-    if (-not (Test-Path $script:BinDir)) {
+    if (-not (Test-Path -LiteralPath $script:BinDir)) {
         if ($PSCmdlet.ShouldProcess($script:BinDir, 'create directory')) {
             New-Item -ItemType Directory -Force -Path $script:BinDir | Out-Null
         }
@@ -380,7 +437,7 @@ function Install-Mochi {
     $copied = $true
     foreach ($binary in $script:Binaries) {
         if ($PSCmdlet.ShouldProcess($binary, "copy to $script:BinDir")) {
-            Copy-Item -Path (Join-Path $source $binary) -Destination $script:BinDir -Force
+            Copy-Item -LiteralPath (Join-Path $source $binary) -Destination $script:BinDir -Force
             Write-Detail $binary
         } else {
             $copied = $false
@@ -431,14 +488,14 @@ function Install-Mochi {
 
     # Mochi reads hotkeys or whkdrc from that directory and quickstart leaves
     # either name alone, so either one means the hotkeys are there already.
-    $haveHotkeys = (Test-Path $script:HotkeyPath) -or (Test-Path $script:LegacyHotkeyPath)
+    $haveHotkeys = (Test-Path -LiteralPath $script:HotkeyPath) -or (Test-Path -LiteralPath $script:LegacyHotkeyPath)
 
     if (-not $copied) {
         Write-Step 'configuration left alone'
         Write-Detail 'the binaries were not copied, so mochic quickstart was not run'
     } elseif ($SkipQuickstart) {
         Write-Step 'configuration left alone (-SkipQuickstart)'
-    } elseif ((Test-Path $script:ConfigPath) -and $haveHotkeys) {
+    } elseif ((Test-Path -LiteralPath $script:ConfigPath) -and $haveHotkeys) {
         Write-Step "configuration is already there: $script:ConfigPath"
         Write-Detail "hotkeys are already there: $(Get-HotkeyPath)"
     } else {
@@ -464,14 +521,16 @@ function Install-Mochi {
         return
     }
 
+    Save-InstallRoot -Root $InstallRoot
+
     Write-Step 'done'
     Write-Detail "binaries   $script:BinDir"
-    if (Test-Path $script:ConfigPath) {
+    if (Test-Path -LiteralPath $script:ConfigPath) {
         Write-Detail "config     $script:ConfigPath"
     } else {
         Write-Detail "config     not written, see docs/configuration.md for $script:ConfigPath"
     }
-    if ((Test-Path $script:HotkeyPath) -or (Test-Path $script:LegacyHotkeyPath)) {
+    if ((Test-Path -LiteralPath $script:HotkeyPath) -or (Test-Path -LiteralPath $script:LegacyHotkeyPath)) {
         Write-Detail "hotkeys    $(Get-HotkeyPath)"
     } else {
         Write-Detail "hotkeys    not written, see docs/hotkeys.md for $script:HotkeyPath"
@@ -484,9 +543,9 @@ function Uninstall-Mochi {
     Write-Step "removing binaries from $script:BinDir"
     foreach ($binary in $script:Binaries) {
         $path = Join-Path $script:BinDir $binary
-        if (Test-Path $path) {
+        if (Test-Path -LiteralPath $path) {
             if ($PSCmdlet.ShouldProcess($path, 'remove')) {
-                Remove-Item $path -Force
+                Remove-Item -LiteralPath $path -Force
                 Write-Detail "removed $binary"
             }
         } else {
@@ -500,7 +559,7 @@ function Uninstall-Mochi {
     $dir = $script:BinDir
     if ((Test-Path $dir) -and -not (Get-ChildItem -LiteralPath $dir -Force)) {
         if ($PSCmdlet.ShouldProcess($dir, 'remove empty directory')) {
-            Remove-Item $dir -Force
+            Remove-Item -LiteralPath $dir -Force
         }
     }
 
@@ -519,7 +578,17 @@ function Uninstall-Mochi {
 }
 
 if ($Uninstall) {
+    # Only when the user did not say where: an explicit -InstallRoot always wins.
+    if (-not $PSBoundParameters.ContainsKey('InstallRoot')) {
+        $recorded = Get-RecordedInstallRoot
+        if ($recorded -and $recorded -ne $InstallRoot) {
+            Write-Step "using the recorded install location $recorded"
+            $InstallRoot = $recorded
+            $script:BinDir = Join-Path $InstallRoot 'bin'
+        }
+    }
     Uninstall-Mochi
+    Clear-InstallRoot
 } else {
     Install-Mochi
 }
