@@ -88,8 +88,15 @@ pub fn start_daemon(args: &[String]) -> Result<()> {
                     mochi_client::PIPE_NAME
                 );
             }
+            // `mochic check` before the log, on purpose. The daemon is started
+            // detached with no stderr, so whatever reason it gave for giving up
+            // went to a dated log file and never to this terminal. Far and away
+            // the most common reason is a configuration file it could not read,
+            // and `check` finds exactly that, offline, naming the file, the line
+            // and the column.
             bail!(
-                "mochi (pid {pid}) exited with {code} without opening {}, check the log in %LOCALAPPDATA%\\mochi",
+                "mochi (pid {pid}) exited with {code} without opening {}.
+Run `mochic check` to test your configuration, or read the log in %LOCALAPPDATA%\\mochi",
                 mochi_client::PIPE_NAME
             );
         }
@@ -105,7 +112,8 @@ pub fn start_daemon(args: &[String]) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     bail!(
-        "mochi (pid {pid}) is running but did not open {} within {} seconds, check the log in %LOCALAPPDATA%\\mochi",
+        "mochi (pid {pid}) is running but did not open {} within {} seconds.
+Run `mochic check` to test your configuration, or read the log in %LOCALAPPDATA%\\mochi",
         mochi_client::PIPE_NAME,
         START_TIMEOUT.as_secs()
     )
