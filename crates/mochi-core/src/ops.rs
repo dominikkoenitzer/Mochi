@@ -1325,6 +1325,14 @@ impl State {
             changes.merge(self.focus_changes(self.focused_window_after()));
         }
         self.visibility_delta(&before, &mut changes);
+        // The window that was just removed is not a window to take off screen.
+        // `visibility_delta` finds it on screen before and absent after, which
+        // is exactly the shape of a window that moved to an inactive workspace,
+        // and it cannot tell the two apart. Left in, it cloaked every window
+        // the daemon let go of: an elevated window Mochi had just admitted it
+        // could not move vanished from the desktop instead of being left alone,
+        // and `mochic unmanage` hid the very window it was asked to release.
+        changes.hide.retain(|hidden| *hidden != id);
         Ok(changes)
     }
 
@@ -1599,6 +1607,24 @@ mod tests {
         assert_eq!(
             state.remove_window(WindowId(99)).unwrap_err(),
             Error::WindowNotFound(WindowId(99))
+        );
+    }
+
+    #[test]
+    fn a_removed_window_is_never_asked_to_be_hidden() {
+        // A window that leaves the model is not Mochi's to take off screen.
+        // The visibility delta sees it on screen before and absent after and
+        // draws the obvious conclusion, which is right for a window that moved
+        // to an inactive workspace and badly wrong here: on the real desktop it
+        // cloaked every window the daemon let go of, so an elevated Task
+        // Manager that Mochi could not move vanished instead of being left
+        // alone, and `mochic unmanage` hid the window it was asked to release.
+        let mut state = with_windows(3);
+        let changes = state.remove_window(WindowId(2)).unwrap();
+        assert!(
+            !changes.hide.contains(&WindowId(2)),
+            "removing a window asked for it to be hidden: {:?}",
+            changes.hide
         );
     }
 
