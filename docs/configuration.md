@@ -120,15 +120,22 @@ not fit into 2160 pixels any other way.
 
 ## Rules that are read but not acted on
 
-`tray_and_multi_window_applications`, `object_name_change_applications`,
-`border_overflow_applications`, `layered_whitelist` and
-`slow_application_identifiers` parse, merge with the community rule file and
-are counted by `mochic state`, and nothing in the daemon asks them anything
-yet. They are here so a config copied over from another window manager keeps
-validating and keeps its rules; they change no behaviour today.
+Two lists parse, merge with the community rule file and are counted by
+`mochic state`, and nothing in the daemon asks them anything:
+`border_overflow_applications` and `layered_whitelist`. They are here so a
+config copied over from another window manager keeps validating and keeps its
+rules; they change no behaviour today, and `mochic check` says so when it finds
+entries in them.
 
-`ignore_rules`, `manage_rules`, `floating_applications` and
-`transparency_ignore_rules` are the four that are acted on.
+Everything else in the rules is acted on. `ignore_rules`, `manage_rules`,
+`floating_applications` and `transparency_ignore_rules` decide whether a window
+is managed, floated or faded. `tray_and_multi_window_applications` decides
+whether a window that closes to the tray is really gone,
+`object_name_change_applications` decides whether a title change is worth
+re-reading the window for, and `slow_application_identifiers` gives an
+application an extra beat before its window is judged. Those three were wired up
+after this page was first written and it said otherwise until 2026-09-21, which
+was worth correcting: acting on it would have meant deleting rules that work.
 
 ## Pinning a monitor
 

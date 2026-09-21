@@ -210,7 +210,7 @@ shape is stable across changes to the model:
       "containers": [{
         "index": 0, "stack": false, "focused_window": 852368,
         "rect": {"left":24,"top":24,"right":1920,"bottom":2088,"width":1896,"height":2064},
-        "windows": [{"hwnd":852368,"title":"Cargo.toml","exe":"Code.exe","class":"Chrome_WidgetWin_1","path":"C:\\Program Files\\Code\\Code.exe","rect":{"...":0},"visible":true}]
+        "windows": [{"hwnd":852368,"title":"Cargo.toml","exe":"Code.exe","class":"Chrome_WidgetWin_1","path":"C:\\Program Files\\Code\\Code.exe","rect":{"...":0},"actual_rect":{"...":0},"visible":true,"on_screen":true}]
       }],
       "monocle_container": null, "maximized_window": null, "floating_windows": []
     }]
@@ -256,6 +256,7 @@ What can be null:
 | `monitors[].last_focused_workspace` | only one workspace has been focused since the daemon started, so `focus-last-workspace` has nowhere to go |
 | `workspaces[].focused_window`, `containers[].focused_window` | that workspace or container is empty |
 | `containers[].rect`, `windows[].rect` | the last layout did not place them: a container added since the last run, a workspace with `tile` off, or a floating window, which has no layout rectangle at all |
+| `windows[].actual_rect`, `windows[].on_screen` | the window could not be read, which is what one that has just died looks like |
 | `monocle_container`, `maximized_window` | that mode is not on for the workspace, which is the normal case |
 
 A `rect` that is present is the rectangle the last layout gave the container,
@@ -263,6 +264,17 @@ in physical pixels, describing the perceived frame: the daemon compensates for
 the invisible resize border itself, so these are the numbers a screenshot
 shows. A window carries the rectangle of its container, so every window of a
 stack reports the same one.
+
+`rect` and `actual_rect` answer two different questions and it is worth being
+clear about which is which. `rect` is where the model says the window BELONGS;
+`actual_rect` is where it is, measured off the desktop when the document was
+built. They normally agree. When they do not, the window is not where Mochi
+believes it is, and that is the interesting case: a window it was not allowed
+to move, one that ignored the rectangle it was given, or one that has been
+dragged since the last layout. `visible` and `on_screen` split the same way:
+`visible` is the model's answer, whether the container is showing this window
+rather than another of its stack, and `on_screen` is the desktop's, false for a
+window that is cloaked or hidden however that came about.
 
 The visual commands (`border*`, `animation*`, `toggle-transparency`) change the
 live configuration, reach the border, transparency and animation managers and

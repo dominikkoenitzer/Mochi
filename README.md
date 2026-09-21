@@ -78,6 +78,16 @@ Build and install for the current user, no admin rights needed:
 .\scripts\install.ps1
 ```
 
+If that fails before it prints anything, with "running scripts is disabled on
+this system" or "is not digitally signed", that is Windows and not the script.
+A repo downloaded as a zip arrives with every file marked as coming from the
+internet, and Windows PowerShell 5.1 refuses to run scripts at all by default.
+Either way this runs it without changing any setting on the machine:
+
+```
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
 This puts `mochi.exe` and `mochic.exe` in `%LOCALAPPDATA%\Programs\Mochi\bin`,
 adds that folder to the user PATH and writes a default `%USERPROFILE%\mochi.json`
 and hotkey file when there is none. `-Version v0.1.13` downloads that release
@@ -89,6 +99,38 @@ Start it at login, and see what is registered today:
 .\scripts\autostart.ps1 -Enable
 .\scripts\autostart.ps1
 ```
+
+## Running it
+
+Look before you leap. A dry run reads the desktop and writes nothing at all: no
+window is moved, cloaked, focused or closed, it takes no control pipe and it
+binds no keys, so it is safe to run while another window manager, or another
+Mochi, is managing the screen.
+
+```
+mochi --dry-run
+```
+
+Every line it prints starting `dry-run:` is something it would have done. When
+that looks right, start it for real, and stop it when you want your desktop
+back:
+
+```
+mochic start
+mochic stop
+```
+
+`mochic stop` is the way out. It puts every window it was hiding back on screen,
+takes the borders down, restores transparency and unbinds the keys, so stopping
+Mochi leaves the desktop the way it found it. Nothing is left behind even if it
+is killed outright: every window taken off screen is written down first, and the
+next start puts back anything the record still owes. While it is running,
+`mochic restore-windows` does the same on demand.
+
+No admin rights, and none are wanted. Mochi runs as a normal user, which means
+Windows will not let it move a window belonging to a program running as
+administrator. It notices, says so once in the log, and leaves that window alone
+rather than tiling around a hole it cannot fill.
 
 Config keys are in [docs/configuration.md](docs/configuration.md), commands in
 [docs/cli.md](docs/cli.md), keys in [docs/hotkeys.md](docs/hotkeys.md). The log

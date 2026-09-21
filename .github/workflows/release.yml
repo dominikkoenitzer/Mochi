@@ -26,8 +26,26 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # The same audit CI runs, and for the same reason: a release is the one
+  # artifact strangers actually download, so it must not be the thing that
+  # skipped the advisory database. It is a container action and therefore the
+  # one job here that is not on Windows; `deny.toml` pins the graph to the
+  # Windows target, so the dependency set it audits is the one being shipped.
+  deny:
+    name: cargo-deny
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
   release:
     name: Build and publish
+    needs: deny
     timeout-minutes: 60
     runs-on: windows-latest
     steps:
@@ -55,6 +73,11 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace --all-features
 
+      - name: Doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --all-features --no-deps
+
       - name: Build
         run: cargo build --locked --release --workspace
 
@@ -80,16 +103,48 @@ jobs:
           "PACKAGE_NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "STAGE_DIR=$forward" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Verify the staged binaries run
+      - name: Verify the staged binaries run and agree with the tag
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
+
+          # The tag being published, when there is one. A workflow_dispatch on a
+          # branch has none, and must not be held to this.
+          $tag = "${{ inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag) -and "${{ github.ref_type }}" -eq 'tag') {
+              $tag = "${{ github.ref_name }}"
+          }
+          $expected = if ($tag -match '^v(.+)$') { $Matches[1] } else { $null }
+
           foreach ($exe in @('mochi.exe', 'mochic.exe')) {
               $path = Join-Path $env:STAGE_DIR $exe
-              $output = & $path --version 2>&1
+              $output = (& $path --version 2>&1) -join ' '
               if ($LASTEXITCODE -ne 0) { throw "$exe --version exited with $LASTEXITCODE" }
               Write-Output "$exe -> $output"
+
+              # Running is not the same as being the thing the tag says. Without
+              # this, tagging v0.1.14 while Cargo.toml still reads 0.1.13 ships a
+              # binary that reports the wrong version to every user who runs it,
+              # and nothing anywhere would have said a word.
+              #
+              # Pulled out and compared whole, NOT matched as a substring: a
+              # substring test passes '0.1.1' against a binary reporting
+              # '0.1.13', which is the one mistake this check exists to catch.
+              if ($expected) {
+                  if ($output -notmatch '(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?)') {
+                      throw "could not read a version out of '$output' for $exe"
+                  }
+                  $actual = $Matches[1]
+                  if ($actual -ne $expected) {
+                      throw "$exe reports $actual but the tag is $tag; bump the workspace version before tagging"
+                  }
+              }
+          }
+          if ($expected) {
+              Write-Output "both binaries agree with tag $tag"
+          } else {
+              Write-Output 'no tag to check against, this is a branch build'
           }
 
       - name: Generate JSON schema
