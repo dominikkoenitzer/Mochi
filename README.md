@@ -56,7 +56,13 @@ alt + shift + q         : close the focused window
 alt + shift + e         : stop mochi and give the desktop back
 ```
 
-**If you want out, press `alt + shift + e`.** It stops Mochi, puts every window
+**To turn tiling off and on, press `Pause`.** One key. Off means Mochi stops
+touching windows and leaves them exactly where they are; on puts them back in
+their tiles. The daemon keeps running either way, which is why the key still
+works while it is off. `alt + f12` does the same on a keyboard with no Pause
+key.
+
+**If you want out for good, press `alt + shift + e`.** It stops Mochi, puts every window
 it was hiding back, takes the borders down and unbinds the keys. Nothing about
 the desktop is left changed. It is worth knowing before you start it for the
 first time, because a tiling window manager rearranges every window on screen
