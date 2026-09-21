@@ -79,6 +79,7 @@ fn run(cli: Cli) -> Result<()> {
 
     let raw_hotkeys = matches!(cli.command, Cmd::Hotkeys { json: true });
     let raw_why = matches!(cli.command, Cmd::Why { json: true });
+    let raw_doctor = matches!(cli.command, Cmd::Doctor { json: true });
     let Some(command) = cli.command.to_command() else {
         unreachable!("the subcommands without a protocol command returned above")
     };
@@ -99,6 +100,13 @@ fn run(cli: Cli) -> Result<()> {
         Response::Ok => {}
         Response::State { state } => println!("{}", serde_json::to_string_pretty(&state)?),
         Response::Query { answer } => println!("{}", scalar(&answer)),
+        Response::Doctor { doctor } => {
+            if raw_doctor {
+                println!("{}", serde_json::to_string_pretty(&doctor)?);
+            } else {
+                print!("{}", doctor_report(&doctor));
+            }
+        }
         Response::Why { why } => {
             if raw_why {
                 println!("{}", serde_json::to_string_pretty(&why)?);
@@ -126,6 +134,7 @@ fn answer_kind(command: &Command) -> &'static str {
         Command::Query { .. } => "query",
         Command::Hotkeys => "hotkeys",
         Command::Why => "why",
+        Command::Doctor => "doctor",
         _ => "ok",
     }
 }
@@ -138,6 +147,7 @@ fn response_kind(response: &Response) -> &'static str {
         Response::Query { .. } => "query",
         Response::Hotkeys { .. } => "hotkeys",
         Response::Why { .. } => "why",
+        Response::Doctor { .. } => "doctor",
         Response::Error { .. } => "error",
     }
 }
@@ -1276,6 +1286,49 @@ fn why_paragraph(why: &serde_json::Value) -> String {
     if let Some(fix) = fix {
         out.push_str(&field("Fix", &fix));
     }
+    out
+}
+
+/// Renders what the daemon found wrong with itself.
+///
+/// Phrased as the user would see it on their screen rather than as the daemon
+/// sees it internally: "a hole in the layout" is the thing they can look at and
+/// check, "a managed window that fails is_on_screen" is not.
+fn doctor_report(doctor: &serde_json::Value) -> String {
+    let count = |key: &str| doctor.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let empty = Vec::new();
+    let findings = doctor
+        .get("findings")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or(&empty);
+
+    let mut out = format!(
+        "{} window(s) managed, {} taken off screen by Mochi.\n\n",
+        count("managed"),
+        count("off_screen")
+    );
+    if findings.is_empty() {
+        out.push_str("Nothing wrong: what Mochi believes about the desktop matches the desktop.\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "{} thing(s) wrong. Each one is something you can see on screen:\n\n",
+        findings.len()
+    ));
+    for finding in findings {
+        let text = |key: &str| {
+            finding
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+        };
+        let title = text("title");
+        let named = if title.is_empty() { "(no title)" } else { title };
+        out.push_str(&format!("  {named}  [{} {}]\n", text("exe"), text("hwnd")));
+        out.push_str(&field("", text("detail")));
+    }
+    out.push_str("\n`mochic retile` fixes a layout that is merely stale. If a finding\n");
+    out.push_str("survives that, it is a defect and worth reporting.\n");
     out
 }
 
