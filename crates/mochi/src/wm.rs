@@ -5952,6 +5952,27 @@ alt + j : focus down
     }
 
     #[test]
+    fn restore_lets_go_of_a_window_it_will_never_get_back() {
+        // Mochi hid this while it had the rights to and no longer has them, so
+        // the call is refused now and at every stop and start after. Writing
+        // it back into the record only guarantees the same error forever and
+        // buries the one window the user has to rescue by hand.
+        let mut out_of_reach = window(2, "Two");
+        out_of_reach.exe = String::new();
+        let (mut wm, platform) = manager(vec![window(1, "One"), out_of_reach]);
+        platform.unrestorable.lock().unwrap().push(Hwnd(2));
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert_eq!(wm.hidden().lock().unwrap().len(), 2);
+
+        restore(platform.as_ref(), &wm.hidden());
+
+        assert!(
+            wm.hidden().lock().unwrap().is_empty(),
+            "a window that can never be restored was written down again"
+        );
+    }
+
+    #[test]
     fn hiding_with_minimize_restores_with_a_show_call() {
         let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
         wm.core.window_hiding_behaviour = HidingBehaviour::Minimize;
