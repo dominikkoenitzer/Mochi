@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow};
 use mochi_core::Rect;
 
 use windows::Win32::Foundation::{
-    COLORREF, CloseHandle, E_ACCESSDENIED, HWND, LPARAM, POINT, RECT, WPARAM,
+    COLORREF, CloseHandle, E_ACCESSDENIED, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAK, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
@@ -22,9 +22,12 @@ use windows::Win32::Graphics::Gdi::{
     DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
     MONITOR_DEFAULTTONULL, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
 };
+use windows::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+};
 use windows::Win32::System::Threading::{
-    AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenProcessToken,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -418,10 +421,56 @@ fn window_class(h: HWND) -> String {
     }
 }
 
+/// Whether a process runs elevated, or `None` when it will not say.
+///
+/// Reads the token rather than guessing from what `OpenProcess` allows: a
+/// normal process is granted both `PROCESS_QUERY_LIMITED_INFORMATION` and
+/// `TOKEN_QUERY` against an elevated one, so a refusal there means something
+/// else and an absence of refusal means nothing at all.
+fn process_is_elevated(pid: u32) -> Option<bool> {
+    if pid == 0 {
+        return None;
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut token = HANDLE::default();
+    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut token) };
+    let _ = unsafe { CloseHandle(process) };
+    opened.ok()?;
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0u32;
+    let read = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&raw mut elevation).cast::<c_void>()),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &raw mut returned,
+        )
+    };
+    let _ = unsafe { CloseHandle(token) };
+    read.ok()?;
+    Some(elevation.TokenIsElevated != 0)
+}
+
+/// Whether Mochi itself is elevated. Asked once; it cannot change.
+fn we_are_elevated() -> bool {
+    static ELEVATED: LazyLock<bool> = LazyLock::new(|| {
+        process_is_elevated(unsafe { GetCurrentProcessId() }).unwrap_or(false)
+    });
+    *ELEVATED
+}
+
 /// Full image path of the process that owns a window.
 ///
-/// Empty for elevated processes when Mochi is not elevated: `OpenProcess`
-/// refuses even `PROCESS_QUERY_LIMITED_INFORMATION` across that boundary.
+/// Empty when the process cannot be opened or its path cannot be read, which
+/// is what an anti-cheat or a protected process looks like from here.
+///
+/// It is NOT empty merely because the process is elevated and Mochi is not.
+/// `PROCESS_QUERY_LIMITED_INFORMATION` exists precisely to be granted across
+/// that boundary, and it is: measured from a genuinely unelevated process
+/// against an elevated one, both `OpenProcess` and `OpenProcessToken` succeed.
+/// This comment used to claim the opposite and a check was built on it that
+/// silently never fired.
 fn process_path(pid: u32) -> String {
     if pid == 0 {
         return String::new();
@@ -738,6 +787,13 @@ impl Platform for Win32Platform {
         // SAFETY: IsZoomed tolerates any handle value and answers false for one
         // that is not a window.
         unsafe { IsZoomed(hwnd(h)) }.as_bool()
+    }
+
+    fn outranks_us(&self, h: Hwnd) -> bool {
+        if we_are_elevated() {
+            return false;
+        }
+        process_is_elevated(owner_pid(hwnd(h))).unwrap_or(false)
     }
 
     fn is_on_screen(&self, h: Hwnd) -> bool {
