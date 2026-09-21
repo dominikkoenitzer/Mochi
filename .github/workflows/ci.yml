@@ -156,6 +156,36 @@ jobs:
       # ways a debug build does not. Every push walks that path.
       - run: cargo build --locked --release --workspace
 
+  schema:
+    name: schema is current
+    timeout-minutes: 30
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: schema
+      # `schema.json` is what an editor validates a user's mochi.json against,
+      # and the config in this repository points its own `$schema` at it. A key
+      # added to the parser without regenerating it means every editor marks a
+      # perfectly valid setting as an error, and nothing else would ever say so.
+      - name: Regenerate and compare
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          cargo run --locked --quiet -p mochic -- schema > schema.generated.json
+          $committed = (Get-Content -Raw schema.json) -replace "`r`n", "`n"
+          $generated = (Get-Content -Raw schema.generated.json) -replace "`r`n", "`n"
+          if ($committed -ne $generated) {
+              Write-Output 'schema.json is out of date. Regenerate it with:'
+              Write-Output '  cargo run -p mochic -- schema > schema.json'
+              git --no-pager diff --no-index -- schema.json schema.generated.json
+              exit 1
+          }
+          Write-Output 'schema.json matches the parser'
+
   deny:
     name: cargo-deny
     timeout-minutes: 30

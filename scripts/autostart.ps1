@@ -70,7 +70,26 @@ $script:RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $script:BackupKey = 'HKCU:\Software\Mochi'
 $script:BackupPrefix = 'RunBackup_'
 $script:MochiValue = 'Mochi'
-$script:StartupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+# Asked for, not assumed. Group Policy folder redirection on a managed machine
+# moves the Start Menu elsewhere, and a hardcoded path then reports "found no
+# autostart to disable" while the shortcut sits where it always was, so the user
+# believes their old window manager is off, logs in, and two of them fight over
+# the desktop.
+$script:StartupDir = [Environment]::GetFolderPath('Startup')
+if ([string]::IsNullOrWhiteSpace($script:StartupDir)) {
+    $script:StartupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+}
+
+# Where install.ps1 recorded the install, so -Enable finds a non-default one.
+function Get-RecordedInstallRoot {
+    try {
+        $value = (Get-ItemProperty -Path $script:BackupKey -Name 'InstallRoot' -ErrorAction Stop).InstallRoot
+        if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+        return $value
+    } catch {
+        return $null
+    }
+}
 
 function Write-Step {
     param([Parameter(Mandatory)][string] $Message)
@@ -87,6 +106,29 @@ function Get-RunValue {
     $item = Get-ItemProperty -Path $script:RunKey -Name $Name -ErrorAction SilentlyContinue
     if ($null -eq $item) { return $null }
     return $item.$Name
+}
+
+# The raw value and its registry kind.
+#
+# Get-ItemProperty EXPANDS a REG_EXPAND_SZ, so backing up through it and
+# restoring as a plain string rewrites another program's autostart with the
+# path frozen to whatever %LOCALAPPDATA% happened to be that day. It keeps
+# working until the profile or the drive layout changes, and then that program
+# silently stops starting with nothing pointing back at Mochi. install.ps1
+# already takes this care with PATH; this is the same care for Run values.
+function Get-RunValueRaw {
+    param([Parameter(Mandatory)][string] $Name)
+    try {
+        $key = Get-Item -LiteralPath $script:RunKey -ErrorAction Stop
+        $raw = $key.GetValue($Name, $null, 'DoNotExpandEnvironmentNames')
+        if ($null -eq $raw) { return $null }
+        return [PSCustomObject]@{
+            Value = [string] $raw
+            Kind  = [string] $key.GetValueKind($Name)
+        }
+    } catch {
+        return $null
+    }
 }
 
 function Get-BackupValue {
@@ -131,8 +173,15 @@ function Backup-RunValue {
     )
     $backupValue = "$script:BackupPrefix$Name"
     if (-not (Test-Path $script:BackupKey)) { New-Item -Path $script:BackupKey -Force | Out-Null }
-    New-ItemProperty -Path $script:BackupKey -Name $backupValue -Value $Value -PropertyType String -Force | Out-Null
-    Write-Detail "Run value backed up to $script:BackupKey\$backupValue"
+
+    # The raw text and the kind, so the value goes back exactly as it was.
+    $raw = Get-RunValueRaw -Name $Name
+    $text = if ($null -ne $raw) { $raw.Value } else { $Value }
+    $kind = if ($null -ne $raw) { $raw.Kind } else { 'String' }
+
+    New-ItemProperty -Path $script:BackupKey -Name $backupValue -Value $text -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $script:BackupKey -Name "${backupValue}_Kind" -Value $kind -PropertyType String -Force | Out-Null
+    Write-Detail "Run value backed up to $script:BackupKey\$backupValue ($kind)"
 }
 
 function Restore-RunValue {
@@ -140,14 +189,46 @@ function Restore-RunValue {
     $backup = Get-BackupValue -Name $Name
     if ($null -eq $backup) { return $false }
     $backupValue = "$script:BackupPrefix$Name"
-    New-ItemProperty -Path $script:RunKey -Name $Name -Value $backup -PropertyType String -Force | Out-Null
+
+    # Back under its own kind. An ExpandString written as String keeps its
+    # %VARIABLES% as dead literal text.
+    $kind = 'String'
+    try {
+        $recorded = (Get-ItemProperty -Path $script:BackupKey -Name "${backupValue}_Kind" -ErrorAction Stop)."${backupValue}_Kind"
+        if ($recorded -eq 'ExpandString') { $kind = 'ExpandString' }
+    } catch {
+        # Backed up by an older version of this script, which only ever wrote
+        # plain strings. String is what it was.
+    }
+
+    New-ItemProperty -Path $script:RunKey -Name $Name -Value $backup -PropertyType $kind -Force | Out-Null
     Remove-ItemProperty -Path $script:BackupKey -Name $backupValue
+    Remove-ItemProperty -Path $script:BackupKey -Name "${backupValue}_Kind" -ErrorAction SilentlyContinue
     return $true
 }
 
 function Enable-MochiAutostart {
-    if (-not (Test-Path $MochicPath)) {
-        Write-Detail "$MochicPath does not exist yet, run scripts\install.ps1 first"
+    # A missing binary is a refusal, not a note. The launcher runs hidden, so a
+    # Run value pointing at nothing fails silently at every single login: Mochi
+    # never starts and there is nothing on screen to say why. Registering it
+    # anyway, after printing one buried line, was the worst of both.
+    if (-not (Test-Path -LiteralPath $MochicPath)) {
+        $recorded = Get-RecordedInstallRoot
+        if ($recorded) {
+            $candidate = Join-Path $recorded 'bin\mochic.exe'
+            if (Test-Path -LiteralPath $candidate) {
+                Write-Detail "using the recorded install location $recorded"
+                $script:MochicPath = $candidate
+                $MochicPath = $candidate
+            }
+        }
+    }
+    if (-not (Test-Path -LiteralPath $MochicPath)) {
+        Write-Step 'nothing registered'
+        Write-Detail "$MochicPath does not exist"
+        Write-Detail 'run scripts\install.ps1 first, or pass -MochicPath'
+        Write-Detail 'a Run entry pointing at a missing file fails silently at every login'
+        return
     }
     $command = Get-MochiCommand
     $current = Get-RunValue -Name $script:MochiValue
