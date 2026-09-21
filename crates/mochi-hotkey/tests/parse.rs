@@ -42,7 +42,7 @@ fn command(text: &str) -> Command {
 #[test]
 fn the_real_file_parses_to_every_binding_it_holds() {
     let bindings = bindings();
-    assert_eq!(bindings.len(), 56);
+    assert_eq!(bindings.len(), 57);
     assert!(!bindings.is_empty());
     assert_eq!(bindings.shell(), Shell::Cmd);
 }
@@ -175,7 +175,7 @@ fn every_binding_reports_the_line_it_was_read_from() {
     sorted.sort_unstable();
     assert_eq!(lines, sorted, "iteration should follow the file");
     assert_eq!(bindings.get(trigger("alt + h")).unwrap().line, 6);
-    assert_eq!(bindings.get(trigger("alt + return")).unwrap().line, 82);
+    assert_eq!(bindings.get(trigger("alt + return")).unwrap().line, 83);
 }
 
 #[test]
@@ -236,4 +236,41 @@ fn a_direction_still_reaches_the_daemon_as_a_direction() {
             direction: Direction::Up
         }
     );
+}
+
+/// The key names that were missing until 2026-09-21, parsed from a real file.
+///
+/// `oem_102` is the extra key every ISO keyboard has and US ANSI does not, so
+/// it is on the author's own Swiss board and on German, Nordic, UK and AZERTY
+/// ones. It had no spelling at all, which made it the one physical key a hotkey
+/// file could not reach. The four `oem_*` punctuation aliases are how a file
+/// written to the common conventions spells those keys, so a config carried
+/// over from another window manager failed on exactly those lines.
+#[test]
+fn the_key_names_a_non_us_keyboard_needs_parse_from_a_file() {
+    let file = "\
+alt + shift + oem_102   : toggle-transparency
+alt + numlock           : toggle-float
+alt + oem_plus          : focus up
+alt + oem_minus         : focus down
+alt + oem_comma         : focus left
+alt + oem_period        : focus right
+";
+    let bindings = match Bindings::parse(file) {
+        Ok(bindings) => bindings,
+        Err(errors) => panic!("every one of these should parse:\n{errors}"),
+    };
+    assert_eq!(bindings.len(), 6, "a line was dropped");
+
+    let iso: Trigger = "alt + shift + oem_102".parse().expect("the ISO key parses");
+    assert!(
+        bindings.get(iso).is_some(),
+        "the ISO extra key did not reach the bindings"
+    );
+
+    // The aliases resolve to the canonical spelling, so they land on the same
+    // trigger a file using the friendly names would produce.
+    let by_alias: Trigger = "alt + oem_plus".parse().expect("alias parses");
+    let by_name: Trigger = "alt + plus".parse().expect("canonical parses");
+    assert_eq!(by_alias, by_name, "the alias is a different key");
 }
