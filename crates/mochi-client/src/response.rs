@@ -25,6 +25,12 @@ pub enum Response {
         /// A single JSON scalar: number, string or boolean.
         answer: serde_json::Value,
     },
+    /// Everything the daemon found wrong with itself, as produced by
+    /// `{"cmd":"doctor"}`.
+    Doctor {
+        /// Opaque findings document. Its shape is owned by the daemon.
+        doctor: serde_json::Value,
+    },
     /// What Mochi makes of one window, as produced by `{"cmd":"why"}`.
     Why {
         /// Opaque explanation document. Its shape is owned by the daemon; the

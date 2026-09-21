@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::{
     AnimationStyle, Axis, BooleanState, BorderStyle, Command, ContainerBehaviour, CycleDirection,
@@ -85,6 +85,12 @@ pub enum Cmd {
         /// What to ask for
         #[arg(value_enum)]
         target: QueryTarget,
+    },
+    /// Check the daemon's picture of the desktop against the real one
+    Doctor {
+        /// Print the raw findings document instead of a report
+        #[arg(long)]
+        json: bool,
     },
     /// Explain what Mochi makes of the window in front, and what to do about it
     Why {
@@ -507,6 +513,7 @@ impl Cmd {
             // Paragraph or raw JSON is a decision `mochic` makes on its own,
             // the daemon answers the same document either way.
             Cmd::Why { json: _ } => Command::Why,
+            Cmd::Doctor { json: _ } => Command::Doctor,
             Cmd::SubscribePipe { name } => Command::SubscribePipe { name: name.clone() },
             Cmd::UnsubscribePipe { name } => Command::UnsubscribePipe { name: name.clone() },
             Cmd::Focus { direction } => Command::Focus {
@@ -684,6 +691,45 @@ impl Cmd {
 
 /// True when `name` is a subcommand a key can be bound to.
 ///
+/// Parses an argument vector against the command grammar.
+///
+/// Built once and reused, for two reasons, and the first is not an
+/// optimisation.
+///
+/// `Cli::command()` is one derive-generated function that builds every
+/// subcommand in the grammar, so it is a single stack frame holding the
+/// temporaries of all of them. There are enough subcommands now that an
+/// unoptimised build of that frame comes close to a whole thread stack, and
+/// adding one more command overflowed it outright: a doctest died with "thread
+/// 'main' has overflowed its stack" and no backtrace, in a crate that only
+/// wanted to parse `alt + h : mochic focus left`. Building it on a thread with
+/// a stack chosen for the job, exactly once, takes the grammar's size out of
+/// the caller's stack budget for good, whoever the caller is and however the
+/// binary was compiled.
+///
+/// The second reason is that a hotkey file is parsed a line at a time, so the
+/// whole grammar used to be rebuilt once per binding: fifty-odd times on every
+/// start and every reload.
+fn parse_argv(argv: Vec<String>) -> Result<Cli, clap::Error> {
+    static GRAMMAR: std::sync::OnceLock<clap::Command> = std::sync::OnceLock::new();
+    let grammar = GRAMMAR.get_or_init(|| {
+        // Neither failure is one a caller could act on: the spawn only fails
+        // if the process cannot make a thread at all, and the join only if
+        // building the grammar panicked, which would be a bug in this file.
+        // Falling back to building it here is still better than refusing to
+        // parse, and on the stack that was the problem it will simply crash
+        // the same way it used to.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(Cli::command)
+            .ok()
+            .and_then(|worker| worker.join().ok())
+            .unwrap_or_else(Cli::command)
+    });
+    let matches = grammar.clone().try_get_matches_from(argv)?;
+    Cli::from_arg_matches(&matches)
+}
+
 /// `mochic start` and its kind are run by the client itself and never travel to
 /// the daemon, so they are not bindable. That matters to a checker: `start` is
 /// also the Windows shell command for launching a program, so a perfectly good
@@ -693,7 +739,7 @@ impl Cmd {
 #[must_use]
 pub fn is_bindable_subcommand(name: &str) -> bool {
     let argv = [String::from("mochic"), name.to_owned()];
-    match Cli::try_parse_from(argv) {
+    match parse_argv(argv.to_vec()) {
         // Parsed with no arguments: bindable only if it maps to a command.
         Ok(cli) => cli.command.to_command().is_some(),
         // Did not parse on its own, which is the ordinary case for a command
@@ -714,8 +760,8 @@ pub fn command_from_args(args: &[String]) -> Result<Command, String> {
     // point of this function: one grammar, so a binding and the command line can
     // never disagree about what `resize-axis horizontal increase` means.
     let argv = std::iter::once(String::from("mochic")).chain(args.iter().cloned());
-    let cli =
-        Cli::try_parse_from(argv).map_err(|e| format!("`{}`: {}", args.join(" "), one_line(&e)))?;
+    let cli = parse_argv(argv.collect())
+        .map_err(|e| format!("`{}`: {}", args.join(" "), one_line(&e)))?;
 
     cli.command
         .to_command()
