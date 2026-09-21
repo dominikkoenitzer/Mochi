@@ -169,7 +169,7 @@ jobs:
           Write-Output "collected $($found.Count) daemon log(s) from $from"
       - name: Upload the daemon logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs
           path: e2e-logs/
@@ -229,7 +229,7 @@ jobs:
       # run on a machine with no desktop.
       - run: cargo mutants --package mochi-core --no-shuffle --timeout 120
         continue-on-error: true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants
