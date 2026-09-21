@@ -125,6 +125,24 @@ impl IdWithIdentifier {
             return false;
         }
         let raw = window.value_for(self.kind);
+        // An identity that could not be READ decides nothing, either way.
+        //
+        // `exe` and `path` come back empty when the owning process could not be
+        // opened, which is what an elevated program or an anti-cheat-protected
+        // game looks like from a normal-integrity process. Empty there means
+        // unknown, not "the empty string", and treating it as a value makes
+        // every negative strategy true: `DoesNotContain` against a window with
+        // no path matched unconditionally, so one negative entry in
+        // `manage_rules` was a silent wildcard that managed every such window,
+        // and the matching ignore rule could never fire on the one it was
+        // written for.
+        //
+        // A `title` or a `class` may legitimately be empty, and an empty title
+        // really is the window's title, so those are left to compare as they
+        // are.
+        if raw.is_empty() && unknowable_when_empty(self.kind) {
+            return false;
+        }
         let fold = folds_case(self.kind);
         let value = fold_case(raw, fold);
         let id = fold_case(&self.id, fold);
@@ -832,6 +850,18 @@ fn regex_matches(pattern: &str, value: &str) -> bool {
 /// are content rather than file names: a class is reported verbatim by the
 /// platform layer and community rule files spell it exactly, and a title is
 /// text the user matches deliberately, so both stay byte exact.
+/// True for the identifiers whose empty value means "could not be read".
+///
+/// See [`crate::rules::MatchingRule::matches`]: the daemon fills these from the
+/// owning process, and an empty one is the failure of that read rather than a
+/// value a rule may reason about.
+const fn unknowable_when_empty(kind: ApplicationIdentifier) -> bool {
+    matches!(
+        kind,
+        ApplicationIdentifier::Exe | ApplicationIdentifier::Path
+    )
+}
+
 const fn folds_case(kind: ApplicationIdentifier) -> bool {
     matches!(
         kind,
@@ -1615,5 +1645,63 @@ mod tests {
             "options": ["teleport"]
         }]"#;
         assert!(load_app_specific_configuration(json).is_err());
+    }
+
+    #[test]
+    fn an_identity_that_could_not_be_read_decides_nothing() {
+        // `exe` and `path` come back empty when the owning process could not be
+        // opened, which is what an elevated program or an anti-cheat-protected
+        // game looks like from a normal-integrity process. Empty there means
+        // unknown, and it used to be compared as though it were a value: every
+        // negative strategy came back true, so a single negative entry in
+        // `manage_rules` silently managed every such window, and the ignore
+        // rule written for that very game could never fire.
+        let protected = WindowInfo {
+            exe: "",
+            class: "UnityWndClass",
+            title: "Some Game",
+            path: "",
+        };
+
+        for strategy in [
+            MatchingStrategy::DoesNotEqual,
+            MatchingStrategy::DoesNotStartWith,
+            MatchingStrategy::DoesNotEndWith,
+            MatchingStrategy::DoesNotContain,
+        ] {
+            for kind in [ApplicationIdentifier::Exe, ApplicationIdentifier::Path] {
+                let rule = MatchingRule::simple(kind, "anything.exe".to_owned(), strategy);
+                assert!(
+                    !rule.matches(&protected),
+                    "{kind:?} {strategy:?} matched a window whose identity could not be read"
+                );
+            }
+        }
+
+        // A positive strategy was already false and must stay false.
+        let positive = MatchingRule::simple(
+            ApplicationIdentifier::Exe,
+            "anything.exe".to_owned(),
+            MatchingStrategy::Equals,
+        );
+        assert!(!positive.matches(&protected));
+
+        // And a title that is genuinely empty is still a value a rule may
+        // reason about: an untitled window really has no title.
+        let untitled = WindowInfo {
+            exe: "explorer.exe",
+            class: "CabinetWClass",
+            title: "",
+            path: r"C:\Windows\explorer.exe",
+        };
+        let by_title = MatchingRule::simple(
+            ApplicationIdentifier::Title,
+            "Downloads".to_owned(),
+            MatchingStrategy::DoesNotEqual,
+        );
+        assert!(
+            by_title.matches(&untitled),
+            "an empty title is a real value, not a failed read"
+        );
     }
 }
