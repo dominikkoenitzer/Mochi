@@ -5302,6 +5302,41 @@ alt + j : focus down
     }
 
     #[test]
+    fn a_drag_does_not_pay_for_the_off_screen_sweep() {
+        // The sweep asks DWM for every visible window's cloak state, which is
+        // a cross-process call. LocationChange arrives hundreds of times a
+        // second while a window is being dragged, and nothing it reports can
+        // have changed a window's visibility, so the sweep must not run there.
+        // Asserted through behaviour rather than a call count: a window that
+        // has gone off screen survives a drag event and is only let go of by
+        // an event that could actually mean something.
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        for info in platform.windows.lock().unwrap().iter_mut() {
+            if info.hwnd == Hwnd(2) {
+                info.cloaked = true;
+            }
+        }
+
+        wm.on_event(Event::Window {
+            kind: WindowEventKind::LocationChange,
+            hwnd: Hwnd(1),
+        });
+        assert!(
+            wm.state().is_managed(window_id(Hwnd(2))),
+            "the drag path paid for the sweep"
+        );
+
+        wm.on_event(Event::Window {
+            kind: WindowEventKind::Foreground,
+            hwnd: Hwnd(1),
+        });
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(2))),
+            "an event that can mean something did not sweep"
+        );
+    }
+
+    #[test]
     fn a_window_mochi_hid_itself_keeps_its_place() {
         // The other side of the guard. Switching workspace takes every window
         // of the old one off screen on purpose, and those are written down.
