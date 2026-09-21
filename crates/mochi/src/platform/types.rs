@@ -329,6 +329,11 @@ pub enum Unmanageable {
     /// The window belongs to an elevated process and Mochi does not, so
     /// Windows turns down every call against it.
     OutOfReach,
+    /// `WS_EX_TOPMOST` without `WS_EX_APPWINDOW`: an overlay that sits above
+    /// everything and is not part of the stack of windows being tiled.
+    AlwaysOnTop,
+    /// `WS_EX_TRANSPARENT`: mouse input falls straight through the window.
+    ClickThrough,
 }
 
 impl Unmanageable {
@@ -346,6 +351,8 @@ impl Unmanageable {
             Self::ShellClass => "shell class",
             Self::ShellProcess => "shell process",
             Self::OutOfReach => "elevated, out of reach",
+            Self::AlwaysOnTop => "always on top",
+            Self::ClickThrough => "click-through overlay",
         }
     }
 }
@@ -365,7 +372,12 @@ impl Unmanageable {
     pub const fn is_overridable(self) -> bool {
         matches!(
             self,
-            Self::ToolWindow | Self::NoActivate | Self::Owned | Self::NoTitle
+            Self::ToolWindow
+                | Self::NoActivate
+                | Self::Owned
+                | Self::NoTitle
+                | Self::AlwaysOnTop
+                | Self::ClickThrough
         )
     }
 }
@@ -431,6 +443,36 @@ pub fn is_manageable_with(w: &WindowInfo, allow_tool_window: bool) -> Result<(),
     if w.has_ex_style(ex_style::WS_EX_NOACTIVATE) && !forced {
         return Err(Unmanageable::NoActivate);
     }
+    // An always-on-top window is not in the stack the layout is arranging. It
+    // is a heads-up display, a pinned overlay, a picture-in-picture: something
+    // deliberately drawn over the work rather than beside it, usually sized to
+    // cover part of another window exactly. Tiling one moves and resizes it
+    // milliseconds after it appears, so it lands somewhere it was never meant
+    // to be and covers the wrong thing, or renders blank because it sized its
+    // contents once at creation.
+    //
+    // `WS_EX_APPWINDOW` is the exception, as it is for the checks above: a
+    // window that asks for a taskbar button of its own is claiming to be a
+    // real window, and a pinned media player is one somebody may well want
+    // tiled. A `manage_rules` entry can overrule this like the other soft
+    // verdicts.
+    if w.has_ex_style(ex_style::WS_EX_TOPMOST) && !forced {
+        return Err(Unmanageable::AlwaysOnTop);
+    }
+    // Click-through, and this one does NOT bow to `WS_EX_APPWINDOW`. Mouse
+    // input falls straight through a `WS_EX_TRANSPARENT` window: the user
+    // cannot click it, drag it, or reach anything in it, because every click
+    // lands on whatever is behind. Whatever such a window is, it is not a
+    // window somebody works in, and giving it a tile takes that tile away from
+    // one they can actually use while putting an invisible sheet over it.
+    //
+    // A window can ask for a taskbar button and still be click-through, so the
+    // usual exception would let exactly the wrong thing through. A manage rule
+    // can still claim it, which is the right level for "I know what I am
+    // doing" rather than a style bit guessing on the user's behalf.
+    if w.has_ex_style(ex_style::WS_EX_TRANSPARENT) {
+        return Err(Unmanageable::ClickThrough);
+    }
     if w.owner.is_some_and(|o| !o.is_null()) && !forced {
         return Err(Unmanageable::Owned);
     }
@@ -479,6 +521,54 @@ mod tests {
     fn a_normal_application_window_is_manageable() {
         assert_eq!(is_manageable(&app_window()), Ok(()));
         assert!(app_window().is_manageable());
+    }
+
+    #[test]
+    fn a_click_through_window_is_never_tiled() {
+        // Mouse input falls straight through a WS_EX_TRANSPARENT window, so the
+        // user cannot click it, drag it, or reach anything in it. Whatever it
+        // is, it is not a window somebody works in, and giving it a tile takes
+        // that tile from one they can use and puts an invisible sheet over it.
+        //
+        // Measured on a real one: a Tauri overlay at exstyle 0x262424 carries
+        // WS_EX_TRANSPARENT and WS_EX_APPWINDOW together, so unlike the other
+        // soft verdicts this one must NOT bow to the taskbar-button exception.
+        let mut overlay = app_window();
+        overlay.ex_style |= ex_style::WS_EX_TRANSPARENT;
+        assert_eq!(is_manageable(&overlay), Err(Unmanageable::ClickThrough));
+
+        let mut with_taskbar_button = overlay.clone();
+        with_taskbar_button.ex_style |= ex_style::WS_EX_APPWINDOW;
+        assert_eq!(
+            is_manageable(&with_taskbar_button),
+            Err(Unmanageable::ClickThrough),
+            "asking for a taskbar button does not make a click-through window usable"
+        );
+
+        // A rule may still claim it.
+        assert!(Unmanageable::ClickThrough.is_overridable());
+    }
+
+    #[test]
+    fn an_always_on_top_overlay_is_left_alone() {
+        // A heads-up display, a pinned overlay, a picture-in-picture: drawn
+        // over the work rather than beside it, and usually sized to cover part
+        // of another window exactly. Tiling one moves and resizes it
+        // milliseconds after it appears, so it covers the wrong thing, or
+        // renders blank because it sized its contents once at creation.
+        let mut overlay = app_window();
+        overlay.ex_style |= ex_style::WS_EX_TOPMOST;
+        assert_eq!(is_manageable(&overlay), Err(Unmanageable::AlwaysOnTop));
+
+        // A window that asks for a taskbar button of its own is claiming to be
+        // a real window. A media player pinned above everything is one somebody
+        // may well want tiled.
+        let mut pinned_real_window = overlay.clone();
+        pinned_real_window.ex_style |= ex_style::WS_EX_APPWINDOW;
+        assert_eq!(is_manageable(&pinned_real_window), Ok(()));
+
+        // And a rule may still claim it, like the other soft verdicts.
+        assert!(Unmanageable::AlwaysOnTop.is_overridable());
     }
 
     #[test]
