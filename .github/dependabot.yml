@@ -11,6 +11,12 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      # windows and windows-core are pinned to the same version on purpose and
+      # their APIs move together, so a PR that bumps one alone cannot compile.
+      windows:
+        patterns:
+          - "windows"
+          - "windows-core"
       minor-patch:
         update-types: ["minor", "patch"]
     commit-message:
