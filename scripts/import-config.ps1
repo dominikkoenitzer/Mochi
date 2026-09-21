@@ -163,12 +163,18 @@ function Write-Target {
         return
     }
 
-    $dir = Split-Path -Parent $Path
+    $dir = Split-Path -Parent (Resolve-FullPath -Path $Path)
     if ($dir -and -not (Test-Path $dir)) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
     }
-    [System.IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding($false)))
-    Write-Detail "wrote $Path"
+    # Resolved first. .NET resolves a relative path against the process
+    # working directory, which is not PowerShell's location, so `-MochiConfig
+    # out.json` reported "wrote out.json" and put it somewhere the user was not
+    # looking. Split-Path above uses PowerShell's location, so the two also
+    # disagreed about which directory to create.
+    $full = Resolve-FullPath -Path $Path
+    [System.IO.File]::WriteAllText($full, $Content, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Detail "wrote $full"
     $script:Changes++
 }
 
@@ -178,7 +184,12 @@ function Convert-Config {
         return
     }
 
-    $raw = Get-Content -LiteralPath $Config -Raw
+    # -Encoding UTF8 is load bearing. Windows PowerShell 5.1, which is what
+    # `powershell.exe` still is on Windows 11, reads a file with no byte order
+    # mark as ANSI. The file is written back as UTF-8 further down, so an
+    # umlaut in a path or a rule went in as one encoding and came out as
+    # another, silently, with no error anywhere.
+    $raw = Get-Content -LiteralPath $Config -Raw -Encoding UTF8
     if ([string]::IsNullOrWhiteSpace($raw)) {
         Write-Detail "$Config is empty, skipping the configuration"
         return
@@ -244,7 +255,7 @@ function Convert-Hotkeys {
         return
     }
 
-    $raw = Get-Content -LiteralPath $Hotkeys -Raw
+    $raw = Get-Content -LiteralPath $Hotkeys -Raw -Encoding UTF8
     if ([string]::IsNullOrWhiteSpace($raw)) {
         Write-Detail "$Hotkeys is empty, skipping the hotkeys"
         return
