@@ -675,8 +675,36 @@ impl WindowManager {
         let (bindings, errors) = config::load_hotkeys(&path);
         self.hotkey_rows = rows_of(&bindings);
         self.hotkey_errors = errors;
+
+        // Game mode admits exactly one action, so a file saved without a
+        // binding for it leaves every key swallowed and nothing able to lift
+        // the suspension. That is not a hypothetical moment: it is exactly when
+        // somebody is editing their bindings, and the file is reloaded the
+        // instant they save. The keyboard is not Mochi's to keep.
+        let can_leave = bindings.iter().any(|binding| {
+            matches!(
+                binding.action,
+                mochi_hotkey::Action::Command(Command::ToggleGameMode)
+            )
+        });
+
         if let Some(hotkeys) = self.hotkeys.as_mut() {
             hotkeys.replace(bindings);
+        }
+
+        let stuck = self
+            .hotkeys
+            .as_ref()
+            .is_some_and(|hotkeys| hotkeys.gate() == Gate::GameMode)
+            && !can_leave;
+        if stuck {
+            tracing::warn!(
+                "the reloaded hotkey file has no binding for toggle-game-mode, so game                  mode would have no way out; leaving it"
+            );
+            let _ = self.leave_game_mode("the reloaded file cannot toggle it");
+            if let Some(hotkeys) = self.hotkeys.as_mut() {
+                hotkeys.set_gate(Gate::All);
+            }
         }
     }
 
@@ -2659,6 +2687,27 @@ impl WindowManager {
         })
     }
 
+    /// Leaves game mode, putting back the pause it found.
+    ///
+    /// Shared, because there are two ways out that are not the toggle itself
+    /// and both have to consume the remembered pause: asking for the keyboard
+    /// with `set-hotkeys`, and a reload that leaves no binding able to toggle.
+    /// A leave that forgets the memory arms it for the next press, which is
+    /// then read as ENTERING and records game mode's own pause as the user's.
+    ///
+    /// The gate is left to the caller, which knows what it wants to put there.
+    fn leave_game_mode(&mut self, why: &str) -> Response {
+        let (_, was_paused) = self.before_game_mode.take().unwrap_or((Gate::All, false));
+        tracing::info!(game_mode = false, why, "leaving game mode");
+        if self.core.is_paused != was_paused {
+            let (response, _) = self.handle_command(Command::TogglePause);
+            if !response.is_ok() {
+                return response;
+            }
+        }
+        Response::Ok
+    }
+
     /// `set-hotkeys`: bind keys, or stop binding them without stopping tiling.
     fn set_hotkeys(&mut self, enable: bool) -> Response {
         let Some(gate) = self.hotkeys.as_ref().map(HotkeyDaemon::gate) else {
@@ -2676,16 +2725,9 @@ impl WindowManager {
         // the keyboard comes back, the desktop stays untiled, and `mochic
         // state` reports `paused: true` with nothing to say why.
         if gate == Gate::GameMode {
-            let (_, was_paused) = self.before_game_mode.take().unwrap_or((Gate::All, false));
-            tracing::info!(
-                game_mode = false,
-                "leaving game mode: the keyboard was asked for"
-            );
-            if self.core.is_paused != was_paused {
-                let (response, _) = self.handle_command(Command::TogglePause);
-                if !response.is_ok() {
-                    return response;
-                }
+            let response = self.leave_game_mode("the keyboard was asked for");
+            if !response.is_ok() {
+                return response;
             }
         }
 
@@ -3673,6 +3715,19 @@ mod tests {
         }
     }
 
+    /// Serialises the tests that drive game mode.
+    ///
+    /// The hotkey gate is ONE process-wide atomic (`events::hotkey::GATE`),
+    /// deliberately, so that `set-hotkeys disable` is in force by the time it
+    /// answers. Tests run in parallel inside one process, so two of them
+    /// entering and leaving game mode at the same time read each other's gate
+    /// and fail in ways that have nothing to do with what they assert.
+    fn game_mode_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn manager(windows: Vec<WindowInfo>) -> (WindowManager, Arc<FakePlatform>) {
         manager_on(windows, vec![main_screen()])
     }
@@ -4516,7 +4571,64 @@ mod tests {
     }
 
     #[test]
+    fn a_reload_that_removes_the_toggle_does_not_trap_the_keyboard() {
+        let _guard = game_mode_guard();
+        // Game mode admits exactly one action. Save the hotkey file with the
+        // toggle-game-mode line deleted, or with a typo on it, and every bound
+        // key stays swallowed with nothing able to lift the suspension. The
+        // file is reloaded the instant it is saved, so this is exactly the
+        // moment somebody is editing their bindings.
+        let dir = std::env::temp_dir().join(format!("mochi-gm-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let keys = dir.join("hotkeys");
+        std::fs::write(
+            &keys,
+            "alt + g : toggle-game-mode
+alt + h : focus left
+",
+        )
+        .expect("write");
+
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        wm.start_hotkeys(keys.clone(), vec![keys.clone()]);
+        wm.handle_command(Command::ToggleGameMode);
+        assert!(wm.state().is_paused, "game mode is on");
+
+        // The user edits the file and loses the toggle.
+        std::fs::write(
+            &keys,
+            "alt + h : focus left
+",
+        )
+        .expect("rewrite");
+        wm.reload_hotkeys();
+
+        assert!(
+            !wm.state().is_paused,
+            "game mode was left on with no binding able to turn it off"
+        );
+
+        // And a reload that KEEPS the toggle leaves game mode alone.
+        std::fs::write(
+            &keys,
+            "alt + g : toggle-game-mode
+alt + j : focus down
+",
+        )
+        .expect("rewrite");
+        wm.handle_command(Command::ToggleGameMode);
+        assert!(wm.state().is_paused, "back into game mode");
+        wm.reload_hotkeys();
+        assert!(
+            wm.state().is_paused,
+            "a reload that kept the toggle should not have left game mode"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn asking_for_the_keyboard_during_game_mode_does_not_poison_the_memory() {
+        let _guard = game_mode_guard();
         // The natural reaction to "my hotkeys are dead" is `set-hotkeys
         // enable`. That used to set the gate to All and leave the game-mode
         // memory armed and still saying All, so the NEXT press of the toggle
@@ -4552,6 +4664,7 @@ mod tests {
 
     #[test]
     fn game_mode_gives_back_the_keyboard_and_the_pause_it_found() {
+        let _guard = game_mode_guard();
         let (mut wm, _) = manager(vec![window(1, "Editor")]);
         wm.start_hotkeys(std::env::temp_dir().join("no-such-hotkeys"), Vec::new());
 
