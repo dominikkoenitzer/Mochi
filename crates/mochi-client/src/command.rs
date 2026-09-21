@@ -278,6 +278,8 @@ pub enum Command {
     Hotkeys,
     /// Ask what Mochi makes of the window in front, and why.
     Why,
+    /// Ask the daemon to compare its model against the real desktop.
+    Doctor,
 
     // --- focus and movement ----------------------------------------------
     /// Move focus in a direction.
@@ -645,6 +647,7 @@ impl Command {
             Self::Query { .. } => "query",
             Self::Hotkeys => "hotkeys",
             Self::Why => "why",
+            Self::Doctor => "doctor",
             Self::Focus { .. } => "focus",
             Self::CycleFocus { .. } => "cycle-focus",
             Self::Move { .. } => "move",

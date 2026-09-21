@@ -2413,6 +2413,7 @@ impl WindowManager {
             }
             Command::Query { target } => self.query(target),
             Command::Why => self.explain_foreground(),
+            Command::Doctor => self.diagnose(),
             Command::Stop => {
                 tracing::info!("stop requested");
                 return (Response::Ok, Flow::Stop);
@@ -2825,6 +2826,96 @@ impl WindowManager {
         }
         tracing::info!(game_mode = entering, "game mode");
         Response::Ok
+    }
+
+    /// `doctor`: check the daemon's picture of the desktop against the real one.
+    ///
+    /// The test suite cannot do this. It drives a fake desktop that only ever
+    /// changes when Mochi changes it, so every test passes while the model and
+    /// the screen disagree. A real desktop moves on its own: applications cloak
+    /// their own windows, a virtual desktop takes one away, Windows refuses a
+    /// call because the window outranks us, a handle is reused. Every defect
+    /// found on this project by looking at a screen rather than at a test was
+    /// one of these, so this asks the questions a test cannot.
+    ///
+    /// Each finding names a window and says what is wrong in the terms the
+    /// user would see it: a tile reserved for a window that is not there is a
+    /// hole on their screen.
+    fn diagnose(&self) -> Response {
+        let mut findings: Vec<serde_json::Value> = Vec::new();
+        let mut note = |kind: &str, hwnd: Hwnd, detail: String| {
+            let (title, exe) = self
+                .core
+                .window(window_id(hwnd))
+                .map(|w| (w.title.clone(), w.exe.clone()))
+                .unwrap_or_default();
+            findings.push(serde_json::json!({
+                "kind": kind,
+                "hwnd": hwnd.to_string(),
+                "title": title,
+                "exe": exe,
+                "detail": detail,
+            }));
+        };
+
+        for id in self.core.all_window_ids().collect::<Vec<_>>() {
+            let hwnd = handle(id);
+            let hidden_by_us = self.we_hid(hwnd);
+            match self.platform.window_info(hwnd) {
+                Err(_) => note(
+                    "gone",
+                    hwnd,
+                    "the window no longer exists, and Mochi still has it".into(),
+                ),
+                Ok(info) => {
+                    if !info.reachable {
+                        note(
+                            "unreachable",
+                            hwnd,
+                            "Windows will not let Mochi move this window, so its tile can never be filled".into(),
+                        );
+                    }
+                    if !hidden_by_us
+                        && !self.minimized.contains(&hwnd)
+                        && !self.platform.is_on_screen(hwnd)
+                    {
+                        note(
+                            "hole",
+                            hwnd,
+                            "the window is off screen but still holds a tile, so the layout has a hole in it".into(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // The other direction: the record of what Mochi took off screen is what
+        // `mochic stop` and the next start work from. An entry that is wrong
+        // costs a pointless call; one that is missing is a window the user
+        // cannot get back without another window manager.
+        for hwnd in record(&self.hidden).handles() {
+            match self.platform.window_info(hwnd) {
+                Err(_) => note(
+                    "stale-record",
+                    hwnd,
+                    "Mochi has this written down as hidden, but the window is gone".into(),
+                ),
+                Ok(_) if self.platform.is_on_screen(hwnd) => note(
+                    "wrong-record",
+                    hwnd,
+                    "Mochi has this written down as hidden, and it is on screen".into(),
+                ),
+                Ok(_) => {}
+            }
+        }
+
+        Response::Doctor {
+            doctor: serde_json::json!({
+                "managed": self.core.all_window_ids().count(),
+                "off_screen": record(&self.hidden).handles().len(),
+                "findings": findings,
+            }),
+        }
     }
 
     /// `why`: explain what Mochi makes of the window in front.
@@ -5008,6 +5099,44 @@ alt + j : focus down
             wm.foreground, None,
             "the daemon still believes a cloaked window holds the keyboard"
         );
+    }
+
+    #[test]
+    fn the_doctor_reports_a_tile_held_by_a_window_that_is_not_there() {
+        // The check the 961 tests cannot do for themselves. They drive a fake
+        // desktop that only changes when Mochi changes it, so the model and
+        // the screen can never drift apart in a test the way they do on a real
+        // one. `doctor` asks the question against whatever desktop is actually
+        // there, which is where every defect of this kind has been found.
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        for info in platform.windows.lock().unwrap().iter_mut() {
+            if info.hwnd == Hwnd(2) {
+                info.cloaked = true;
+            }
+        }
+
+        let Response::Doctor { doctor } = wm.handle_command(Command::Doctor).0 else {
+            panic!("doctor answered with the wrong kind of response");
+        };
+        let findings = doctor["findings"].as_array().expect("findings is a list");
+        assert_eq!(findings.len(), 1, "{doctor:#}");
+        assert_eq!(findings[0]["kind"], "hole");
+        assert_eq!(findings[0]["title"], "Browser");
+    }
+
+    #[test]
+    fn the_doctor_is_quiet_when_the_model_and_the_desktop_agree() {
+        // The other half: a check that always finds something is a check
+        // nobody reads.
+        let (mut wm, _platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        let Response::Doctor { doctor } = wm.handle_command(Command::Doctor).0 else {
+            panic!("doctor answered with the wrong kind of response");
+        };
+        assert!(
+            doctor["findings"].as_array().expect("a list").is_empty(),
+            "{doctor:#}"
+        );
+        assert_eq!(doctor["managed"], 2);
     }
 
     #[test]
