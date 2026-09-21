@@ -134,6 +134,16 @@ Start it at login, and see what is registered today:
 .\scripts\autostart.ps1
 ```
 
+The Run value only fires at login, so a daemon that stops during the day
+leaves the desktop untiled until the next one. `-Watchdog` registers a task
+that asks every five minutes whether Mochi is up, and starts it when it is
+not. `mochic start` answers that it is already running in about thirty
+milliseconds, so the check costs nothing.
+
+```
+.\scripts\autostart.ps1 -Watchdog
+```
+
 ## Running it
 
 Look before you leap. A dry run reads the desktop and writes nothing at all: no
