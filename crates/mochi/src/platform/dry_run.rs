@@ -60,6 +60,11 @@ impl<P: Platform> Platform for DryRunPlatform<P> {
         self.inner.is_maximized(hwnd)
     }
 
+    fn outranks_us(&self, hwnd: Hwnd) -> bool {
+        // A read, so it passes through.
+        self.inner.outranks_us(hwnd)
+    }
+
     fn is_on_screen(&self, hwnd: Hwnd) -> bool {
         // A read, so it passes through: a dry run reports the desktop as it is.
         self.inner.is_on_screen(hwnd)

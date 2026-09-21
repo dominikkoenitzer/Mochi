@@ -1277,15 +1277,34 @@ fn why_paragraph(why: &serde_json::Value) -> String {
             number("monitor"),
             number("workspace"),
         ));
+        out.push_str(&keyboard_note(why));
         return out;
     }
 
     out.push_str("Mochi is leaving this window alone.\n");
+    out.push_str(&keyboard_note(why));
     let (explanation, fix) = advice(text("reason"), exe);
     out.push_str(&field("Why", &explanation));
     if let Some(fix) = fix {
         out.push_str(&field("Fix", &fix));
     }
+    out
+}
+
+/// Says so when Windows is giving Mochi none of this window's key presses.
+///
+/// A separate question from the tiling, and worth answering even for a window
+/// that is tiled perfectly: the bindings simply stop working inside it, with
+/// nothing on screen and nothing in the log to say why.
+fn keyboard_note(why: &serde_json::Value) -> String {
+    if why.get("hotkeys_blocked").and_then(serde_json::Value::as_bool) != Some(true) {
+        return String::new();
+    }
+    let mut out = String::from("\n");
+    out.push_str(&field(
+        "Keys",
+        "it runs as administrator and Mochi does not, so Windows gives Mochi none of the keys pressed while it has the focus. Every Mochi binding is dead in this window, including the one that turns tiling off. Start the program without administrator rights and they all come back; running Mochi as administrator would also work, and gives a window manager the run of the machine.",
+    ));
     out
 }
 
@@ -1327,8 +1346,13 @@ fn doctor_report(doctor: &serde_json::Value) -> String {
         out.push_str(&format!("  {named}  [{} {}]\n", text("exe"), text("hwnd")));
         out.push_str(&field("", text("detail")));
     }
-    out.push_str("\n`mochic retile` fixes a layout that is merely stale. If a finding\n");
-    out.push_str("survives that, it is a defect and worth reporting.\n");
+    // Only where it could help. Telling someone to retile because Windows is
+    // swallowing their key presses is advice that wastes their time and
+    // teaches them the command does nothing.
+    if findings.iter().any(|f| f["kind"] != "hotkeys-blocked") {
+        out.push_str("\nA layout that is merely stale is fixed by `mochic retile`. A finding that\n");
+        out.push_str("survives that is a defect and worth reporting.\n");
+    }
     out
 }
 

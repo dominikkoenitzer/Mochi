@@ -127,6 +127,18 @@ pub trait Platform: Send + Sync {
     /// cross-process calls per event. `IsZoomed` is a flag read.
     fn is_maximized(&self, hwnd: Hwnd) -> bool;
 
+    /// Whether the window belongs to a process that outranks Mochi.
+    ///
+    /// Asked by opening the process, not by reading a token: Windows refuses
+    /// a normal process even `PROCESS_QUERY_LIMITED_INFORMATION` on an
+    /// elevated one, so the refusal itself is the answer and costs one call.
+    ///
+    /// This is worth surfacing for a reason beyond tiling. The same boundary
+    /// blocks a low-level keyboard hook: while a window that outranks Mochi
+    /// holds the focus, Windows delivers it none of the key presses, so every
+    /// binding silently stops working and nothing on screen says why.
+    fn outranks_us(&self, hwnd: Hwnd) -> bool;
+
     /// Whether the window is on screen right now: visible, and not cloaked.
     ///
     /// Its own call for the same reason as [`Platform::is_maximized`]: this is
