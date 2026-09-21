@@ -2905,6 +2905,19 @@ impl WindowManager {
                     hwnd,
                     "Mochi has this written down as hidden, and it is on screen".into(),
                 ),
+                // The worst state the record can reach, and the one it cannot
+                // see for itself: Mochi took the window off screen while it
+                // had the rights to, and no longer has them. Every restore
+                // from here fails, so `mochic stop` cannot keep its promise
+                // and neither can the next start. It happens when Mochi is
+                // restarted with fewer rights than it had, which is exactly
+                // what starting it once from an administrator terminal and
+                // once normally does.
+                Ok(_) if self.platform.outranks_us(hwnd) => note(
+                    "cannot-restore",
+                    hwnd,
+                    "Mochi took this window off screen and can no longer put it back, because the window now outranks it: every restore is refused. Bring it back yourself from the taskbar or with alt+tab".into(),
+                ),
                 Ok(_) => {}
             }
         }
