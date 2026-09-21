@@ -51,15 +51,29 @@ impl BorderManager {
     /// [`crate::RenderError::ThreadStart`] when the thread or the Direct2D
     /// factory cannot be created.
     pub fn new(config: BorderConfig) -> Result<Self> {
+        // The thread gets the same diff the handle holds, so that a draw which
+        // fails can be un-recorded and tried again on the next pass.
+        let diff = Arc::new(Mutex::new(BorderDiff::new()));
+        let theirs = Arc::clone(&diff);
         let worker = spawn_worker(
             "border",
-            move || Borders::new(config),
+            move || Borders::new(config, theirs),
             |borders: &mut Borders, message| borders.handle(message),
         )?;
         Ok(Self {
             worker: Arc::new(worker),
-            diff: Arc::new(Mutex::new(BorderDiff::new())),
+            diff,
         })
+    }
+
+    /// Forgets what is on screen, so the next pass hands over every border again.
+    ///
+    /// The daemon calls this when the displays change. A border's measurements
+    /// are worked out at the DPI of the screen its rectangle lands on, so a
+    /// window that keeps the same rectangle across a DPI change still needs
+    /// repainting, and an unchanged pass would send nothing at all.
+    pub fn invalidate(&self) {
+        self.with_diff(BorderDiff::invalidate);
     }
 
     /// Declares the borders for one layout pass, and sends only what changed.
@@ -173,10 +187,23 @@ struct Borders {
     active: HashMap<isize, BorderWindow>,
     /// Hidden windows kept for the next container that needs one.
     idle: Vec<BorderWindow>,
+    /// The manager's record of what is on screen, shared so that a draw which
+    /// failed can be taken back out of it.
+    diff: Arc<Mutex<BorderDiff>>,
+    /// Targets Windows will not let this process stack a border against.
+    ///
+    /// A border is positioned relative to its target, so a target that belongs
+    /// to an elevated process refuses the call that puts the frame next to it.
+    /// There is no correct place left for that border: left on screen it is a
+    /// rectangle drawn around a window it is not attached to, and stuck in the
+    /// topmost band it ends up painted over every other window. It is taken
+    /// down and the target is written down here, because retrying costs a
+    /// failed call and a log line on every single pass.
+    refused: std::collections::HashSet<isize>,
 }
 
 impl Borders {
-    fn new(config: BorderConfig) -> Result<Self> {
+    fn new(config: BorderConfig, diff: Arc<Mutex<BorderDiff>>) -> Result<Self> {
         // SAFETY: a single threaded factory is only ever used from the thread
         // that created it, which is this one; the border windows are created
         // here too.
@@ -186,6 +213,8 @@ impl Borders {
         Ok(Self {
             factory,
             config,
+            diff,
+            refused: std::collections::HashSet::new(),
             active: HashMap::new(),
             idle: Vec::new(),
         })
@@ -242,10 +271,32 @@ impl Borders {
     /// Points one border window at its target, creating it if it has to.
     fn track(&mut self, spec: &BorderSpec) {
         let key = spec.target.0;
+        if self.refused.contains(&key) {
+            return;
+        }
         let Some(mut window) = self.take_window(key) else {
             return;
         };
         if let Err(error) = window.track(spec.target.hwnd(), spec.rect, spec.kind) {
+            if error.is_refusal() {
+                // Said once, not once per pass. `BorderWindow::track` has
+                // already taken the frame off the screen, so recycling the
+                // window is all that is left to do.
+                tracing::info!(
+                    target = %WindowHandle(key),
+                    "no border for this window: it belongs to an elevated process and mochi does                      not, so windows will not let a frame be stacked against it"
+                );
+                self.refused.insert(key);
+                self.recycle(window);
+                return;
+            }
+            // The diff already wrote this spec down as applied, so without
+            // this the next pass would see nothing changed, send nothing, and
+            // the border would stay missing until its window moved.
+            self.diff
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .forget(WindowHandle(key));
             tracing::warn!(target = %WindowHandle(key), %error, "could not draw a border");
         }
         if let Some(duplicate) = self.active.insert(key, window) {
@@ -272,12 +323,19 @@ impl Borders {
 
     /// Takes one border off the screen.
     fn take_down(&mut self, key: isize) {
+        // The refusal goes with it. Windows REUSES window handle values, and
+        // "this one refuses a border" is only true of the window that earned
+        // it: carried past the point where that window left the layout, it
+        // silently denies a border to whatever is created at the same handle
+        // next, for the rest of the session and with nothing logged.
+        self.refused.remove(&key);
         if let Some(window) = self.active.remove(&key) {
             self.recycle(window);
         }
     }
 
     fn clear(&mut self) {
+        self.refused.clear();
         let windows: Vec<BorderWindow> = self.active.drain().map(|(_, window)| window).collect();
         for window in windows {
             self.recycle(window);
