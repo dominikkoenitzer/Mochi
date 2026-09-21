@@ -52,7 +52,7 @@ pub use notification::{Notification, NotificationEvent, SessionChangeKind, Windo
 pub use response::Response;
 
 #[cfg(windows)]
-pub use client::{Error, PIPE_NAME, PIPE_PREFIX, Result, is_running, send, send_to};
+pub use client::{Error, PIPE_NAME, PIPE_PREFIX, PIPE_SUFFIX, Result, is_running, send, send_to};
 #[cfg(windows)]
 pub use subscribe::{Subscription, create_pipe, subscribe, validate_pipe_name};
 
