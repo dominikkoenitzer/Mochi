@@ -466,10 +466,16 @@ pub fn is_manageable_with(w: &WindowInfo, allow_tool_window: bool) -> Result<(),
     // window somebody works in, and giving it a tile takes that tile away from
     // one they can actually use while putting an invisible sheet over it.
     //
-    // A window can ask for a taskbar button and still be click-through, so the
-    // usual exception would let exactly the wrong thing through. A manage rule
-    // can still claim it, which is the right level for "I know what I am
-    // doing" rather than a style bit guessing on the user's behalf.
+    // `WS_EX_APPWINDOW` is deliberately NOT an exception here, and the reason
+    // is the meaning of the two bits rather than any particular window.
+    // `WS_EX_APPWINDOW` asks for a taskbar button; it says nothing about
+    // whether the window can be used. A click-through window with a taskbar
+    // button is still one every click passes through. The exception is right
+    // for the verdicts above, which are about whether a window looks like a
+    // real one, and wrong for this one, which is about whether it can be
+    // touched at all. A manage rule can still claim it, which is the right
+    // level for "I know what I am doing" rather than a style bit guessing on
+    // the user's behalf.
     if w.has_ex_style(ex_style::WS_EX_TRANSPARENT) {
         return Err(Unmanageable::ClickThrough);
     }
@@ -530,9 +536,10 @@ mod tests {
         // is, it is not a window somebody works in, and giving it a tile takes
         // that tile from one they can use and puts an invisible sheet over it.
         //
-        // Measured on a real one: a Tauri overlay at exstyle 0x262424 carries
-        // WS_EX_TRANSPARENT and WS_EX_APPWINDOW together, so unlike the other
-        // soft verdicts this one must NOT bow to the taskbar-button exception.
+        // Unlike the other soft verdicts this one does not bow to the
+        // taskbar-button exception: WS_EX_APPWINDOW asks for a taskbar button
+        // and says nothing about whether the window can be used, so a
+        // click-through window that has one is still unusable.
         let mut overlay = app_window();
         overlay.ex_style |= ex_style::WS_EX_TRANSPARENT;
         assert_eq!(is_manageable(&overlay), Err(Unmanageable::ClickThrough));
