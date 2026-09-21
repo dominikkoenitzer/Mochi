@@ -73,10 +73,20 @@ alt + d                 : focus-last-workspace
 alt + [1,2,3,4,5,6,7,8,9]         : focus-workspace [0,1,2,3,4,5,6,7,8]
 alt + shift + [1,2,3,4,5,6,7,8,9] : move-to-workspace [0,1,2,3,4,5,6,7,8]
 
-# Mochi itself. Game mode pauses tiling and gives the game every key but this
+# Mochi itself.
+#
+# The Pause key turns tiling off and on. One key, because it is the one you
+# reach for when the window manager is in your way, and nothing else on Windows
+# uses it on its own. alt + f12 does the same on a keyboard that has no Pause
+# key. Off means Mochi stops touching windows and leaves them where they are;
+# on puts them back in their tiles. The daemon keeps running either way, which
+# is why the key still works while it is off.
+#
+# Game mode pauses tiling and gives the game every key but this
 # one; press it again to come back.
 alt + shift + g         : toggle-game-mode
-alt + shift + p         : toggle-pause
+pause                   : toggle-pause
+alt + f12               : toggle-pause
 alt + shift + r         : reload-configuration
 alt + shift + w         : retile
 alt + shift + e         : stop
@@ -155,6 +165,22 @@ mod tests {
                 "uncommenting did not give back {key}"
             );
         }
+    }
+
+    #[test]
+    fn turning_tiling_off_and_on_never_needs_more_than_two_keys() {
+        // The binding someone reaches for when the window manager is in the
+        // way. It has to be reachable without looking and without a chord: a
+        // three-key combination to undo something that is actively annoying
+        // you is a design that has not been used in anger.
+        let bindings = Bindings::parse(DEFAULT).expect("the shipped hotkeys parse");
+        let bound = |text: &str| {
+            bindings
+                .get(text.parse::<Trigger>().expect("spelled right"))
+                .map(|binding| binding.source.clone())
+        };
+        assert_eq!(bound("pause").as_deref(), Some("toggle-pause"));
+        assert_eq!(bound("alt + f12").as_deref(), Some("toggle-pause"));
     }
 
     #[test]
