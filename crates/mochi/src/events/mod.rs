@@ -127,13 +127,6 @@ impl WindowEventKind {
             Self::NameChange => "name-change",
         }
     }
-
-    /// True for the flood of events that fire while a window is being dragged.
-    ///
-    /// The loop logs these at trace level so a debug log stays readable.
-    pub const fn is_noisy(self) -> bool {
-        matches!(self, Self::LocationChange)
-    }
 }
 
 impl std::fmt::Display for WindowEventKind {
@@ -259,6 +252,48 @@ pub type EventSender = Sender<Event>;
 /// The receiving half of the one channel the loop listens on.
 pub type EventReceiver = Receiver<Event>;
 
+/// How long a producer thread is given to stop before it is left behind.
+pub(crate) const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Waits for a producer thread to finish, and gives up rather than hanging.
+///
+/// `std` has no timed join, and an unbounded one here is not safe. Each
+/// producer is stopped with `PostThreadMessageW`, which FAILS once the target
+/// thread's message queue is full, and a window storming location-change events
+/// does exactly that. The call then logs the failure and the join blocks on a
+/// thread nothing will ever wake.
+///
+/// The desktop is already restored by the time any of this runs, so the only
+/// thing left to lose is the process exiting. Losing that is not harmless: the
+/// single-instance lock is held until the process dies, so a daemon stuck here
+/// cannot be stopped with `mochic stop` (the pipe is already down) and a fresh
+/// one refuses to start. The user is left killing it from Task Manager.
+///
+/// Dropping the handle detaches the thread; process exit takes it with it.
+pub(crate) fn join_before(
+    handle: std::thread::JoinHandle<()>,
+    deadline: std::time::Duration,
+    what: &str,
+) {
+    let until = std::time::Instant::now() + deadline;
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= until {
+            tracing::error!(
+                thread = what,
+                "did not stop within {:?}, leaving it behind and shutting down anyway",
+                deadline
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if handle.join().is_err() {
+        tracing::error!(thread = what, "the thread panicked");
+    } else {
+        tracing::debug!(thread = what, "stopped");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,13 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn only_location_change_is_marked_noisy() {
-        assert!(WindowEventKind::LocationChange.is_noisy());
-        assert!(!WindowEventKind::Foreground.is_noisy());
-        assert!(!WindowEventKind::Destroyed.is_noisy());
-    }
-
-    #[test]
     fn a_reply_carries_one_response() {
         let (reply, rx) = Reply::channel();
         reply.send(Response::Ok);
@@ -326,5 +354,53 @@ mod tests {
         let (reply, rx) = Reply::channel();
         drop(reply);
         assert!(rx.recv().is_err());
+    }
+
+    #[test]
+    fn a_thread_that_will_not_stop_is_left_behind_rather_than_hung_on() {
+        // The failure this exists for: `PostThreadMessageW` fails once the
+        // target thread's message queue is full, which a window storming
+        // location-change events does, so the thread is never woken and an
+        // unbounded join never returns. The desktop is already restored by
+        // then, so the cost of hanging is a daemon that cannot be stopped and
+        // holds the single-instance lock so a new one cannot start.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let stuck = std::thread::spawn(move || {
+            // Blocks until the sender is dropped, which this test never does
+            // until afterwards. Stands in for a thread with a wedged queue.
+            let _ = rx.recv();
+        });
+
+        let started = std::time::Instant::now();
+        join_before(stuck, std::time::Duration::from_millis(200), "stuck");
+        let waited = started.elapsed();
+
+        assert!(
+            waited < std::time::Duration::from_secs(2),
+            "join_before hung for {waited:?} instead of giving up"
+        );
+        assert!(
+            waited >= std::time::Duration::from_millis(150),
+            "it gave up before the deadline it was given: {waited:?}"
+        );
+        drop(tx);
+    }
+
+    #[test]
+    fn a_thread_that_stops_is_waited_for_properly() {
+        // And the ordinary case still joins rather than detaching: a producer
+        // that stops must be fully finished before its windows are touched.
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&done);
+        let quick = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        join_before(quick, std::time::Duration::from_secs(5), "quick");
+        assert!(
+            done.load(std::sync::atomic::Ordering::SeqCst),
+            "join_before returned before the thread had finished"
+        );
     }
 }

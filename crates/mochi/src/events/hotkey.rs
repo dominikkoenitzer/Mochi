@@ -322,7 +322,16 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
 /// was swallowed the application never saw anything in between. The Win key is
 /// the same sequence with the Start menu. Ctrl and Shift open nothing.
 const fn opens_a_menu(modifiers: Modifiers) -> bool {
-    modifiers.alt || modifiers.win
+    // Not when the chord already carries Ctrl. The mask exists to put
+    // SOMETHING between the modifier going down and coming up, and a Ctrl the
+    // user is physically holding already is that something. Sending the mask
+    // anyway means injecting a Ctrl RELEASE while their finger is still on the
+    // key, which tells the application the modifier is up when it is not: the
+    // mirror image of the latched-key bug the press table exists to prevent.
+    // It also stops Mochi manufacturing the Ctrl+Shift chord Windows reads as
+    // "switch keyboard layout", which every `alt + shift + ...` binding was
+    // producing on a machine with two input methods installed.
+    (modifiers.alt || modifiers.win) && !modifiers.ctrl
 }
 
 /// Gives the application in front one keystroke to see between the modifier
@@ -811,5 +820,44 @@ mod tests {
         for gate in [Gate::All, Gate::GameMode, Gate::Off] {
             assert_eq!(Gate::from_usize(gate.as_usize()), gate);
         }
+    }
+
+    #[test]
+    fn a_chord_that_already_holds_ctrl_is_not_masked() {
+        // The mask injects a Ctrl down and a Ctrl UP so the application sees
+        // something between the modifier going down and coming up. When the
+        // user is already holding Ctrl, that injected release tells the
+        // application the modifier is up while their finger is still on it,
+        // and it manufactures the Ctrl+Shift chord Windows reads as "switch
+        // keyboard layout". A real Ctrl in the chord is already the something
+        // the mask is there to provide.
+        let alt = Modifiers {
+            alt: true,
+            ctrl: false,
+            shift: false,
+            win: false,
+        };
+        let alt_shift = Modifiers { shift: true, ..alt };
+        let ctrl_alt = Modifiers { ctrl: true, ..alt };
+        let win = Modifiers {
+            alt: false,
+            ctrl: false,
+            shift: false,
+            win: true,
+        };
+        let win_ctrl = Modifiers { ctrl: true, ..win };
+        let plain = Modifiers {
+            alt: false,
+            ctrl: false,
+            shift: false,
+            win: false,
+        };
+
+        assert!(opens_a_menu(alt), "alt alone still opens the menu bar");
+        assert!(opens_a_menu(alt_shift), "and so does alt with shift");
+        assert!(opens_a_menu(win), "the win key opens the start menu");
+        assert!(!opens_a_menu(ctrl_alt), "ctrl is already in this chord");
+        assert!(!opens_a_menu(win_ctrl), "and in this one");
+        assert!(!opens_a_menu(plain), "nothing to mask without a modifier");
     }
 }

@@ -157,14 +157,24 @@ impl Visuals {
                     .iter()
                     .map(|update| WindowPlacement::new(hwnd_of(update.handle), update.rect))
                     .collect();
-                if let Err(e) = platform.set_positions(&batch) {
-                    tracing::error!(error = %e, "could not apply an animation frame");
-                }
+                // Borders first, and the order is the whole point. This one
+                // only drops a message in the border thread's channel and
+                // returns, while `set_positions` is synchronous and blocks on
+                // each target application's message pump - `SWP_FRAMECHANGED`
+                // makes every one of them recalculate and repaint its frame
+                // before the call comes back. Moving the window first meant
+                // the border could not even begin to follow until that had
+                // finished, so it trailed its window by the cost of the move,
+                // every frame, on every animation. Posted first, the border
+                // thread does its work while that call is still in flight.
                 if let Ok(guard) = borders.lock()
                     && let Some(manager) = guard.as_ref()
                     && let Err(e) = manager.follow_frame(frame)
                 {
                     tracing::error!(error = %e, "could not move borders to follow a frame");
+                }
+                if let Err(e) = platform.set_positions(&batch) {
+                    tracing::error!(error = %e, "could not apply an animation frame");
                 }
             }) {
                 Ok(animator) => self.animator = Some(animator),
@@ -309,6 +319,21 @@ impl Visuals {
             .copied()
             .filter(|&target| manager.is_faded(handle(target)))
             .collect()
+    }
+
+    /// Forgets what is on screen so the next pass repaints every border.
+    ///
+    /// The daemon calls this when the displays change. A border's stroke and
+    /// corner radius are worked out at the DPI of the screen its rectangle
+    /// lands on, so a window carried across a display change without its
+    /// rectangle changing still needs repainting, and the per-pass diff would
+    /// otherwise see nothing to do and send nothing.
+    pub fn invalidate_borders(&self) {
+        if let Ok(guard) = self.borders.lock()
+            && let Some(manager) = guard.as_ref()
+        {
+            manager.invalidate();
+        }
     }
 
     /// Clears every visual: destroys the border frames, puts every faded
@@ -493,6 +518,10 @@ mod tests {
 
         fn cursor_position(&self) -> anyhow::Result<(i32, i32)> {
             Ok((0, 0))
+        }
+
+        fn is_maximized(&self, _hwnd: Hwnd) -> bool {
+            false
         }
 
         fn set_positions(&self, placements: &[WindowPlacement]) -> anyhow::Result<()> {

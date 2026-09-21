@@ -72,7 +72,19 @@ fn main() -> Result<()> {
     }
 
     // Refuse to be the second window manager in this session.
-    let _instance = single_instance::SingleInstance::acquire()?;
+    //
+    // A dry run is exempt, and has to be: it exists to show a user what Mochi
+    // would make of their desktop, its own help text promises it is safe to
+    // run next to another window manager, and it writes nothing at all. The
+    // one thing it must not do is behave like a second daemon, so below it
+    // also takes no control pipe and binds no keys. Those three together are
+    // what made the blanket refusal necessary in the first place.
+    let _instance = if args.dry_run {
+        tracing::info!("dry run: not taking the single-instance lock, no window will be touched");
+        None
+    } else {
+        Some(single_instance::SingleInstance::acquire()?)
+    };
 
     // The manifest should already have done this; the call is the fallback.
     if !platform::dpi::ensure_per_monitor_v2() {
@@ -119,8 +131,17 @@ fn main() -> Result<()> {
 
     // The keyboard hook comes up after the desktop is tiled, so the first key
     // press cannot arrive before there is a model for it to act on.
-    if args.no_hotkeys {
-        tracing::info!("--no-hotkeys: this daemon binds no keys");
+    if args.no_hotkeys || args.dry_run {
+        // A dry run binding keys would take them from the daemon that is
+        // actually managing the desktop, and every command it ran would be
+        // swallowed anyway, so the user would press a key and watch nothing
+        // happen with no way to tell why.
+        let why = if args.dry_run {
+            "dry run: this daemon binds no keys"
+        } else {
+            "--no-hotkeys: this daemon binds no keys"
+        };
+        tracing::info!("{why}");
     } else {
         let candidates = config::hotkey_candidates(args.hotkeys.as_deref())?;
         manager.start_hotkeys(
@@ -137,7 +158,15 @@ fn main() -> Result<()> {
     if let Some(watcher) = hotkey_watcher.as_ref() {
         tracing::debug!(watching = %watcher.path().display(), "hotkey watcher");
     }
-    let mut pipe = ipc::PipeServer::start(tx.clone())?;
+    // No control pipe for a dry run: the name is shared, so listening on it
+    // would put a `mochic` command through to an observer that swallows it
+    // while the real daemon never hears it. Watching the log is the point.
+    let mut pipe = if args.dry_run {
+        tracing::info!("dry run: no control pipe, use the log to see what mochi makes of things");
+        None
+    } else {
+        Some(ipc::PipeServer::start(tx.clone())?)
+    };
 
     // The loop owns the state until something asks it to stop.
     // A panic on any producer thread stops the daemon instead of leaving it
@@ -170,7 +199,9 @@ fn main() -> Result<()> {
 
     tracing::info!("stopping the producers");
     manager.stop_hotkeys();
-    pipe.stop();
+    if let Some(pipe) = pipe.as_mut() {
+        pipe.stop();
+    }
     drop(hotkey_watcher);
     drop(config_watcher);
     hooks.stop();
