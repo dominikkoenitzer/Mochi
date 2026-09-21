@@ -199,6 +199,7 @@ const CANONICAL: &[(&str, u16)] = &[
     ("launchapp2", 0xB7),       // VK_LAUNCH_APP2
     // Punctuation. Windows calls these OEM keys because the engraving depends
     // on the layout; the names below are the US spelling of each code.
+    ("numlock", 0x90),   // VK_NUMLOCK, the twin of scrolllock below
     ("semicolon", 0xBA), // VK_OEM_1
     ("plus", 0xBB),      // VK_OEM_PLUS
     ("comma", 0xBC),     // VK_OEM_COMMA
@@ -211,6 +212,13 @@ const CANONICAL: &[(&str, u16)] = &[
     ("rbracket", 0xDD),  // VK_OEM_6
     ("quote", 0xDE),     // VK_OEM_7
     ("oem_8", 0xDF),     // VK_OEM_8, unlabelled on a US layout
+    // The extra key an ISO keyboard has and an ANSI one does not: left of Y or
+    // Z on German, Swiss, Austrian and Nordic layouts, left of W on AZERTY,
+    // left of Z on UK and Irish. It is engraved `<>|` on most of them. Every
+    // layout outside the United States has this key, so leaving it out of the
+    // table made it the one physical key on the author's own keyboard that no
+    // hotkey file could name.
+    ("oem_102", 0xE2), // VK_OEM_102
 ];
 
 /// Alternative spellings, each pointing at a code [`CANONICAL`] already names.
@@ -232,6 +240,12 @@ const ALIASES: &[(&str, u16)] = &[
     ("oem_5", 0xDC),  // backslash
     ("oem_6", 0xDD),  // rbracket
     ("oem_7", 0xDE),  // quote
+    // The four the convention spells by code name rather than by symbol, and
+    // which a file imported from another window manager therefore uses.
+    ("oem_plus", 0xBB),   // plus
+    ("oem_comma", 0xBC),  // comma
+    ("oem_minus", 0xBD),  // minus
+    ("oem_period", 0xBE), // period
 ];
 
 #[cfg(test)]
@@ -331,5 +345,15 @@ mod tests {
         assert_eq!(Key::new(0x07).to_string(), "vk(0x07)");
         assert_eq!(Key::new(0xFF).to_string(), "vk(0xFF)");
         assert_eq!(Key::new(0x48).to_string(), "h");
+    }
+
+    #[test]
+    fn the_iso_extra_key_can_be_named() {
+        // The key left of Y or Z on every ISO keyboard, engraved `<>|`. Absent
+        // only from US ANSI, which is the one layout this was written on, so it
+        // was the single physical key on the author's own keyboard that no
+        // hotkey file could reach.
+        assert_eq!(Key::from_name("oem_102"), Some(Key(0xE2)));
+        assert_eq!(Key(0xE2).to_string(), "oem_102");
     }
 }

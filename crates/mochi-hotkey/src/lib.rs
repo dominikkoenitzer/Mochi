@@ -36,6 +36,8 @@ mod trigger;
 
 pub use default::DEFAULT;
 pub use key::Key;
-pub use parse::{Action, Binding, Bindings, ParseError, ParseErrors, command_from_words};
+pub use parse::{
+    Action, Binding, Bindings, ParseError, ParseErrors, command_from_words, shell_fallback_reason,
+};
 pub use shell::Shell;
 pub use trigger::{Modifiers, Trigger};

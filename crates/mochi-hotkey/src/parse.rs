@@ -341,6 +341,39 @@ pub fn command_from_words(words: &[String]) -> Result<Command, String> {
     mochi_client::cli::command_from_args(words)
 }
 
+/// Why a line that names a Mochi command is going to be run as a shell command.
+///
+/// The parser deliberately falls back to the shell when the first word is a
+/// real subcommand but the rest does not parse, because a user is allowed to
+/// bind any command line they like and Mochi must not claim a name it does not
+/// own. The cost is that a TYPO in a Mochi command looks exactly like a
+/// deliberate shell binding: `focus nowhere` becomes `cmd /c focus nowhere`,
+/// which fails silently every time the key is pressed, with nothing anywhere
+/// saying why.
+///
+/// This gives a checker the missing sentence. `None` for a line that is not
+/// trying to be a Mochi command at all, which is the ordinary shell binding.
+#[must_use]
+pub fn shell_fallback_reason(line: &str) -> Option<String> {
+    let words = split_words(line);
+    let first = words.first()?;
+    if first.eq_ignore_ascii_case("mochic") || first.eq_ignore_ascii_case("mochic.exe") {
+        // An explicit `mochic` prefix never falls back; it is an error instead.
+        return None;
+    }
+    if !is_subcommand(first) {
+        return None;
+    }
+    // `start` is a Mochi subcommand AND the Windows command for launching a
+    // program, so `start wt` is a perfectly good terminal launcher that happens
+    // to collide. The grammar already knows which names a key can be bound to,
+    // so ask it rather than keeping a list of exceptions here.
+    if !mochi_client::cli::is_bindable_subcommand(first) {
+        return None;
+    }
+    command_from_words(&words).err()
+}
+
 /// True when `word` names a subcommand of the `mochic` grammar.
 ///
 /// The names come from clap itself rather than a list kept here by hand, so a
@@ -979,5 +1012,39 @@ mod tests {
         assert_eq!(Shell::Pwsh.to_string(), "pwsh");
         assert_eq!("BASH".parse::<Shell>().unwrap(), Shell::Bash);
         assert!("fish".parse::<Shell>().is_err());
+    }
+
+    #[test]
+    fn a_typo_in_a_mochi_command_is_told_apart_from_a_shell_binding() {
+        // The parser deliberately falls back to the shell when the first word
+        // is a Mochi command and the rest does not parse, because a user may
+        // bind any command line they like. The cost is that `focus nowhere`
+        // becomes `cmd /c focus nowhere` and fails silently on every press.
+        assert!(
+            shell_fallback_reason("focus nowhere").is_some(),
+            "a typo in a real command should be reported"
+        );
+        assert!(
+            shell_fallback_reason("resize-edge left grow").is_some(),
+            "a bad argument should be reported too"
+        );
+
+        // And these must stay silent, or every hotkey file is full of noise.
+        assert!(
+            shell_fallback_reason("explorer.exe").is_none(),
+            "an ordinary shell binding is not a typo"
+        );
+        assert!(
+            shell_fallback_reason("focus left").is_none(),
+            "a command that parses is not a typo"
+        );
+        assert!(
+            shell_fallback_reason("start wt").is_none(),
+            "`start` is the Windows launcher as well as a Mochi subcommand, and              `start wt` is a terminal launcher, not a mistake"
+        );
+        assert!(
+            shell_fallback_reason("").is_none(),
+            "an empty line has nothing to say about"
+        );
     }
 }

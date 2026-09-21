@@ -44,8 +44,11 @@ impl Modifiers {
 
     /// How many modifiers are held.
     ///
-    /// The hook uses it to prefer the most specific binding when two could
-    /// match, and the parser uses it to spot a trigger with no modifier.
+    /// The parser uses it to spot a trigger with no modifier. It described a
+    /// specificity rule in the hook as well until 2026-09-21, and there has
+    /// never been one: a press builds one exact trigger and looks it up once,
+    /// so a chord with a modifier the binding does not name is passed straight
+    /// through to the application rather than matched loosely.
     pub fn count(self) -> u32 {
         u32::from(self.alt) + u32::from(self.ctrl) + u32::from(self.shift) + u32::from(self.win)
     }
