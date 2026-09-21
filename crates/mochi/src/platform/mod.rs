@@ -127,6 +127,18 @@ pub trait Platform: Send + Sync {
     /// cross-process calls per event. `IsZoomed` is a flag read.
     fn is_maximized(&self, hwnd: Hwnd) -> bool;
 
+    /// Whether the window is on screen right now: visible, and not cloaked.
+    ///
+    /// Its own call for the same reason as [`Platform::is_maximized`]: this is
+    /// asked about every window that should be on screen, on every event, and
+    /// reading a whole [`WindowInfo`] there would cost a process handle open
+    /// and a dozen cross-process calls each time. Both halves are flag reads.
+    ///
+    /// A handle that is no longer a window answers `true`, so that a window
+    /// which has simply died is left to the destroy path rather than being
+    /// swept up here.
+    fn is_on_screen(&self, hwnd: Hwnd) -> bool;
+
     /// Windows that have turned a call down since this was last asked, and so
     /// can no longer be tiled.
     ///

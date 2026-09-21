@@ -740,6 +740,16 @@ impl Platform for Win32Platform {
         unsafe { IsZoomed(hwnd(h)) }.as_bool()
     }
 
+    fn is_on_screen(&self, h: Hwnd) -> bool {
+        let handle = hwnd(h);
+        // SAFETY: IsWindow and IsWindowVisible tolerate any handle value.
+        if !unsafe { IsWindow(Some(handle)) }.as_bool() {
+            // Gone, not hidden. The destroy path owns this.
+            return true;
+        }
+        unsafe { IsWindowVisible(handle) }.as_bool() && !dwm_cloaked(handle)
+    }
+
     fn take_unreachable(&self) -> Vec<Hwnd> {
         std::mem::take(&mut *UNREPORTED.write().unwrap_or_else(PoisonError::into_inner))
     }

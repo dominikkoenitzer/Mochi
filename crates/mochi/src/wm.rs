@@ -1166,6 +1166,38 @@ impl WindowManager {
         }
     }
 
+    /// Lets go of a window that has gone off screen without Mochi hiding it.
+    ///
+    /// Mochi drops a managed window when it is told the cloak or the hide
+    /// happened. That notice can be missed: it arrives while the daemon is
+    /// starting, or something takes the window away in a manner that raises no
+    /// event Mochi is watching. The model then holds a tile for a window
+    /// nobody can see, the layout goes on reserving its share of the screen,
+    /// and the desktop shows the remaining windows squeezed around a hole.
+    ///
+    /// Seen on a real desktop: three windows tiled as a half and two quarters
+    /// with one quarter empty, because a shell-cloaked window still held it.
+    /// `restore-windows` could not help, because Mochi had no record of hiding
+    /// it and it was not Mochi that had.
+    ///
+    /// Only the windows that are supposed to be on screen are asked about,
+    /// which is the focused workspace of each monitor, and the question is two
+    /// flag reads. A window Mochi hid itself is skipped: that one is off
+    /// screen on purpose and is written down.
+    fn drop_vanished_windows(&mut self) {
+        let vanished: Vec<Hwnd> = self
+            .core
+            .visible_window_ids()
+            .into_iter()
+            .map(handle)
+            .filter(|hwnd| !self.we_hid(*hwnd) && !self.minimized.contains(hwnd))
+            .filter(|hwnd| !self.platform.is_on_screen(*hwnd))
+            .collect();
+        for hwnd in vanished {
+            self.unmanage(hwnd, "off screen, and not by us");
+        }
+    }
+
     /// Drops a window from the model, whatever the reason.
     fn unmanage(&mut self, hwnd: Hwnd, why: &str) {
         let id = window_id(hwnd);
@@ -1648,6 +1680,7 @@ impl WindowManager {
 
     fn on_event(&mut self, event: Event) -> Flow {
         self.drop_unreachable_windows();
+        self.drop_vanished_windows();
         match event {
             Event::Window { kind, hwnd } => {
                 self.on_window_event(kind, hwnd);
@@ -3711,6 +3744,16 @@ mod tests {
         fn is_maximized(&self, hwnd: Hwnd) -> bool {
             self.zoomed.lock().unwrap().contains(&hwnd)
         }
+        fn is_on_screen(&self, hwnd: Hwnd) -> bool {
+            // A handle the fake desktop no longer holds answers true, the way
+            // the real one does: that window is gone, not hidden.
+            self.windows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|w| w.hwnd == hwnd)
+                .is_none_or(|w| w.visible && !w.cloaked)
+        }
         fn set_positions(&self, placements: &[WindowPlacement]) -> Result<()> {
             // The real platform falls back to one window at a time when a
             // batch is refused, so the windows it can move still move and only
@@ -4964,6 +5007,66 @@ alt + j : focus down
         assert_eq!(
             wm.foreground, None,
             "the daemon still believes a cloaked window holds the keyboard"
+        );
+    }
+
+    #[test]
+    fn a_window_cloaked_behind_mochis_back_does_not_keep_its_tile() {
+        // Measured on his desktop: three windows tiled as a half and two
+        // quarters, one quarter empty, because a shell-cloaked window still
+        // held it. `mochic restore-windows` could not help -- Mochi had no
+        // record of hiding it, because it was not Mochi that hid it. Whatever
+        // took the window away raised no event Mochi acted on, and the model
+        // went on reserving a share of the screen for a window nobody could
+        // see, squeezing the other two around a hole.
+        let (mut wm, platform) = manager(vec![
+            window(1, "Editor"),
+            window(2, "Browser"),
+            window(3, "Chat"),
+        ]);
+        assert!(wm.state().is_managed(window_id(Hwnd(3))));
+
+        // Cloaked by something that is not Mochi, with nothing written down.
+        for info in platform.windows.lock().unwrap().iter_mut() {
+            if info.hwnd == Hwnd(3) {
+                info.cloaked = true;
+            }
+        }
+        assert!(!wm.we_hid(Hwnd(3)), "the test cloaked it, not Mochi");
+
+        wm.on_event(Event::Window {
+            kind: WindowEventKind::Foreground,
+            hwnd: Hwnd(1),
+        });
+
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(3))),
+            "a window that is off screen still holds a tile"
+        );
+        assert!(
+            wm.state().is_managed(window_id(Hwnd(1)))
+                && wm.state().is_managed(window_id(Hwnd(2))),
+            "the windows that are still on screen were swept up too"
+        );
+    }
+
+    #[test]
+    fn a_window_mochi_hid_itself_keeps_its_place() {
+        // The other side of the guard. Switching workspace takes every window
+        // of the old one off screen on purpose, and those are written down.
+        // Sweeping them up here would unmanage the whole workspace the moment
+        // the user left it.
+        let (mut wm, _platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+
+        wm.on_event(Event::Window {
+            kind: WindowEventKind::Foreground,
+            hwnd: Hwnd(1),
+        });
+
+        assert!(
+            wm.state().is_managed(window_id(Hwnd(1))),
+            "a window Mochi took off screen itself was forgotten"
         );
     }
 
