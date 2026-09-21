@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use mochi_core::model::HidingBehaviour;
 use serde::{Deserialize, Serialize};
 
-use crate::platform::{Hwnd, Platform, ShowState};
+use crate::platform::{CloakUnsupported, Hwnd, Platform, ShowState};
 
 /// One window that was off screen when the file was written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,7 +269,19 @@ pub fn recover(platform: &dyn Platform, path: &Path) -> Recovered {
                 }
                 true
             }
-            Err(_) if platform.outranks_us(hwnd) => {
+            // Two ways this is permanent rather than bad luck, and both
+            // mean every start from here will fail the same way.
+            //
+            // `CloakUnsupported`: the shell has no application view for
+            // the window, so the only cloak left to try is DWM's, and DWM
+            // only cloaks windows of the calling process. The window was
+            // put away through the shell by a session that could, and
+            // nothing this process can call will undo it.
+            //
+            // `outranks_us`: the window belongs to an elevated process and
+            // this session is not elevated, so Windows refuses on sight.
+            Err(ref e) if e.downcast_ref::<CloakUnsupported>().is_some()
+                || platform.outranks_us(hwnd) => {
                 // Refused today and at every start after: the previous session
                 // hid this while it had the rights to and this one does not.
                 // It happens when Mochi is started once from an administrator

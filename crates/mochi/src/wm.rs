@@ -425,7 +425,11 @@ pub fn restore(platform: &dyn Platform, hidden: &Mutex<Hidden>) {
             // what `mochic stop` keeps its promises from, and a promise that
             // can never be kept is worse than an honest refusal: it hides the
             // one window the user actually has to go and rescue by hand.
-            if platform.outranks_us(hwnd) {
+            // Permanent either way: `CloakUnsupported` means the shell has
+            // no application view for this window and DWM only cloaks
+            // windows of the calling process, so nothing left to call can
+            // undo it; `outranks_us` means Windows refuses on sight.
+            if e.downcast_ref::<CloakUnsupported>().is_some() || platform.outranks_us(hwnd) {
                 tracing::warn!(
                     %hwnd,
                     "restore: mochi took this window off screen and can no longer put it back,                      because the window now outranks it. Bring it back from the taskbar or with                      alt+tab. Mochi is letting go of it rather than promising again"
