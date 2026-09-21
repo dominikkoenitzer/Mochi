@@ -55,8 +55,22 @@ fn run(cli: Cli) -> Result<()> {
             dry_run,
         } => return start(config.as_deref(), hotkeys.as_deref(), no_hotkeys, dry_run),
         Cmd::Quickstart => return quickstart(),
-        Cmd::Schema => {
-            println!("{}", mochi_core::config::json_schema());
+        Cmd::Schema { ref output } => {
+            let schema = mochi_core::config::json_schema();
+            // Written here rather than left to the shell. `mochic schema >
+            // mochi.schema.json` under Windows PowerShell 5.1, which is what
+            // `powershell.exe` still is on Windows 11, produces UTF-16LE with
+            // a byte order mark, and the result is not JSON: every editor and
+            // every parser rejects the file the documentation just told the
+            // user to create. Writing it ourselves takes the shell out of it.
+            match output {
+                Some(path) => {
+                    std::fs::write(path, schema.as_bytes())
+                        .with_context(|| format!("could not write {}", path.display()))?;
+                    println!("wrote {}", path.display());
+                }
+                None => println!("{schema}"),
+            }
             return Ok(());
         }
         Cmd::Subscribe { ref name } => return subscribe(name),

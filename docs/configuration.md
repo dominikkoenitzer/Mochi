@@ -16,8 +16,60 @@ altogether. Both are spelled out below.
 Write the current schema next to the config and point `$schema` at it:
 
 ```
-mochic schema > mochi.schema.json
+mochic schema --output mochi.schema.json
 ```
+
+Use `--output` rather than redirecting with `>`. Windows PowerShell 5.1, which
+is what `powershell.exe` still is on Windows 11, writes a redirect as UTF-16
+with a byte order mark, and the result is not JSON: every editor and every
+parser rejects it. `--output` writes the file itself, as UTF-8, whatever shell
+you are in.
+
+## The smallest file that works
+
+Everything below has a default, so a config can be as short as this. Copy it
+into `%USERPROFILE%\mochi.json` and change one thing at a time:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/schema.json",
+  "default_workspace_padding": 10,
+  "default_container_padding": 10,
+  "border": true,
+  "border_width": 4,
+  "monitors": [
+    {
+      "workspaces": [
+        { "name": "web", "layout": "BSP" },
+        { "name": "code", "layout": "BSP" }
+      ]
+    }
+  ],
+  "ignore_rules": [
+    { "kind": "Exe", "id": "Taskmgr.exe", "matching_strategy": "Equals" }
+  ]
+}
+```
+
+`mochic check` reads a file and says what is wrong with it, without starting
+anything, and it names the line and the column. Run it after every edit.
+
+## Words this file uses
+
+| Word | Means |
+|---|---|
+| daemon | The `mochi.exe` process that does the tiling. `mochic` only talks to it. |
+| container | One slot in the layout. It holds one window, or several as a stack. Padding and resizing are about containers, not windows. |
+| workspace | One set of containers on one monitor. Switching workspace takes every window of the old one off screen. Nine per monitor. |
+| stack | Several windows sharing one container, one visible at a time, cycled with a key. |
+| BSP | Binary space partitioning, the default layout: each new window splits the space of the one it lands next to, so windows halve as you add them. |
+| the ring | The containers of a workspace in creation order. `cycle-focus` steps along it by position, which is what a layout with no obvious left and right needs. |
+| monocle | One window filling the whole workspace, the others still there underneath. |
+| float | A window left at its own size and position, ignored by the layout, drawn above the tiled ones. |
+| cloak | Hiding a window the way Windows hides the windows of another virtual desktop. The default way Mochi takes a window off screen; it is invisible but not minimized, so the application does not know. |
+| work area | The part of a monitor left after the taskbar. Tiles never cover the taskbar. |
+
+
 
 ## Top level
 
