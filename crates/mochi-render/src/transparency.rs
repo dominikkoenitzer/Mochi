@@ -32,8 +32,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use windows::Win32::Foundation::{COLORREF, HWND};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetWindowLongPtrW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW,
-    WINDOW_EX_STYLE, WS_EX_LAYERED,
+    GWL_EXSTYLE, GetLayeredWindowAttributes, GetWindowLongPtrW, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+    LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongPtrW, WINDOW_EX_STYLE, WS_EX_LAYERED,
 };
 
 use crate::{Result, WindowHandle};
@@ -49,6 +49,32 @@ pub const OPAQUE: u8 = 255;
 #[must_use]
 pub fn is_layered(hwnd: HWND) -> bool {
     crate::win::ex_style(hwnd).contains(WS_EX_LAYERED)
+}
+
+/// The alpha a layered window currently carries, if it has one to read.
+///
+/// `GetLayeredWindowAttributes` fails for a window that is not layered, and
+/// for one whose transparency was set through `UpdateLayeredWindow` instead,
+/// which is the shape most windows that composite themselves use.
+#[must_use]
+pub fn alpha_of(hwnd: HWND) -> Option<u8> {
+    if !is_layered(hwnd) {
+        return None;
+    }
+    let mut key = COLORREF::default();
+    let mut alpha = 0u8;
+    let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS::default();
+    // SAFETY: all three out parameters are live stack slots and the call
+    // tolerates any window handle, failing rather than misbehaving.
+    let ok = unsafe {
+        GetLayeredWindowAttributes(
+            hwnd,
+            Some(&raw mut key),
+            Some(&raw mut alpha),
+            Some(&raw mut flags),
+        )
+    };
+    (ok.is_ok() && flags.contains(LWA_ALPHA)).then_some(alpha)
 }
 
 /// Fades a window to `alpha`, where 0 is invisible and 255 is opaque.
@@ -180,6 +206,23 @@ pub trait WindowAlpha {
     ///
     /// When the window has gone away or refuses the style.
     fn clear_alpha(&self, handle: WindowHandle) -> Result<()>;
+
+    /// The alpha currently set on the window, if it is layered and the value
+    /// can be read.
+    ///
+    /// Used to tell a window a previous Mochi left faded from one that is
+    /// layered because it composites itself.
+    fn alpha_of(&self, handle: WindowHandle) -> Option<u8>;
+
+    /// Whether the handle still refers to a live window.
+    ///
+    /// The manager needs this to tell the two failures apart. A window that
+    /// refuses to be put back is still on screen and still translucent, so
+    /// somebody has to keep hold of it and try again; a window that has been
+    /// CLOSED can never be put back, and holding on to it means retrying a
+    /// dead handle and logging the failure on every pass for the rest of the
+    /// session.
+    fn exists(&self, handle: WindowHandle) -> bool;
 }
 
 /// The real window operations.
@@ -189,6 +232,14 @@ pub struct Win32Alpha;
 impl WindowAlpha for Win32Alpha {
     fn is_layered(&self, handle: WindowHandle) -> bool {
         is_layered(handle.hwnd())
+    }
+
+    fn exists(&self, handle: WindowHandle) -> bool {
+        crate::win::is_window(handle.hwnd())
+    }
+
+    fn alpha_of(&self, handle: WindowHandle) -> Option<u8> {
+        alpha_of(handle.hwnd())
     }
 
     fn set_alpha(&self, handle: WindowHandle, alpha: u8) -> Result<()> {
@@ -216,6 +267,14 @@ pub struct TransparencyManager<A: WindowAlpha = Win32Alpha> {
     faded: BTreeMap<isize, u8>,
     /// The windows that were layered before this manager saw them.
     foreign: BTreeSet<isize>,
+    /// The windows Windows will not let this process touch at all.
+    ///
+    /// Separate from `foreign` because the reason is different and so is the
+    /// remedy: a foreign window is one somebody else is compositing, this one
+    /// is refused outright because it belongs to an elevated process. Both end
+    /// the same way, in being left alone for good, and both have to be, or one
+    /// such window costs a failed call and a log line on every focus change.
+    refused: BTreeSet<isize>,
 }
 
 impl TransparencyManager<Win32Alpha> {
@@ -235,6 +294,7 @@ impl<A: WindowAlpha> TransparencyManager<A> {
             backend,
             faded: BTreeMap::new(),
             foreign: BTreeSet::new(),
+            refused: BTreeSet::new(),
         }
     }
 
@@ -269,6 +329,28 @@ impl<A: WindowAlpha> TransparencyManager<A> {
         self.foreign.contains(&handle.0)
     }
 
+    /// True when Windows has refused to let this process touch the window.
+    #[must_use]
+    pub fn is_refused(&self, handle: WindowHandle) -> bool {
+        self.refused.contains(&handle.0)
+    }
+
+    /// Drops the "leave this one alone" entries whose window has gone.
+    ///
+    /// Both sets say "never touch this handle again", and Windows REUSES
+    /// window handles. Without this, a window that was refused or was already
+    /// layered poisons its handle value for the rest of the session: whatever
+    /// window is created at that value next is silently never faded, with
+    /// nothing logged and nothing to notice. The entries only mean anything
+    /// while the window they were made for is alive.
+    fn forget_dead_windows(&mut self) {
+        let backend = &self.backend;
+        self.refused
+            .retain(|&key| backend.exists(WindowHandle(key)));
+        self.foreign
+            .retain(|&key| backend.exists(WindowHandle(key)));
+    }
+
     /// Fades everything in `unfocused` and puts everything else back.
     ///
     /// A window that is already faded to the same alpha costs nothing, so this
@@ -283,23 +365,50 @@ impl<A: WindowAlpha> TransparencyManager<A> {
     /// dealt with.
     pub fn update(&mut self, unfocused: &[WindowHandle]) -> Result<()> {
         let mut failure = None;
+        self.forget_dead_windows();
         let wanted: BTreeSet<isize> = unfocused.iter().map(|handle| handle.0).collect();
 
         for handle in unfocused {
-            if self.foreign.contains(&handle.0) {
+            if self.foreign.contains(&handle.0) || self.refused.contains(&handle.0) {
                 continue;
             }
             if self.faded.get(&handle.0) == Some(&self.alpha) {
                 continue;
             }
             if !self.faded.contains_key(&handle.0) && self.backend.is_layered(*handle) {
-                // Somebody else owns this window's compositing.
+                // Layered, and this manager did not do it. Two very different
+                // situations wear that description, and treating them the same
+                // is what left windows permanently translucent.
+                //
+                // A window carrying EXACTLY the alpha this manager would set is
+                // almost certainly one a previous Mochi faded and never put
+                // back: a crash, a kill, a failed clear, or a daemon restart
+                // while it was unfocused. Adopted here, so that the moment it
+                // takes the focus, or transparency is turned off, the ordinary
+                // clear path puts it back. Left as foreign it would be skipped
+                // for ever, by this session and by every session after it,
+                // with no command able to fix it and nothing logged.
+                //
+                // Anything else really is compositing itself, and must be left
+                // alone: taking the style off one of those breaks it.
+                if self.backend.alpha_of(*handle) == Some(self.alpha) {
+                    self.faded.insert(handle.0, self.alpha);
+                    continue;
+                }
                 self.foreign.insert(handle.0);
                 continue;
             }
             match self.backend.set_alpha(*handle, self.alpha) {
                 Ok(()) => {
                     self.faded.insert(handle.0, self.alpha);
+                }
+                Err(error) if error.is_refusal() => {
+                    // Not a failure: this window can never be faded, and it
+                    // was never layered by us, so there is nothing left in a
+                    // state nobody is tracking. Writing it down is the whole
+                    // fix - retrying costs a call and an error line on every
+                    // focus change for as long as the window is open.
+                    self.refused.insert(handle.0);
                 }
                 Err(error) => {
                     // Whatever alpha this manager set on an earlier pass is
@@ -320,6 +429,20 @@ impl<A: WindowAlpha> TransparencyManager<A> {
         for key in stale {
             match self.backend.clear_alpha(WindowHandle(key)) {
                 Ok(()) => {
+                    self.faded.remove(&key);
+                }
+                // A window that refuses the call was never faded by this
+                // manager in the first place, so there is nothing to put back
+                // and nothing to keep hold of.
+                Err(error) if error.is_refusal() => {
+                    self.refused.insert(key);
+                    self.faded.remove(&key);
+                }
+                // A window that has been closed can never be put back, and
+                // there is nothing left to put back: the alpha went with it.
+                // Keeping it would retry a dead handle and log the failure on
+                // every focus change for the rest of the session.
+                Err(_) if !self.backend.exists(WindowHandle(key)) => {
                     self.faded.remove(&key);
                 }
                 // The window is still faded, so it stays in the bookkeeping
@@ -354,12 +477,21 @@ impl<A: WindowAlpha> TransparencyManager<A> {
         let mut still_faded = BTreeMap::new();
         for (key, alpha) in std::mem::take(&mut self.faded) {
             if let Err(error) = self.backend.clear_alpha(WindowHandle(key)) {
+                // A window that has gone is not one that could not be put
+                // back. Carrying it would hand the next session a restore
+                // record naming a handle Windows has already reused.
+                if !self.backend.exists(WindowHandle(key)) {
+                    continue;
+                }
                 still_faded.insert(key, alpha);
                 failure.get_or_insert(error);
             }
         }
         self.faded = still_faded;
         self.foreign.clear();
+        // Deliberately not cleared: a refusal is about this process's
+        // privileges, not about anything the manager did, so it survives a
+        // restore exactly as it survives a focus change.
 
         match failure {
             Some(error) => Err(error),
@@ -395,6 +527,17 @@ mod tests {
     const DEAD: WindowHandle = WindowHandle(0x4444);
     /// A window that takes an alpha but never gives it back.
     const STUCK: WindowHandle = WindowHandle(0x5555);
+    /// A window Windows refuses outright, the way an elevated one does.
+    const ELEVATED: WindowHandle = WindowHandle(0x6666);
+    /// A window that took an alpha and was then closed by the user.
+    const CLOSED: WindowHandle = WindowHandle(0x7777);
+
+    /// The error Windows gives for a window this process may not touch.
+    fn refusal() -> crate::RenderError {
+        crate::RenderError::Win32(windows::core::Error::from_hresult(
+            windows::Win32::Foundation::E_ACCESSDENIED,
+        ))
+    }
 
     /// What a fake window did, so a test can assert on the calls themselves
     /// rather than on the bookkeeping only.
@@ -411,6 +554,11 @@ mod tests {
         calls: RefCell<Vec<Call>>,
         /// Windows that refuse a new alpha from now on, on top of [`DEAD`].
         refusing: RefCell<BTreeSet<isize>>,
+        /// Windows that have been closed, so their handle is free to be reused.
+        gone: RefCell<BTreeSet<isize>>,
+        /// Windows that are already layered, and the alpha they carry: what a
+        /// previous session leaves behind, or a window compositing itself.
+        stranded: RefCell<BTreeMap<isize, u8>>,
     }
 
     impl Fake {
@@ -431,15 +579,38 @@ mod tests {
         fn allow(&self, handle: WindowHandle) {
             self.refusing.borrow_mut().remove(&handle.0);
         }
+
+        /// Leaves the window layered at `alpha`, the way a previous session
+        /// that never put it back does.
+        fn strand(&self, handle: WindowHandle, alpha: u8) {
+            self.stranded.borrow_mut().insert(handle.0, alpha);
+        }
+
+        /// Closes the window, the way a user does. The handle value is now
+        /// free for Windows to hand to something else.
+        fn close(&self, handle: WindowHandle) {
+            self.gone.borrow_mut().insert(handle.0);
+        }
     }
 
     impl WindowAlpha for &Fake {
         fn is_layered(&self, handle: WindowHandle) -> bool {
-            handle == OWN
+            handle == OWN || self.stranded.borrow().contains_key(&handle.0)
+        }
+
+        fn exists(&self, handle: WindowHandle) -> bool {
+            handle != CLOSED && !self.gone.borrow().contains(&handle.0)
+        }
+
+        fn alpha_of(&self, handle: WindowHandle) -> Option<u8> {
+            self.stranded.borrow().get(&handle.0).copied()
         }
 
         fn set_alpha(&self, handle: WindowHandle, alpha: u8) -> Result<()> {
             self.calls.borrow_mut().push(Call::Set(handle.0, alpha));
+            if handle == ELEVATED {
+                return Err(refusal());
+            }
             if handle == DEAD || self.refusing.borrow().contains(&handle.0) {
                 return Err(crate::RenderError::ThreadGone("fake window"));
             }
@@ -448,10 +619,180 @@ mod tests {
 
         fn clear_alpha(&self, handle: WindowHandle) -> Result<()> {
             self.calls.borrow_mut().push(Call::Clear(handle.0));
-            if handle == STUCK {
+            if handle == STUCK || handle == CLOSED {
                 return Err(crate::RenderError::ThreadGone("fake window"));
             }
             Ok(())
+        }
+    }
+
+    #[test]
+    fn a_window_a_previous_session_left_faded_is_adopted_and_can_be_put_back() {
+        // What a crash, a kill, a failed clear, or a daemon restart while the
+        // window was unfocused leaves behind: still layered, still carrying
+        // this manager's alpha, and nothing left that knows about it. A fresh
+        // manager has an empty `faded` map, so it used to file the window as
+        // somebody else's compositing and never touch it again - not this
+        // session and not any session after it. The window stayed translucent
+        // for ever and no command could fix it.
+        let fake = Fake::default();
+        fake.strand(A, 235);
+
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        manager.update(&[A]).unwrap();
+
+        assert!(!manager.is_foreign(A), "a window of ours was written off");
+        assert!(
+            manager.is_faded(A),
+            "it should be this manager's to put back"
+        );
+
+        // And now the ordinary path can put it back: it takes the focus, so it
+        // leaves the unfocused set.
+        fake.forget();
+        manager.update(&[]).unwrap();
+        assert_eq!(
+            *fake.calls(),
+            vec![Call::Clear(A.0)],
+            "it was never cleared"
+        );
+        assert!(!manager.is_faded(A));
+    }
+
+    #[test]
+    fn a_window_compositing_itself_is_still_left_alone() {
+        // The other half, and why the check is on the exact alpha rather than
+        // on the style: this window is layered at an alpha that is not ours, so
+        // it belongs to whatever drew it. Adopting it would mean taking the
+        // style off something that needs it. An NVIDIA overlay sits at alpha 0
+        // for exactly this reason.
+        let fake = Fake::default();
+        fake.strand(B, 0);
+
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        manager.update(&[B]).unwrap();
+
+        assert!(manager.is_foreign(B), "a foreign window was adopted");
+        assert!(!manager.is_faded(B));
+        assert!(fake.calls().is_empty(), "a foreign window was written to");
+    }
+
+    #[test]
+    fn a_refusal_does_not_outlive_the_window_that_earned_it() {
+        // Windows REUSES window handle values. "Never touch this handle again"
+        // is only true while the window that earned it is alive; carried past
+        // its death, it silently poisons that handle value for the rest of the
+        // session and whatever window is created at it next is never faded,
+        // with nothing logged and nothing to notice.
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+
+        manager.update(&[ELEVATED]).unwrap();
+        assert!(manager.is_refused(ELEVATED));
+
+        fake.close(ELEVATED);
+        manager.update(&[A]).unwrap();
+        assert!(
+            !manager.is_refused(ELEVATED),
+            "the refusal outlived the window it was made for"
+        );
+    }
+
+    #[test]
+    fn being_already_layered_does_not_outlive_the_window_either() {
+        // The same hazard on the older of the two sets: a window that was
+        // layered before Mochi saw it is left alone for good, and that verdict
+        // must not be inherited by whatever takes its handle next.
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+
+        manager.update(&[OWN]).unwrap();
+        assert!(manager.is_foreign(OWN));
+
+        fake.close(OWN);
+        manager.update(&[A]).unwrap();
+        assert!(
+            !manager.is_foreign(OWN),
+            "the verdict outlived the window it was made for"
+        );
+    }
+
+    #[test]
+    fn a_faded_window_that_gets_closed_is_let_go_of() {
+        // A window is faded, then the user closes it while it is still in the
+        // unfocused set. Putting it back fails, because there is nothing left
+        // to put back. Held on to, the manager retries a dead handle and logs
+        // the failure on every focus change for the rest of the session - and
+        // hands the crash record a handle Windows is free to reuse.
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+
+        manager.update(&[A, CLOSED]).unwrap();
+        assert_eq!(manager.faded_count(), 2);
+
+        // CLOSED takes the focus, so it is the one the manager tries to put
+        // back - except it is gone by now.
+        fake.forget();
+        manager
+            .update(&[A])
+            .expect("a window that no longer exists is not a failure to report");
+        assert_eq!(*fake.calls(), vec![Call::Clear(CLOSED.0)], "tried once");
+        assert!(!manager.is_faded(CLOSED), "the dead handle was kept");
+        assert_eq!(manager.faded_count(), 1, "only A is still faded");
+
+        for _ in 0..5 {
+            fake.forget();
+            manager.update(&[A]).unwrap();
+            assert!(fake.calls().is_empty(), "the dead handle was tried again");
+        }
+    }
+
+    #[test]
+    fn a_window_that_is_still_there_but_refuses_is_kept_for_another_try() {
+        // The other half, and the reason the two cannot be collapsed: this
+        // window IS still on screen and IS still translucent, so letting go of
+        // it would leave it faded with nothing left that knows to put it back.
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+        manager.update(&[A, STUCK]).unwrap();
+
+        manager
+            .update(&[A])
+            .expect_err("a stuck window is reported");
+        assert!(
+            manager.is_faded(STUCK),
+            "a window still on screen was forgotten while still translucent"
+        );
+    }
+
+    #[test]
+    fn a_window_windows_refuses_is_tried_once_and_never_again() {
+        // An elevated window while Mochi is not elevated. It can never be
+        // faded, and it was never layered by this manager, so there is nothing
+        // to put back and nothing to report. Retrying it is the whole problem:
+        // before this, one such window on screen cost a failed Win32 call and
+        // an ERROR line on every single focus change.
+        let fake = Fake::default();
+        let mut manager = TransparencyManager::with_backend(235, &fake);
+
+        manager
+            .update(&[A, ELEVATED])
+            .expect("a refusal is not a failure to report");
+        assert_eq!(
+            *fake.calls(),
+            vec![Call::Set(A.0, 235), Call::Set(ELEVATED.0, 235)],
+            "it has to be tried once to find out"
+        );
+        assert!(manager.is_refused(ELEVATED));
+        assert!(!manager.is_faded(ELEVATED));
+
+        for _ in 0..5 {
+            fake.forget();
+            manager.update(&[A, ELEVATED]).unwrap();
+            assert!(
+                fake.calls().is_empty(),
+                "the refused window was asked again"
+            );
         }
     }
 

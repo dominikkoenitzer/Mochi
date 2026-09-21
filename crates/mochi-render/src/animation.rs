@@ -269,6 +269,13 @@ impl Timeline {
         }
     }
 
+    /// How many frames behind the timeline is willing to fall before it gives
+    /// up on catching them back and starts counting from the present.
+    ///
+    /// Without a cap, a machine that cannot keep up would keep a deadline in
+    /// the past for ever and never sleep again.
+    const MAX_CATCH_UP: u32 = 3;
+
     /// `true` when a frame is due.
     #[must_use]
     pub fn is_due(&self, now: Instant) -> bool {
@@ -282,7 +289,20 @@ impl Timeline {
     /// `DeferWindowPos` batch. A job that has arrived is reported once, with
     /// `finished` set and the exact target rectangle, and is then gone.
     pub fn tick(&mut self, now: Instant) -> Vec<FrameUpdate> {
-        self.last_frame = Some(now);
+        // The next frame is due one interval after this one was DUE, not one
+        // interval after it was applied. Anchoring on `now` adds however long
+        // the last frame took to every gap that follows, so a 60 fps
+        // animation whose frames cost 13 ms quietly runs at 33 and jitters
+        // with whatever the applications on screen happen to be doing.
+        let interval = self.frame_interval();
+        self.last_frame = Some(match self.last_frame {
+            Some(due) if now.saturating_duration_since(due) < interval * Self::MAX_CATCH_UP => {
+                due + interval
+            }
+            // First frame, or so far behind that catching up one frame at a
+            // time would only fall further behind.
+            _ => now,
+        });
 
         let mut updates = Vec::with_capacity(self.jobs.len());
         let mut finished = Vec::new();
@@ -446,15 +466,88 @@ impl std::fmt::Debug for Animator {
     }
 }
 
+/// Holds the system timer at its finest resolution while frames are in flight.
+///
+/// This is the difference between the frame rate that was asked for and the one
+/// that arrives, and it is worth stating plainly because it looks like nothing.
+/// `recv_timeout` sleeps on a Windows condition variable, which can only wake on
+/// a system timer tick, and the default tick is 15.625 ms. A 60 fps animation
+/// asks for a 16.7 ms wait, so every single wait rounds UP to the next tick:
+/// measured on the author's machine, asking for 16.7 ms gave 31.2 ms, which is
+/// 32 fps against a configured 60, with 30 to 33 ms of jitter. With the
+/// resolution raised the same request returns in 17.4 ms.
+///
+/// Since Windows 10 2004 the resolution is per process, so another program
+/// raising it no longer helps this one; it has to ask for itself.
+///
+/// Raised only while there is something to animate. Holding the whole system at
+/// a 1 ms tick around the clock is the classic way an application ruins battery
+/// life on every machine it runs on, and an idle window manager has no business
+/// doing it.
+struct FrameClock {
+    #[cfg(windows)]
+    raised: bool,
+}
+
+impl FrameClock {
+    /// Asks for the finest resolution the system will give.
+    fn raise() -> Self {
+        #[cfg(windows)]
+        {
+            // SAFETY: timeBeginPeriod takes a period in milliseconds and is
+            // safe for any value; it answers with whether it accepted.
+            let raised = unsafe { windows::Win32::Media::timeBeginPeriod(1) }
+                == windows::Win32::Media::TIMERR_NOERROR;
+            // Said once per daemon, not once per animation. Which of the two
+            // happened decides whether the configured frame rate is the one
+            // that arrives, and it is otherwise invisible from outside the
+            // process: since Windows 10 2004 the resolution is per process, so
+            // reading the system-wide value tells you nothing about this one.
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                if raised {
+                    tracing::debug!(
+                        "timer resolution raised to 1 ms while animating; without it a 60 fps                          animation waits on a 15.6 ms tick and arrives at about 32"
+                    );
+                } else {
+                    tracing::warn!(
+                        "the system would not raise the timer resolution, so animation will                          run at about half the configured frame rate"
+                    );
+                }
+            });
+            Self { raised }
+        }
+        #[cfg(not(windows))]
+        Self {}
+    }
+}
+
+impl Drop for FrameClock {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.raised {
+            // SAFETY: balanced against the timeBeginPeriod above, which is
+            // exactly what this call requires.
+            unsafe {
+                let _ = windows::Win32::Media::timeEndPeriod(1);
+            }
+        }
+    }
+}
+
 /// The timer thread: wait for work, then produce frames until the work is done.
 fn run<F>(receiver: &Receiver<Command>, apply: &mut F)
 where
     F: FnMut(&[FrameUpdate]),
 {
     let mut timeline = Timeline::new();
+    // Raised when there is something to animate, dropped the moment there is
+    // not. See `FrameClock`: without it a 60 fps animation runs at 32.
+    let mut clock: Option<FrameClock> = None;
 
     loop {
         let command = if timeline.is_empty() {
+            clock = None;
             receiver.recv().ok()
         } else {
             match receiver.recv_timeout(timeline.time_until_next_frame(Instant::now())) {
@@ -465,6 +558,14 @@ where
         };
 
         if let Some(command) = command {
+            // Raised BEFORE the command is handled, not after. `Animate` stamps
+            // every job with `Instant::now()`, and `timeBeginPeriod` is a
+            // syscall: raising it in between put that cost inside the animation,
+            // so the first frame landed a fraction past the start instead of
+            // exactly where the window already is. The test for that caught it.
+            if clock.is_none() {
+                clock = Some(FrameClock::raise());
+            }
             if handle_command(&mut timeline, command) {
                 return;
             }
@@ -560,6 +661,61 @@ mod tests {
         assert_eq!(last[0].rect, Rect::new(200, 0, 300, 100));
         assert!(last[0].finished);
         assert!(timeline.is_empty(), "a finished job is dropped");
+    }
+
+    #[test]
+    fn a_slow_frame_does_not_push_the_next_one_out() {
+        let start = Instant::now();
+        let mut timeline = Timeline::new();
+        timeline.insert(
+            job(A, Rect::default(), Rect::new(0, 0, 10, 10), 1000),
+            start,
+        );
+
+        let interval = timeline.frame_interval();
+        timeline.tick(start);
+
+        // Applying that frame cost most of another interval, which is what a
+        // `SetWindowPos` against a busy application costs in practice.
+        let slow = start + interval + interval / 2;
+        assert!(
+            timeline.is_due(slow),
+            "the second frame was already overdue by the time the first finished"
+        );
+        timeline.tick(slow);
+
+        // The third frame is due two intervals after the first was, not one
+        // interval after the second happened to finish. Anchoring on the
+        // finish time is what silently turns 60 fps into 33.
+        assert_eq!(
+            timeline.time_until_next_frame(slow),
+            (start + interval * 2).saturating_duration_since(slow),
+            "the gap grew by however long the frame took to apply"
+        );
+    }
+
+    #[test]
+    fn a_timeline_far_behind_starts_counting_from_now() {
+        let start = Instant::now();
+        let mut timeline = Timeline::new();
+        timeline.insert(
+            job(A, Rect::default(), Rect::new(0, 0, 10, 10), 1000),
+            start,
+        );
+
+        let interval = timeline.frame_interval();
+        timeline.tick(start);
+
+        // A stall far longer than the catch-up window: the frames that were
+        // missed are gone, and chasing them would keep the deadline in the
+        // past for ever and never let the thread sleep again.
+        let stalled = start + interval * (Timeline::MAX_CATCH_UP + 4);
+        timeline.tick(stalled);
+        assert_eq!(
+            timeline.time_until_next_frame(stalled),
+            interval,
+            "a full interval of sleep is owed after a stall"
+        );
     }
 
     #[test]

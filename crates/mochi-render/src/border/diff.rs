@@ -102,6 +102,20 @@ impl BorderDiff {
         self.last.clear();
     }
 
+    /// Forgets one border, so that the next pass hands it to its window again.
+    ///
+    /// The diff records a spec as applied the moment it is SENT, which is one
+    /// thread hop before anything is drawn. That is right for the common case
+    /// and wrong for the case that matters: when the draw fails, the diff
+    /// still believes the border is on screen, the next pass sees nothing
+    /// changed and sends nothing, and the border stays missing for as long as
+    /// its window keeps the same rectangle and kind. One transient failure and
+    /// the border is simply gone. The thread calls this when a draw fails, so
+    /// the next pass tries again.
+    pub fn forget(&mut self, target: WindowHandle) {
+        self.last.remove(&target.0);
+    }
+
     /// Diffs a complete desired set against the last one.
     ///
     /// A window named twice keeps its last spec. A spec whose kind changed is
@@ -285,6 +299,36 @@ mod tests {
         assert_eq!(changes.added[0].kind, BorderKind::Single);
         assert_eq!(changes.added[0].rect, RIGHT);
         assert_eq!(diff.kind(A), Some(BorderKind::Single));
+    }
+
+    #[test]
+    fn a_border_that_failed_to_draw_is_handed_over_again() {
+        // The diff records a spec as applied when it is SENT, one thread hop
+        // before anything is drawn. When the draw fails, the border is not on
+        // screen but the diff believes it is, so the next pass sees an
+        // unchanged spec and sends nothing: one transient failure and the
+        // border is gone for as long as its window keeps the same rectangle
+        // and kind. The thread calls `forget` on a failed draw so the next
+        // pass hands it over again.
+        let mut diff = BorderDiff::new();
+        let spec = spec(A, LEFT, BorderKind::Single);
+
+        assert!(!diff.diff(vec![spec]).is_empty(), "the first pass adds it");
+        assert!(
+            diff.diff(vec![spec]).is_empty(),
+            "an unchanged pass costs nothing, which is the whole problem"
+        );
+
+        diff.forget(A);
+        let changes = diff.diff(vec![spec]);
+        assert!(
+            !changes.is_empty(),
+            "the border that never got drawn was never tried again"
+        );
+        assert!(
+            changes.specs().any(|s| s.target == A),
+            "the retry has to name the window whose draw failed"
+        );
     }
 
     #[test]
