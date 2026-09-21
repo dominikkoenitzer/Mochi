@@ -1693,7 +1693,24 @@ impl WindowManager {
 
     fn on_event(&mut self, event: Event) -> Flow {
         self.drop_unreachable_windows();
-        self.drop_vanished_windows();
+        // Never on the flood paths. A window does not stop being on screen
+        // because it moved or because its title changed, and a drag delivers
+        // `LocationChange` hundreds of times a second. Measured on this
+        // machine: asking costs about 200 microseconds per event with ten
+        // windows on screen, because the cloak state is a cross-process call
+        // into DWM at roughly 15 microseconds a window. Spending a tenth of a
+        // core during every drag to re-ask a question whose answer cannot have
+        // changed is how a window manager stops feeling smooth.
+        // `Platform::is_maximized` is a separate call for exactly this reason.
+        if !matches!(
+            event,
+            Event::Window {
+                kind: WindowEventKind::LocationChange | WindowEventKind::NameChange,
+                ..
+            }
+        ) {
+            self.drop_vanished_windows();
+        }
         match event {
             Event::Window { kind, hwnd } => {
                 self.on_window_event(kind, hwnd);
