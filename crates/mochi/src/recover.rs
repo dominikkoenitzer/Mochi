@@ -269,6 +269,21 @@ pub fn recover(platform: &dyn Platform, path: &Path) -> Recovered {
                 }
                 true
             }
+            Err(_) if platform.outranks_us(hwnd) => {
+                // Refused today and at every start after: the previous session
+                // hid this while it had the rights to and this one does not.
+                // It happens when Mochi is started once from an administrator
+                // terminal and once normally. Keeping the entry only
+                // guarantees the same error on every start for as long as the
+                // window lives, and buries the one window the user has to go
+                // and rescue by hand. Say it once, plainly, and let go.
+                tracing::warn!(
+                    %hwnd,
+                    title = %info.title,
+                    "a previous session took this window off screen and this one cannot put it                      back, because the window outranks mochi now. Bring it back from the taskbar                      or with alt+tab. Mochi is letting go of it rather than trying again at                      every start"
+                );
+                true
+            }
             Err(e) => {
                 tracing::error!(%hwnd, error = %e, "could not put the window back");
                 false
