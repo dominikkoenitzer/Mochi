@@ -40,19 +40,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::appview::{self, ViewCloakError};
-use super::types::{Hwnd, MonitorId, MonitorInfo, WindowInfo, ex_style};
+use super::types::{FRAME_HOST, Hwnd, MonitorId, MonitorInfo, WindowInfo, ex_style};
 use super::wide::{file_name, from_wide};
 use super::{CloakUnsupported, Platform, ShowState, WindowPlacement, ZOrder};
 
 /// `MONITORINFOF_PRIMARY`, missing from the `windows` crate metadata.
 const MONITORINFOF_PRIMARY: u32 = 1;
-
-/// The process that hosts every UWP window.
-///
-/// Reading the executable off the window itself makes Calculator, Settings and
-/// the Store the same program, so an `exe` rule can neither pick one out nor
-/// leave the others alone. [`hosted_process`] looks past it.
-const FRAME_HOST: &str = "ApplicationFrameHost.exe";
 
 /// Longest window title Mochi reads. Longer titles are truncated, not rejected.
 const TITLE_BUFFER: usize = 512;

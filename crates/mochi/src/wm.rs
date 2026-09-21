@@ -1016,9 +1016,43 @@ impl WindowManager {
                 if slow {
                     self.defer_retile(info.hwnd);
                 }
+                // A UWP window belongs to the frame host until the application
+                // inside it has created its own child window, and that is what
+                // the real process is read from. Asked too early there is no
+                // child yet, so the window was judged as
+                // ApplicationFrameHost.exe: every `exe` and `path` rule written
+                // for the real application missed it, an ignore rule for it
+                // never fired, and nothing ever asked again. The slow
+                // application list cannot help, because it is consulted here,
+                // after the window has already been judged.
+                if crate::platform::is_frame_host(&info.exe) {
+                    self.defer_recheck(info.hwnd);
+                }
             }
             Err(e) => tracing::warn!(hwnd = %info.hwnd, error = %e, "could not manage a window"),
         }
+    }
+
+    /// Asks for this window to be read and judged again a beat from now.
+    ///
+    /// A synthetic rename, because `window_renamed` is already exactly the
+    /// right thing: it re-reads the window from the desktop and puts the fresh
+    /// identity back through the rules, which is what a window judged on a half
+    /// built identity needs. It fires at most once per window, scheduled where
+    /// the window is first managed, so there is no way for it to loop.
+    ///
+    /// On its own thread for the same reason as the deferred retile below: the
+    /// loop owns every piece of state and must never sleep.
+    fn defer_recheck(&self, hwnd: Hwnd) {
+        tracing::debug!(%hwnd, "judged on the frame host, asking again in a moment");
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(SLOW_APPLICATION_SETTLE);
+            let _ = tx.send(Event::Window {
+                kind: WindowEventKind::NameChange,
+                hwnd,
+            });
+        });
     }
 
     /// Asks for a second layout pass a beat from now.
@@ -4388,6 +4422,53 @@ mod tests {
         // file the user did not ask for.
         let named = std::path::PathBuf::from(r"D:\somewhere\keys");
         assert_eq!(hotkey_file_now(&named, &[]), named);
+    }
+
+    #[test]
+    fn a_window_judged_as_the_frame_host_is_judged_again() {
+        // A UWP window belongs to ApplicationFrameHost.exe until the
+        // application inside it has made its own child window, which is what
+        // the real process is read from. Asked too early there is no child yet,
+        // so Calculator, Settings and the Store are all the same program: every
+        // `exe` rule written for the real application misses, and an ignore
+        // rule for it never fires. `manage` now schedules a second look, and
+        // this is what that second look has to achieve.
+        let mut frame = window(1, "Settings");
+        frame.exe = crate::platform::FRAME_HOST.to_owned();
+        frame.path = format!(r"C:\Windows\System32\{}", crate::platform::FRAME_HOST);
+
+        let (mut wm, platform) = manager(vec![frame]);
+        let (response, _) = wm.handle_command(Command::IgnoreRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "SystemSettings.exe".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert!(response.is_ok());
+        assert!(
+            wm.state().is_managed(WindowId(1)),
+            "the frame host does not match the rule, so it is managed"
+        );
+
+        // The child window exists now, so the real identity can be read.
+        {
+            let mut windows = platform.windows.lock().unwrap();
+            windows[0].exe = "SystemSettings.exe".to_owned();
+            windows[0].path = r"C:\Windows\SystemSettings.exe".to_owned();
+        }
+        wm.on_window_event(WindowEventKind::NameChange, Hwnd(1));
+
+        assert!(
+            !wm.state().is_managed(WindowId(1)),
+            "the window was never judged again, so the ignore rule written for              the real application could not fire"
+        );
+    }
+
+    #[test]
+    fn the_frame_host_is_recognised_whatever_its_case() {
+        assert!(crate::platform::is_frame_host("ApplicationFrameHost.exe"));
+        assert!(crate::platform::is_frame_host("applicationframehost.exe"));
+        assert!(!crate::platform::is_frame_host("explorer.exe"));
+        assert!(!crate::platform::is_frame_host(""));
     }
 
     #[test]
