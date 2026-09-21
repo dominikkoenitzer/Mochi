@@ -46,18 +46,35 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: test
+    # Two Windows versions and both profiles, because this is a program made
+    # almost entirely of Win32 and DWM behaviour and that behaviour is not the
+    # same between releases: cloaking, UIPI and the shell's window list have
+    # all changed under it. One runner image proves one Windows.
+    #
+    # Release as well as debug is not thoroughness for its own sake. A stack
+    # overflow shipped here that only ever happened in an unoptimised build,
+    # and a release-only difference would be invisible the other way round.
+    name: test (${{ matrix.os }}, ${{ matrix.profile }})
     timeout-minutes: 30
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-latest]
+        profile: [debug, release]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: test
+          key: test-${{ matrix.os }}-${{ matrix.profile }}
       # mochi-testbed creates real WS_EX_TOOLWINDOW windows; they skip
       # themselves when the runner has no desktop to draw on.
-      - run: cargo test --locked --workspace --all-features
+      - name: Run the suite
+        shell: pwsh
+        run: |
+          $flags = if ('${{ matrix.profile }}' -eq 'release') { '--release' } else { '' }
+          cargo test --locked --workspace --all-features $flags
       - name: No test windows left behind
         shell: pwsh
         run: |
