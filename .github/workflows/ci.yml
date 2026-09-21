@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Every three hours, on top of every push. Nothing in this repository
+  # changes between those runs, which is the point: what changes underneath it
+  # does. A new stable Rust, a new runner image, a dependency yanked, a Windows
+  # update that moves DWM behaviour. All of those break a build that was green
+  # and nobody finds out until the next push, which on a quiet week is days.
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -144,6 +152,27 @@ jobs:
           path: ${{ env.TEMP }}/mochi-e2e/*.log
           if-no-files-found: ignore
           retention-days: 7
+
+  # Only on the timer, because this is the job allowed to fail for a reason
+  # that is not the code's fault: it compiles against the Rust that is coming
+  # rather than the Rust that is pinned. Breakage here is a heads-up with weeks
+  # of warning, not a broken build.
+  beta:
+    name: next rust
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@beta
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: beta
+      - run: cargo test --locked --workspace --all-features
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
   doc:
     name: doc
