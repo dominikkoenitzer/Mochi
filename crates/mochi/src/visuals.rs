@@ -548,7 +548,7 @@ mod tests {
         fn outranks_us(&self, _hwnd: Hwnd) -> bool {
             false
         }
-                fn is_on_screen(&self, _hwnd: Hwnd) -> bool {
+        fn is_on_screen(&self, _hwnd: Hwnd) -> bool {
             true
         }
 

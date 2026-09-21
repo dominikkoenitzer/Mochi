@@ -280,8 +280,9 @@ pub fn recover(platform: &dyn Platform, path: &Path) -> Recovered {
             //
             // `outranks_us`: the window belongs to an elevated process and
             // this session is not elevated, so Windows refuses on sight.
-            Err(ref e) if e.downcast_ref::<CloakUnsupported>().is_some()
-                || platform.outranks_us(hwnd) => {
+            Err(ref e)
+                if e.downcast_ref::<CloakUnsupported>().is_some() || platform.outranks_us(hwnd) =>
+            {
                 // Refused today and at every start after: the previous session
                 // hid this while it had the rights to and this one does not.
                 // It happens when Mochi is started once from an administrator
