@@ -18,8 +18,7 @@
 
 .PARAMETER Version
     Release tag to download, for example v0.1.13. Without it the repository is
-    built from source with cargo. While the repository is private the download
-    needs the GitHub CLI, signed in as someone who can see it.
+    built from source with cargo.
 
 .PARAMETER Repo
     GitHub repository to download releases from.
@@ -298,7 +297,7 @@ function Save-ReleaseAsset {
 
     New-Item -ItemType Directory -Force -Path $work | Out-Null
 
-    # A release on a private repository is not there for an anonymous request:
+    # The GitHub CLI is used when it is there because it carries credentials,
     # GitHub answers 404 rather than 403, so the plain download looks like a
     # missing file. The GitHub CLI carries the credentials that make it visible,
     # so it goes first whenever it is installed and signed in.
@@ -318,7 +317,7 @@ function Save-ReleaseAsset {
         try {
             Invoke-WebRequest -Uri "$base/$name.zip" -OutFile $zip -UseBasicParsing
         } catch {
-            throw "could not download $name.zip from $Repo ($($_.Exception.Message)). A private repository needs the GitHub CLI: install it, run ``gh auth login`` and try again, or build from source by leaving -Version off."
+            throw "could not download $name.zip from $Repo ($($_.Exception.Message)). Check the tag exists, or build from source by leaving -Version off."
         }
 
         try {
