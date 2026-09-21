@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # Cargo dependencies. Every crate takes its version from
+  # [workspace.dependencies] in the root manifest, so one directory covers the
+  # whole workspace. Semver-compatible bumps land in Cargo.lock; a major gets
+  # its own PR, which matters most for windows and windows-core, where even a
+  # 0.x bump moves the API.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+
+  # GitHub Actions used in workflows
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - ci
