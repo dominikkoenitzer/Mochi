@@ -188,11 +188,6 @@ impl<T> Ring<T> {
         }
     }
 
-    /// Focuses `idx`, clamped into range.
-    pub fn focus_clamped(&mut self, idx: usize) {
-        self.focused = idx.min(self.elements.len().saturating_sub(1));
-    }
-
     /// The index one step away in `direction`, wrapping.
     #[must_use]
     pub fn next_idx(&self, direction: CycleDirection) -> Option<usize> {
@@ -380,8 +375,6 @@ mod tests {
         assert!(r.focus(3));
         assert_eq!(r.focused(), Some(&3));
         assert!(!r.focus(4));
-        assert_eq!(r.focused_idx(), 3);
-        r.focus_clamped(99);
         assert_eq!(r.focused_idx(), 3);
     }
 

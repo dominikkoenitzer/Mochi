@@ -207,18 +207,22 @@ impl Monitor {
     }
 
     /// The area a workspace tiles into, with every configured offset applied.
+    ///
+    /// `scale` converts the offsets from the logical pixels they are written in
+    /// to the physical pixels the layout works in, exactly as the paddings are
+    /// converted. Pass 1.0 to apply them raw.
     #[must_use]
-    pub fn work_area_for(&self, idx: usize, global_offset: Option<Offset>) -> Rect {
+    pub fn work_area_for(&self, idx: usize, global_offset: Option<Offset>, scale: f32) -> Rect {
         let mut area = self.work_area;
         if let Some(offset) = self.work_area_offset.or(global_offset) {
-            area = offset.apply(area);
+            area = offset.scaled(scale).apply(area);
         }
         if let Some(workspace) = self.workspaces.get(idx)
             && workspace.apply_window_based_work_area_offset
             && workspace.containers().len() <= self.window_based_work_area_offset_limit
             && let Some(offset) = self.window_based_work_area_offset
         {
-            area = offset.apply(area);
+            area = offset.scaled(scale).apply(area);
         }
         area
     }
@@ -333,17 +337,17 @@ mod tests {
     #[test]
     fn work_area_offsets_stack_up() {
         let mut m = monitor();
-        assert_eq!(m.work_area_for(0, None), WORK_AREA);
+        assert_eq!(m.work_area_for(0, None, 1.0), WORK_AREA);
 
         assert_eq!(
-            m.work_area_for(0, Some(Offset::new(0, 40, 0, 0))),
+            m.work_area_for(0, Some(Offset::new(0, 40, 0, 0)), 1.0),
             Rect::new(0, 40, 3840, 2120),
             "the global offset applies when the monitor has none"
         );
 
         m.work_area_offset = Some(Offset::new(10, 10, 10, 10));
         assert_eq!(
-            m.work_area_for(0, Some(Offset::new(0, 400, 0, 0))),
+            m.work_area_for(0, Some(Offset::new(0, 400, 0, 0)), 1.0),
             Rect::new(10, 10, 3830, 2110),
             "the monitor offset overrides the global one"
         );
@@ -353,19 +357,19 @@ mod tests {
     fn the_window_based_offset_needs_the_opt_in_and_the_limit() {
         let mut m = monitor();
         m.window_based_work_area_offset = Some(Offset::new(100, 0, 100, 0));
-        assert_eq!(m.work_area_for(0, None), WORK_AREA, "not opted in");
+        assert_eq!(m.work_area_for(0, None, 1.0), WORK_AREA, "not opted in");
 
         m.workspaces_mut()
             .get_mut(0)
             .unwrap()
             .apply_window_based_work_area_offset = true;
-        assert_eq!(m.work_area_for(0, None), Rect::new(100, 0, 3740, 2120));
+        assert_eq!(m.work_area_for(0, None, 1.0), Rect::new(100, 0, 3740, 2120));
 
         let ws = m.workspaces_mut().get_mut(0).unwrap();
         ws.add_window(Window::new(1));
         ws.add_window(Window::new(2));
         assert_eq!(
-            m.work_area_for(0, None),
+            m.work_area_for(0, None, 1.0),
             WORK_AREA,
             "over the container limit"
         );
@@ -389,5 +393,41 @@ mod tests {
         let m = monitor();
         let json = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<Monitor>(&json).unwrap(), m);
+    }
+
+    #[test]
+    fn an_offset_is_scaled_like_the_paddings_are() {
+        // Offsets exist to reserve room for a status bar, and a bar is sized in
+        // logical pixels like everything else in Windows. Applied raw they only
+        // reserved the right number of pixels at 100 percent: on a 150 percent
+        // screen a 40 pixel bar occupies 60 physical pixels and the top row of
+        // tiles sat 20 pixels underneath it.
+        let m = monitor();
+        let offset = Some(Offset::new(0, 40, 0, 0));
+        assert_eq!(
+            m.work_area_for(0, offset, 1.5).top,
+            m.work_area.top + 60,
+            "a 40 logical pixel bar is 60 physical pixels at 150 percent"
+        );
+        assert_eq!(
+            m.work_area_for(0, offset, 1.0).top,
+            m.work_area.top + 40,
+            "and is left exactly alone at 100 percent"
+        );
+    }
+
+    #[test]
+    fn a_silly_offset_clamps_instead_of_wrapping() {
+        // Straight out of the configuration file with no validation, and
+        // applied on the tiling path. Wrapping inverts the rectangle, which
+        // makes `width()` wrap in turn and puts windows at coordinates nowhere
+        // near the screen; clamping merely gives an empty area.
+        let m = monitor();
+        let huge = Some(Offset::new(i32::MAX, i32::MAX, i32::MAX, i32::MAX));
+        let area = m.work_area_for(0, huge, 1.0);
+        assert!(area.left >= m.work_area.left, "the left edge wrapped");
+        assert!(area.top >= m.work_area.top, "the top edge wrapped");
+        assert!(area.right <= m.work_area.right, "the right edge wrapped");
+        assert!(area.bottom <= m.work_area.bottom, "the bottom edge wrapped");
     }
 }

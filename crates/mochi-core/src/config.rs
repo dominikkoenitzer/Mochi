@@ -52,18 +52,6 @@ impl Colour {
         }
     }
 
-    /// The Win32 `COLORREF` for this colour.
-    #[must_use]
-    pub const fn to_colorref(self) -> u32 {
-        (self.b as u32) << 16 | (self.g as u32) << 8 | self.r as u32
-    }
-
-    /// The colour as `0xRRGGBB`.
-    #[must_use]
-    pub const fn to_rgb(self) -> u32 {
-        (self.r as u32) << 16 | (self.g as u32) << 8 | self.b as u32
-    }
-
     /// The colour as `#rrggbb`.
     #[must_use]
     pub fn to_hex(self) -> String {
@@ -1147,11 +1135,11 @@ mod tests {
     }
 
     #[test]
-    fn colours_convert_to_win32_and_back() {
+    fn colours_come_back_from_the_win32_form() {
         let pink = Colour::new(255, 187, 223);
-        assert_eq!(pink.to_rgb(), 0x00ff_bbdf);
-        assert_eq!(pink.to_colorref(), 0x00df_bbff);
-        assert_eq!(Colour::from_colorref(pink.to_colorref()), pink);
+        // The Win32 form swaps red and blue; this is the value Windows
+        // gives back for that pink, and it has to survive the round trip.
+        assert_eq!(Colour::from_colorref(0x00df_bbff), pink);
         assert_eq!(Colour::default(), Colour::new(0, 0, 0));
     }
 
