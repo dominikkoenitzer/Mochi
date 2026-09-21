@@ -410,6 +410,20 @@ $acted = $false
 # no watchdog process of its own. LIMITED keeps the task at normal rights: a
 # window manager started with highest privileges can move every window on the
 # machine, which is not a trade worth making to restart one.
+# schtasks writes to stderr when a task is not there, and this script runs
+# with ErrorActionPreference = Stop, so a plain query for a watchdog that was
+# never registered printed a red error at the user in the ordinary case. The
+# absence of a task is an answer, not a fault.
+function Test-WatchdogTask {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        schtasks /query /tn $script:WatchdogTask 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
 function Enable-MochiWatchdog {
     if (-not (Test-Path -LiteralPath $MochicPath)) {
         Write-Detail "no mochic at $MochicPath, not registering the watchdog"
@@ -426,8 +440,7 @@ function Enable-MochiWatchdog {
 }
 
 function Disable-MochiWatchdog {
-    $existing = schtasks /query /tn $script:WatchdogTask 2>&1
-    if ($LASTEXITCODE -ne 0) { return }
+    if (-not (Test-WatchdogTask)) { return }
     if (-not $PSCmdlet.ShouldProcess($script:WatchdogTask, 'remove the scheduled task')) { return }
     $out = schtasks /delete /tn $script:WatchdogTask /f 2>&1
     if ($LASTEXITCODE -ne 0) { Write-Detail "could not remove the watchdog: $out"; return }
@@ -435,8 +448,7 @@ function Disable-MochiWatchdog {
 }
 
 function Show-WatchdogStatus {
-    schtasks /query /tn $script:WatchdogTask 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    if (Test-WatchdogTask) {
         Write-Detail "watchdog: registered, restarts Mochi within 5 minutes if it stops"
     } else {
         Write-Detail 'watchdog: not registered (-Watchdog turns it on)'
