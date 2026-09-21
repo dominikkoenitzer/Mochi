@@ -15,6 +15,7 @@ version = "0.1.13"
 edition = "2024"
 rust-version = "1.96"
 repository = "https://github.com/dominikkoenitzer/Mochi"
+license = "GPL-3.0-only"
 publish = false
 
 [workspace.dependencies]
