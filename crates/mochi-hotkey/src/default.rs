@@ -138,7 +138,10 @@ mod tests {
         for key in ["alt + left", "alt + right", "alt + up", "alt + down"] {
             assert!(
                 bindings
-                    .get(key.parse::<Trigger>().expect("the test spells its triggers right"))
+                    .get(
+                        key.parse::<Trigger>()
+                            .expect("the test spells its triggers right")
+                    )
                     .is_none(),
                 "{key} is bound, and it belongs to Windows"
             );
@@ -154,8 +157,10 @@ mod tests {
             .lines()
             .map(|line| line.strip_prefix('#').unwrap_or(line))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         let bindings = Bindings::parse_lossy(&restored).0;
         for (key, command) in [
             ("alt + left", "focus left"),

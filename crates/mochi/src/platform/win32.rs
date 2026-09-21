@@ -22,9 +22,7 @@ use windows::Win32::Graphics::Gdi::{
     DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
     MONITOR_DEFAULTTONULL, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
 };
-use windows::Win32::Security::{
-    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
-};
+use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenProcessToken,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -454,9 +452,8 @@ fn process_is_elevated(pid: u32) -> Option<bool> {
 
 /// Whether Mochi itself is elevated. Asked once; it cannot change.
 fn we_are_elevated() -> bool {
-    static ELEVATED: LazyLock<bool> = LazyLock::new(|| {
-        process_is_elevated(unsafe { GetCurrentProcessId() }).unwrap_or(false)
-    });
+    static ELEVATED: LazyLock<bool> =
+        LazyLock::new(|| process_is_elevated(unsafe { GetCurrentProcessId() }).unwrap_or(false));
     *ELEVATED
 }
 

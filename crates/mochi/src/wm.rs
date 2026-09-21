@@ -3917,7 +3917,7 @@ mod tests {
                 .find(|w| w.hwnd == hwnd)
                 .is_some_and(|w| w.exe.is_empty())
         }
-                fn is_on_screen(&self, hwnd: Hwnd) -> bool {
+        fn is_on_screen(&self, hwnd: Hwnd) -> bool {
             // A handle the fake desktop no longer holds answers true, the way
             // the real one does: that window is gone, not hidden.
             self.windows
@@ -5299,8 +5299,7 @@ alt + j : focus down
             "a window that is off screen still holds a tile"
         );
         assert!(
-            wm.state().is_managed(window_id(Hwnd(1)))
-                && wm.state().is_managed(window_id(Hwnd(2))),
+            wm.state().is_managed(window_id(Hwnd(1))) && wm.state().is_managed(window_id(Hwnd(2))),
             "the windows that are still on screen were swept up too"
         );
     }
