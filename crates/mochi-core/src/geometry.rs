@@ -162,14 +162,38 @@ impl Offset {
     }
 
     /// Applies the offset to `area`, shrinking it on each side.
+    ///
+    /// Saturating, because these four numbers come straight out of the
+    /// configuration file with no validation and are applied on the tiling
+    /// path. A `left` of `i32::MAX` wraps in a release build rather than
+    /// panicking, and a wrapped edge is worse than a clamped one: the
+    /// rectangle inverts, `width()` wraps in turn, and windows are positioned
+    /// at nonsense coordinates somewhere off screen. Two offsets are applied in
+    /// sequence here, so two individually sane values can reach the same place.
     #[must_use]
     pub const fn apply(&self, area: Rect) -> Rect {
         Rect::new(
-            area.left + self.left,
-            area.top + self.top,
-            area.right - self.right,
-            area.bottom - self.bottom,
+            area.left.saturating_add(self.left),
+            area.top.saturating_add(self.top),
+            area.right.saturating_sub(self.right),
+            area.bottom.saturating_sub(self.bottom),
         )
+    }
+
+    /// The same offset in the physical pixels of a display at `scale`.
+    ///
+    /// Offsets are written in logical pixels like the paddings, because they
+    /// exist to reserve room for a status bar and a bar is sized in logical
+    /// pixels too. Applying them raw reserved the right number of pixels only
+    /// at 100 percent: at 150 percent a 40 pixel bar occupies 60 physical
+    /// pixels and the top row of tiles sat 20 pixels underneath it.
+    #[must_use]
+    pub fn scaled(self, scale: f32) -> Self {
+        if scale == 1.0 {
+            return self;
+        }
+        let at = |v: i32| (v as f32 * scale).round() as i32;
+        Self::new(at(self.left), at(self.top), at(self.right), at(self.bottom))
     }
 }
 

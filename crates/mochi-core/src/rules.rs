@@ -438,24 +438,6 @@ impl RuleSets {
         matches_any(&self.object_name_change_applications, window)
     }
 
-    /// `true` when the window's border overflows its rectangle.
-    #[must_use]
-    pub fn has_border_overflow(&self, window: &WindowInfo<'_>) -> bool {
-        matches_any(&self.border_overflow_applications, window)
-    }
-
-    /// `true` when a layered window is whitelisted for management.
-    #[must_use]
-    pub fn is_layered_whitelisted(&self, window: &WindowInfo<'_>) -> bool {
-        matches_any(&self.layered_whitelist, window)
-    }
-
-    /// `true` when the window must never be made transparent.
-    #[must_use]
-    pub fn ignores_transparency(&self, window: &WindowInfo<'_>) -> bool {
-        matches_any(&self.transparency_ignore_rules, window)
-    }
-
     /// `true` when the application needs an extra beat before its window is ready.
     #[must_use]
     pub fn is_slow(&self, window: &WindowInfo<'_>) -> bool {
@@ -1088,9 +1070,6 @@ mod tests {
         assert!(sets.should_manage(&w));
         assert!(sets.is_tray_or_multi_window(&w));
         assert!(sets.changes_object_name(&w));
-        assert!(sets.has_border_overflow(&w));
-        assert!(sets.is_layered_whitelisted(&w));
-        assert!(sets.ignores_transparency(&w));
         assert!(sets.is_slow(&w));
         assert_eq!(sets.len(), 7);
     }

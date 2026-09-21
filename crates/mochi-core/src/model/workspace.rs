@@ -372,12 +372,6 @@ impl Workspace {
         self.resolve_layout(self.containers.len())
     }
 
-    /// The work area with the workspace padding taken off.
-    #[must_use]
-    pub fn tiling_area(&self, work_area: Rect, default_workspace_padding: i32) -> Rect {
-        self.tiling_area_scaled(work_area, default_workspace_padding, 1.0)
-    }
-
     /// The work area with the workspace padding taken off, in the physical
     /// pixels of a display with that scale factor.
     ///
@@ -392,22 +386,6 @@ impl Workspace {
     ) -> Rect {
         let padding = self.workspace_padding.unwrap_or(default_workspace_padding);
         work_area.padded_clamped(scale_padding(padding, scale))
-    }
-
-    /// The rectangle a monocle or maximized window fills.
-    #[must_use]
-    pub fn full_rect(
-        &self,
-        work_area: Rect,
-        default_workspace_padding: i32,
-        default_container_padding: i32,
-    ) -> Rect {
-        self.full_rect_scaled(
-            work_area,
-            default_workspace_padding,
-            default_container_padding,
-            1.0,
-        )
     }
 
     /// The rectangle a monocle or maximized window fills, with both paddings
@@ -1241,8 +1219,6 @@ mod tests {
         ws.container_padding = Some(10);
         let rects = ws.update_layout(WORK_AREA, 0, 0).to_vec();
         assert_eq!(rects, vec![Rect::new(24, 24, 1896, 1056)]);
-        assert_eq!(ws.tiling_area(WORK_AREA, 0), Rect::new(14, 14, 1906, 1066));
-        assert_eq!(ws.full_rect(WORK_AREA, 0, 0), Rect::new(24, 24, 1896, 1056));
     }
 
     #[test]
