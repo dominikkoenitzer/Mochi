@@ -181,6 +181,43 @@ jobs:
       - run: cargo test --locked --workspace --all-features
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+  # Only on the timer, because it takes hours and answers a question no other
+  # job asks: not "do the tests pass" but "would they notice if the code were
+  # wrong". cargo-mutants changes one thing at a time -- flips a comparison,
+  # drops a call, returns a default -- and reports every change that no test
+  # complained about. Each of those is a line the suite is not really covering,
+  # whatever the count says.
+  #
+  # Worth the hours here specifically: this repository has around a thousand
+  # tests and a day of real defects that none of them caught, because they
+  # check a model and the defects lived in what Windows does. The report is an
+  # artefact rather than a failure, because the first score on an existing
+  # codebase is always bad and a job that is always red is a job nobody reads.
+  mutants:
+    name: mutation testing
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 360
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutants
+      - run: cargo install cargo-mutants --locked
+      # mochi-core is the pure logic: no Win32, fast to build, and the crate
+      # where a missed mutant means a real hole rather than a test that cannot
+      # run on a machine with no desktop.
+      - run: cargo mutants --package mochi-core --no-shuffle --timeout 120
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants
+          path: mutants.out/
+          retention-days: 14
+
   doc:
     name: doc
     timeout-minutes: 30
