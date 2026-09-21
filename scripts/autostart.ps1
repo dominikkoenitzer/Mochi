@@ -430,13 +430,36 @@ function Enable-MochiWatchdog {
         return
     }
     if (-not $PSCmdlet.ShouldProcess($script:WatchdogTask, 'register a scheduled task')) { return }
-    $out = schtasks /create /tn $script:WatchdogTask /tr "`"$MochicPath`" start" `
-        /sc minute /mo 5 /rl LIMITED /f 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Detail "could not register the watchdog: $out"
+
+    # Through the same hidden launcher the Run value uses, and not by naming
+    # mochic.exe directly. mochic is a console program, so the scheduler gives
+    # it a console: pointing the task straight at it opened a terminal window
+    # on the desktop every five minutes, which Mochi then briefly tiled and
+    # dropped again. A watchdog nobody can see is the whole point of one.
+    $quoted = $MochicPath.Replace("'", "''")
+    $inner = "Start-Process -FilePath '$quoted' -ArgumentList 'start' -WindowStyle Hidden"
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument "-NoProfile -WindowStyle Hidden -Command `"$inner`""
+    # Repeating forever from a trigger that has already fired, so the first
+    # check happens at the next interval and not at some hour of the morning.
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes 5)
+    # Limited rights on purpose: a window manager started with highest
+    # privileges can move every window on the machine, which is not a trade
+    # worth making to restart one.
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+        -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries -StartWhenAvailable -Hidden `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+    try {
+        Register-ScheduledTask -TaskName $script:WatchdogTask -Action $action `
+            -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    } catch {
+        Write-Detail "could not register the watchdog: $($_.Exception.Message)"
         return
     }
-    Write-Detail 'watchdog registered, checks every 5 minutes'
+    Write-Detail 'watchdog registered, checks every 5 minutes, no window'
 }
 
 function Disable-MochiWatchdog {
