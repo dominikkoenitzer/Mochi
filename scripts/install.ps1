@@ -264,7 +264,22 @@ function Save-ReleaseAsset {
     param([Parameter(Mandatory)][string] $Tag)
 
     if (-not $Tag.StartsWith('v')) { $Tag = "v$Tag" }
-    $name = "Mochi-$Tag-x86_64-pc-windows-msvc"
+    # Not hardcoded to x64. Windows on ARM runs x64 binaries under emulation,
+    # and a window manager is the worst possible thing to emulate: it is all
+    # Win32 hooks and per-frame window calls, on the hot path of everything
+    # the user does. Better to say plainly that there is no build for this
+    # machine than to install one that will be slow in a way nobody can
+    # diagnose.
+    $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
+        'AMD64' { 'x86_64-pc-windows-msvc' }
+        'ARM64' { 'aarch64-pc-windows-msvc' }
+        default { $null }
+    }
+    if (-not $arch) {
+        throw ("Mochi has no release build for $env:PROCESSOR_ARCHITECTURE. " +
+               'Build it from source instead: .\scripts\install.ps1 with no -Version.')
+    }
+    $name = "Mochi-$Tag-$arch"
     $base = "https://github.com/$Repo/releases/download/$Tag"
     $work = Join-Path $env:TEMP "mochi-install-$Tag"
     $zip = Join-Path $work "$name.zip"
