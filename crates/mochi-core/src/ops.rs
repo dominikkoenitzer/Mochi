@@ -1266,10 +1266,25 @@ impl State {
         let before = self.visible_window_ids();
         let stack_it = self.window_container_behaviour == WindowContainerBehaviour::Append;
         let float_override = self.float_override;
+        let in_view = self
+            .monitors()
+            .get(monitor)
+            .is_some_and(|m| m.focused_workspace_idx() == workspace);
 
         let target = self.workspace_mut(monitor, workspace)?;
         let id = window.id;
-        if decision == RuleDecision::Float || float_override || target.float_override {
+        let floats = decision == RuleDecision::Float || float_override || target.float_override;
+        // A window opened on the workspace in front of the user has to be seen.
+        // With a window maximized there it would go into the layout underneath
+        // and be taken off screen the moment it appeared, which looks exactly
+        // like the application failing to start. So the maximize is released
+        // first. A floating window needs none of this: it sits above anyway.
+        let mut released = None;
+        if in_view && !floats && target.is_maximized() {
+            released = target.maximized_window().map(|w| w.id);
+            target.toggle_maximize();
+        }
+        if floats {
             target.add_floating_window(window);
         } else if stack_it && target.focused_container().is_some() {
             if let Some(container) = target.focused_container_mut() {
@@ -1285,6 +1300,7 @@ impl State {
         }
 
         let mut changes = self.retiled(monitor, workspace);
+        changes.restore.extend(released);
         // A window that opens on a workspace nobody is looking at, or behind a
         // monocle, has to be taken off screen: it is on screen right now
         // because Windows just created it, and it is not in `before`, so the
@@ -2157,6 +2173,50 @@ mod tests {
         assert_eq!(changes.maximize, None);
         assert_eq!(changes.restore, vec![WindowId(2)]);
         assert!(!state.workspace(0, 0).unwrap().is_maximized());
+    }
+
+    #[test]
+    fn a_window_opened_over_a_maximize_releases_it_and_is_shown() {
+        let mut state = with_windows(2);
+        state.toggle_maximize().unwrap();
+
+        let changes = state.add_window(Window::new(3)).unwrap();
+
+        assert!(!state.workspace(0, 0).unwrap().is_maximized());
+        assert_eq!(changes.restore, vec![WindowId(2)], "{changes:?}");
+        assert!(!changes.hide.contains(&WindowId(3)), "{changes:?}");
+        assert_eq!(changes.focus, Some(WindowId(3)), "{changes:?}");
+        assert!(
+            changes.show.contains(&WindowId(1)),
+            "the window the maximize covered comes back: {changes:?}"
+        );
+        assert_eq!(state.workspace(0, 0).unwrap().containers().len(), 3);
+    }
+
+    #[test]
+    fn a_window_opened_on_a_workspace_out_of_view_leaves_its_maximize_alone() {
+        let mut state = with_windows(2);
+        state.toggle_maximize().unwrap();
+        state.focus_workspace(1).unwrap();
+
+        let changes = state.add_window_to(0, 0, Window::new(3)).unwrap();
+
+        assert!(state.workspace(0, 0).unwrap().is_maximized());
+        assert!(changes.restore.is_empty(), "{changes:?}");
+        assert!(changes.hide.contains(&WindowId(3)), "{changes:?}");
+    }
+
+    #[test]
+    fn a_floating_window_opened_over_a_maximize_keeps_it() {
+        let mut state = with_windows(2);
+        state.toggle_maximize().unwrap();
+        state.float_override = true;
+
+        let changes = state.add_window(Window::new(3)).unwrap();
+
+        assert!(state.workspace(0, 0).unwrap().is_maximized());
+        assert!(changes.restore.is_empty(), "{changes:?}");
+        assert!(!changes.hide.contains(&WindowId(3)), "{changes:?}");
     }
 
     #[test]
