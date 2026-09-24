@@ -68,7 +68,7 @@ the desktop is left changed. It is worth knowing before you start it for the
 first time, because a tiling window manager rearranges every window on screen
 the moment it comes up.
 
-The arrow keys are deliberately left alone. `alt + left` and `alt + right` are
+`alt` plus an arrow is deliberately left alone. `alt + left` and `alt + right` are
 Back and Forward in every browser, and `alt + up` is the parent folder in
 Explorer; a window manager that binds them takes those away everywhere with
 nothing on screen to say why. The shipped file says how to add them if you

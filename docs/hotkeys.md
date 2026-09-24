@@ -20,7 +20,7 @@ was hiding, takes the borders down and unbinds every one of these keys. A
 tiling window manager rearranges the whole screen the moment it starts, and
 nobody should have to read a manual to undo that.
 
-**The arrow keys are deliberately not bound.** `alt + left` and `alt + right`
+**`alt` plus an arrow is deliberately not bound.** `alt + left` and `alt + right`
 are Back and Forward in every browser on Windows, and `alt + up` is the parent
 folder in Explorer. Binding them takes those away everywhere, silently, for as
 long as Mochi runs. Focus moves with `alt + h/j/k/l` instead. The shipped file
