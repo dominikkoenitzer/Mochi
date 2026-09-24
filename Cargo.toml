@@ -37,6 +37,7 @@ windows-core = "0.62"
 notify = "8"
 tracing-appender = "0.2"
 embed-manifest = "1.5"
+winresource = "0.1"
 
 [profile.release]
 lto = "thin"
