@@ -124,7 +124,7 @@ recognized, which reads like the install failed when it did not.
 
 This puts `mochi.exe` and `mochic.exe` in `%LOCALAPPDATA%\Programs\Mochi\bin`,
 adds that folder to the user PATH and writes a default `%USERPROFILE%\mochi.json`
-and hotkey file when there is none. `-Version v0.1.14` downloads that release
+and hotkey file when there is none. `-Version v0.1.15` downloads that release
 instead of building, `-Uninstall` reverses everything.
 
 Start it at login, and see what is registered today:
