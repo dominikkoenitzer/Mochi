@@ -653,7 +653,7 @@ fn looks_like_app_rules(text: &str) -> bool {
     // An application file is either a map of applications or, in its older
     // shape, a list of them. A configuration file is always an object, and
     // since that became an error rather than a silent default, the list form
-    // made `Config::from_json` fail and this answer `false` — so a perfectly
+    // made `Config::from_json` fail and this answer `false`, so a perfectly
     // good rules file was checked as a configuration and reported unusable.
     let shape_allows_it = match serde_json::from_str::<serde_json::Value>(text) {
         Ok(serde_json::Value::Array(_)) => true,

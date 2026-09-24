@@ -277,7 +277,7 @@ impl Hidden {
         // Only when something actually changed, the way `unfade` already does
         // it. The caller re-fades the whole unfocused set on every pass, so an
         // unconditional write meant one full serialise-and-rename of the crash
-        // record per faded window per focus change — a dozen windows open and
+        // record per faded window per focus change: a dozen windows open and
         // one alt-tab was a dozen file writes, synchronously, on the thread
         // that also has to answer every hotkey.
         if self.faded.insert(hwnd) {

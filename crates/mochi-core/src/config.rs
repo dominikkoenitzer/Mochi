@@ -482,7 +482,7 @@ impl Config {
         // The shape is checked before the fields, because serde will otherwise
         // accept a JSON array here. A struct deserialises from a sequence by
         // taking its fields positionally, and this struct's `#[serde(default)]`
-        // turns "too few elements" into "use the default for the rest" — so
+        // turns "too few elements" into "use the default for the rest", so
         // `[]` parses as the default configuration and the desktop reverts with
         // nothing reported, while `["x"]` quietly sets the first field.
         //
