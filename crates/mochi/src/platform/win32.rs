@@ -1073,7 +1073,7 @@ mod tests {
     #[test]
     fn a_window_nothing_has_refused_is_reachable() {
         // The registry is keyed by handle and process, so a handle nothing has
-        // ever refused must not be reported as out of reach — including the
+        // ever refused must not be reported as out of reach, including the
         // dead ones, whose owning process reads back as zero.
         assert!(!is_denied(Hwnd::NULL));
         assert!(!is_denied(Hwnd(0x7fff_ffff)));

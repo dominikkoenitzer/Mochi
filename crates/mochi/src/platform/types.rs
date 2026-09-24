@@ -416,8 +416,8 @@ pub fn is_manageable_with(w: &WindowInfo, allow_tool_window: bool) -> Result<(),
     // The families. The list above is exact spellings; these carry a suffix
     // that changes between Windows releases, which is the whole reason the
     // prefix list exists. It was declared with that explanation and never
-    // read, so `XamlExplorerHostIslandWindow_WASDK` — alive on this machine
-    // next to the plain spelling — and the Windows 11 notification overflow
+    // read, so `XamlExplorerHostIslandWindow_WASDK` (alive on this machine
+    // next to the plain spelling) and the Windows 11 notification overflow
     // were managed like ordinary windows: tiled, and hidden on a workspace
     // switch.
     if SHELL_CLASS_PREFIXES.iter().any(|prefix| {
@@ -608,7 +608,7 @@ mod tests {
     fn a_class_name_that_is_not_ascii_does_not_take_the_daemon_down() {
         // A class name is whatever the application handed RegisterClassW, so
         // it can be any UTF-8. Comparing a prefix by slicing at its byte
-        // length panics when that byte lands inside a character — and this
+        // length panics when that byte lands inside a character, and this
         // runs in the event loop, so the panic is the whole window manager,
         // not one mis-tiled window.
         for class in [
