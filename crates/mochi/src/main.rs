@@ -196,6 +196,9 @@ fn main() -> Result<()> {
     // lingering process instead of a lost desktop.
     manager.restore_all();
     restore_guard.disarm();
+    // Nothing cloaks past this point, and the shell proxy has to go while COM
+    // is still up: released during process exit it crashed in combase.
+    platform::disconnect_shell();
 
     tracing::info!("stopping the producers");
     manager.stop_hotkeys();
