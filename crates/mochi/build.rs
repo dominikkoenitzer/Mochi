@@ -1,4 +1,4 @@
-//! Embeds an application manifest.
+//! Embeds an application manifest and the Mochi icon.
 //!
 //! Per-monitor v2 DPI awareness has to be set before the process creates its
 //! first window, and the only way to guarantee that is the manifest. Calling
@@ -19,6 +19,11 @@ fn main() {
             // of every login.
             .requested_execution_level(ExecutionLevel::AsInvoker);
         embed_manifest(manifest).expect("could not embed the application manifest");
+        winresource::WindowsResource::new()
+            .set_icon("../../assets/mochi.ico")
+            .compile()
+            .expect("could not embed the icon");
     }
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../assets/mochi.ico");
 }
