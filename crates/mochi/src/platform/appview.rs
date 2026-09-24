@@ -119,6 +119,15 @@ fn with_collection<T>(
     })
 }
 
+/// Releases this thread's proxy to the shell.
+///
+/// Has to run before the thread ends. Left to the thread local's destructor,
+/// the release on the main thread happens inside `ExitProcess`, after COM has
+/// already been torn down, and crashes in combase.
+pub fn disconnect() {
+    COLLECTION.with(|slot| *slot.borrow_mut() = None);
+}
+
 /// Cloaks or uncloaks a window through its application view.
 ///
 /// Works for every window the shell tracks, whichever process owns it.

@@ -15,6 +15,7 @@ mod appview;
 mod dry_run;
 mod win32;
 
+pub use appview::disconnect as disconnect_shell;
 pub use dry_run::DryRunPlatform;
 pub use types::{
     FRAME_HOST, Hwnd, MonitorInfo, Unmanageable, WindowInfo, is_frame_host, is_manageable,
