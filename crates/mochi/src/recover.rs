@@ -624,7 +624,7 @@ mod tests {
         // Both halves are undone separately, and either failure has to keep
         // the entry. Keeping it only when the window was faded *and nothing
         // else* meant a window that was cloaked and faded, uncloaked fine and
-        // then refused to go opaque, was forgotten while still translucent —
+        // then refused to go opaque, was forgotten while still translucent:
         // at a low alpha that is a window on screen, in Alt-Tab, focusable and
         // impossible to see, with nothing recording that Mochi did it.
         let path = temp("still-faded");

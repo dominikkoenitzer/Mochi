@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn a_variable_name_that_is_not_ascii_does_not_panic() {
         // `$` then three ASCII bytes then a multi-byte character put the
-        // fourth byte inside that character, and slicing there panics — at
+        // fourth byte inside that character, and slicing there panics: at
         // daemon start and again on every config reload.
         for raw in ["$MY_ÖRDNER/x", "$abcä", "$USR😀", "$Zürich", "$"] {
             let _ = expand_env(raw);
