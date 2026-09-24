@@ -34,7 +34,7 @@ pub struct Settings {
     pub transparency_alpha: u8,
     /// Draw a border around the focused window.
     pub border: bool,
-    /// Border thickness in logical pixels.
+    /// Border thickness in physical pixels, not scaled by DPI.
     pub border_width: i32,
     /// How far the border sits outside the frame.
     pub border_offset: i32,
