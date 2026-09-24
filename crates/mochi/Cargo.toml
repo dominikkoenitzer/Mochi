@@ -57,3 +57,4 @@ mochi-testbed = { path = "../mochi-testbed" }
 
 [build-dependencies]
 embed-manifest = { workspace = true }
+winresource = { workspace = true }
