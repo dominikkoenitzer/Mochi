@@ -117,7 +117,7 @@ in [hotkeys.md](hotkeys.md).
 |---|---|---|
 | `quickstart` | none | Write a default `mochi.json` and a default hotkey file, each only when there is none. |
 | `check` | `[PATH]` | Read a configuration file and say what is wrong with it, without a daemon and without applying anything. No path means the file the daemon would load. Reports a parse failure with its line, column and the offending text; every rule that cannot do what it says, with its list, its line and the compiler's complaint; every top level key that parses and is then ignored; and, when the file names an `app_specific_configuration_path`, the same for that file, whose problems are warnings because the daemon carries on past them. Exits 0 when the file is usable, 1 when it is not; warnings do not fail. It reads the hotkey file at the same time and reports how many bindings it found, every line that did not parse, and every line that starts with a Mochi command but does not parse as one, because the daemon hands those to the shell and they then fail silently on every key press. Hand it an `applications.json` and it checks that instead. |
-| `schema` | none | Print the JSON schema of the config file. |
+| `schema` | `[-o PATH]` | Print the JSON schema of the config file, or write it to `PATH` in UTF-8. |
 | `focus-follows-mouse` | `enable` \| `disable` | Focus whatever the cursor moves over. |
 | `mouse-follows-focus` | `enable` \| `disable` | Warp the cursor to a newly focused window. |
 | `window-container-behaviour` | `create` \| `append` | Whether a new window gets a container of its own or stacks onto the focused one. |
