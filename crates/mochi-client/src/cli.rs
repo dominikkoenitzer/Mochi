@@ -371,9 +371,9 @@ pub enum Cmd {
         #[arg(value_enum)]
         state: BooleanState,
     },
-    /// Set the border thickness in logical pixels
+    /// Set the border thickness in physical pixels (not scaled by DPI)
     BorderWidth {
-        /// Thickness in logical pixels
+        /// Thickness in physical pixels
         width: i32,
     },
     /// Set how far the border sits outside the window frame
@@ -384,7 +384,7 @@ pub enum Cmd {
     // command instead of a mochic one.
     #[command(allow_negative_numbers = true)]
     BorderOffset {
-        /// Offset in logical pixels, negative pulls it inwards
+        /// Offset in physical pixels, negative pulls it inwards
         offset: i32,
     },
     /// Set the border colour for one kind of window

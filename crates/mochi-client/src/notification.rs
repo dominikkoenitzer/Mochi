@@ -67,7 +67,7 @@ pub enum NotificationEvent {
         monitor: usize,
         /// Zero-based workspace index.
         workspace: usize,
-        /// The new layout, kebab-case.
+        /// The new layout, spelled as in the config: `BSP`, `Columns`, `VerticalStack`.
         layout: String,
     },
     /// Mochi started managing a window.
