@@ -17,7 +17,7 @@
     ever touches its own files, nothing that another program owns.
 
 .PARAMETER Version
-    Release tag to download, for example v0.1.15. Without it the repository is
+    Release tag to download, for example v0.1.16. Without it the repository is
     built from source with cargo.
 
 .PARAMETER Repo
@@ -41,7 +41,7 @@
     .\scripts\install.ps1
 
 .EXAMPLE
-    .\scripts\install.ps1 -Version v0.1.15
+    .\scripts\install.ps1 -Version v0.1.16
 
 .EXAMPLE
     .\scripts\install.ps1 -Uninstall
