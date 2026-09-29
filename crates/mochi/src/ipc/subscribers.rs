@@ -132,6 +132,17 @@ impl Subscribers {
                         match message {
                             Message::Add(name, pipe) => {
                                 tracing::info!(subscriber = %name, "subscribed");
+                                // A notification queued before this Add can fail
+                                // against the old, dead pipe and drop the name
+                                // that `add` had already put back; without it
+                                // `notify` sees no subscribers and a sole
+                                // subscriber never hears another event.
+                                {
+                                    let mut names = lock(&names);
+                                    if !names.iter().any(|n| n == &name) {
+                                        names.push(name.clone());
+                                    }
+                                }
                                 pipes.insert(name, pipe);
                             }
                             Message::Remove(name) => {
@@ -373,6 +384,51 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(10),
             "stop() waited {elapsed:?} on a wedged subscriber"
+        );
+    }
+
+    /// A bar that restarts and subscribes again under the same name, while a
+    /// notification for its old, dead pipe is still queued, keeps receiving.
+    #[test]
+    fn a_resubscribe_behind_a_failing_notification_keeps_receiving() {
+        let name = format!("mochi-test-resub-{}", std::process::id());
+        let first = create_pipe(&name).unwrap();
+
+        let mut subs = Subscribers::start().unwrap();
+        subs.add(&name).unwrap();
+        drop(first);
+
+        // The restarted bar's pipe, then a notification queued ahead of its
+        // subscribe: that write hits the dead pipe and drops the name.
+        let mut second = create_pipe(&name).unwrap();
+        subs.notify(Notification::new(NotificationEvent::MonitorsChanged {
+            count: 1,
+        }));
+        subs.add(&name).unwrap();
+
+        let (seen_tx, seen_rx) = channel();
+        std::thread::spawn(move || {
+            while let Ok(Some(n)) = second.next_notification() {
+                if seen_tx.send(n).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let sent = Notification::new(NotificationEvent::MonitorsChanged { count: 2 });
+        while std::time::Instant::now() < deadline {
+            subs.notify(sent.clone());
+            if let Ok(got) = seen_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                if got == sent {
+                    assert_eq!(subs.names(), std::slice::from_ref(&name));
+                    return;
+                }
+            }
+        }
+        panic!(
+            "the re-subscribed bar never heard another event; names: {:?}",
+            subs.names()
         );
     }
 
