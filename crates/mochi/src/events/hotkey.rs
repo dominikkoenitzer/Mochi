@@ -66,6 +66,13 @@ const MSG_REPLACE: u32 = WM_APP + 1;
 /// press anyway.
 static GATE: AtomicUsize = AtomicUsize::new(0);
 
+/// How many times the gate has been set, so the hook can tell that it was even
+/// when it is back where it started.
+///
+/// Game mode and `set-hotkeys disable` both end any `mode`, and turning them
+/// off again before a single key was pressed must not bring the mode back.
+static GATE_CHANGES: AtomicUsize = AtomicUsize::new(0);
+
 /// Which bindings the hook lets through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Gate {
@@ -128,6 +135,8 @@ thread_local! {
     /// thread, and so is the next one, which has to see the switch already.
     /// Nothing else asks, so nothing has to be shared.
     static MODE: Cell<ModeState> = const { Cell::new(ModeState::new()) };
+    /// The [`GATE_CHANGES`] the active mode was entered under.
+    static MODE_GATE: Cell<usize> = const { Cell::new(0) };
     /// Where a match is reported.
     static SENDER: RefCell<Option<EventSender>> = const { RefCell::new(None) };
     /// What the hook did with the last press of each key that is down.
@@ -388,11 +397,13 @@ fn press(vk: u16) -> Option<Modifiers> {
         let bindings = cell.borrow();
         let mut mode = MODE.get();
         // Game mode and hotkeys off belong to the top level. Whatever mode
-        // was active when they started is over: the one key game mode keeps
+        // was active when either started is over: the one key game mode keeps
         // lives at the top level, and coming back from either should not
         // land the user in a mode they entered before it.
-        if gate != Gate::All {
+        let changes = GATE_CHANGES.load(Ordering::Relaxed);
+        if gate != Gate::All || changes != MODE_GATE.get() {
             mode.reset();
+            MODE_GATE.set(changes);
         }
         let binding = mode.press(&bindings, trigger, |action| gate.admits(action));
         MODE.set(mode);
@@ -480,6 +491,7 @@ impl HotkeyDaemon {
     /// still acts.
     pub fn set_gate(&mut self, gate: Gate) {
         GATE.store(gate.as_usize(), Ordering::Relaxed);
+        GATE_CHANGES.fetch_add(1, Ordering::Relaxed);
         tracing::info!(gate = gate.as_str(), "hotkey gate");
     }
 
