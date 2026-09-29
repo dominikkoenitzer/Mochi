@@ -15,6 +15,7 @@ pub const DEFAULT: &str = r"# Mochi hotkeys. Saved changes are picked up at once
 # Syntax:   modifier + modifier + key : command
 # Commands: anything `mochic` takes, without the `mochic`. See `mochic --help`.
 #           A line that does not start with a Mochi command is run by the shell.
+# Modes:    keys inside a `mode <name> { ... }` block work only in that mode.
 #
 # The way out is alt + shift + e. It stops Mochi, puts every window it was
 # hiding back, takes the borders down and unbinds these keys, leaving the
@@ -59,6 +60,23 @@ alt + shift + u         : resize-axis horizontal decrease
 alt + shift + p         : resize-axis horizontal increase
 alt + shift + i         : resize-axis vertical decrease
 alt + shift + o         : resize-axis vertical increase
+
+# Or resize with the focus keys. alt + shift + s enters resize mode, where h
+# and l make the window narrower and wider and j and k make it taller and
+# shorter, as often as you like. Esc or Enter leaves. In the mode no other
+# Mochi key works and every other key reaches the application, so typing
+# still types. Not alt + r: alt with a bare letter belongs to Windows (see the
+# top of this file), and alt + shift + r reloads this file.
+alt + shift + s         : mode resize
+
+mode resize {
+    h                   : resize-axis horizontal decrease
+    j                   : resize-axis vertical increase
+    k                   : resize-axis vertical decrease
+    l                   : resize-axis horizontal increase
+    esc                 : mode default
+    enter               : mode default
+}
 
 # Window state
 alt + shift + space     : toggle-float
@@ -117,14 +135,78 @@ mod tests {
     #[test]
     fn every_line_of_the_shipped_file_is_a_mochi_command() {
         let bindings = Bindings::parse(DEFAULT).expect("the shipped hotkeys parse");
-        for binding in bindings.iter() {
+        let everything = bindings
+            .iter()
+            .chain(bindings.modes().flat_map(crate::Mode::iter));
+        for binding in everything {
             assert!(
-                matches!(binding.action, Action::Command(_)),
+                matches!(binding.action, Action::Command(_) | Action::Mode(_)),
                 "line {} is not a Mochi command: {}",
                 binding.line,
                 binding.source
             );
         }
+    }
+
+    #[test]
+    fn the_shipped_resize_mode_does_what_the_file_says() {
+        use crate::ModeState;
+        use mochi_client::{Axis, Command, Sizing};
+
+        let bindings = Bindings::parse(DEFAULT).expect("the shipped hotkeys parse");
+        let key = |text: &str| text.parse::<Trigger>().expect("spelled right");
+        let resize = |axis, sizing| Action::Command(Command::ResizeAxis { axis, sizing });
+
+        let modes: Vec<&str> = bindings.modes().map(crate::Mode::name).collect();
+        assert_eq!(modes, ["resize"]);
+
+        for leave in ["esc", "enter"] {
+            let mut state = ModeState::new();
+            let enter = state
+                .press(&bindings, key("alt + shift + s"), |_| true)
+                .expect("alt + shift + s enters the mode");
+            assert_eq!(enter.action, Action::Mode("resize".to_owned()));
+            assert_eq!(bindings.mode_name(state.active()), "resize");
+
+            for (text, action) in [
+                ("h", resize(Axis::Horizontal, Sizing::Decrease)),
+                ("j", resize(Axis::Vertical, Sizing::Increase)),
+                ("k", resize(Axis::Vertical, Sizing::Decrease)),
+                ("l", resize(Axis::Horizontal, Sizing::Increase)),
+            ] {
+                let fired = state.press(&bindings, key(text), |_| true);
+                assert_eq!(fired.map(|b| &b.action), Some(&action), "{text}");
+            }
+            // Typing still types, and the top-level keys are asleep.
+            for text in ["a", "e", "space", "alt + h", "alt + shift + e"] {
+                assert!(
+                    state.press(&bindings, key(text), |_| true).is_none(),
+                    "{text} was taken in resize mode"
+                );
+            }
+            state.press(&bindings, key(leave), |_| true);
+            assert!(state.active().is_default(), "{leave} did not leave");
+            assert!(state.press(&bindings, key("h"), |_| true).is_none());
+        }
+    }
+
+    #[test]
+    fn the_resize_mode_key_is_free_of_the_rest_of_the_file() {
+        // The chord is not alt + r on purpose: alt with a bare letter belongs
+        // to Windows menus, which the test below holds the file to, and
+        // alt + shift + r is already the reload.
+        let bindings = Bindings::parse(DEFAULT).expect("the shipped hotkeys parse");
+        let bound = |text: &str| {
+            bindings
+                .get(text.parse::<Trigger>().expect("spelled right"))
+                .map(|binding| binding.source.clone())
+        };
+        assert_eq!(bound("alt + shift + s").as_deref(), Some("mode resize"));
+        assert_eq!(bound("alt + r"), None);
+        assert_eq!(
+            bound("alt + shift + r").as_deref(),
+            Some("reload-configuration")
+        );
     }
 
     #[test]
