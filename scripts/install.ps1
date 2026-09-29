@@ -17,8 +17,10 @@
     ever touches its own files, nothing that another program owns.
 
 .PARAMETER Version
-    Release tag to download, for example v0.1.16. Without it the repository is
-    built from source with cargo.
+    Release tag to download, for example v0.1.16, or `latest` for the newest
+    release. Without it the repository is built from source with cargo, or,
+    when the script was downloaded on its own and has no checkout around it,
+    the latest release is installed.
 
 .PARAMETER Repo
     GitHub repository to download releases from.
@@ -42,6 +44,9 @@
 
 .EXAMPLE
     .\scripts\install.ps1 -Version v0.1.16
+
+.EXAMPLE
+    .\scripts\install.ps1 -Version latest
 
 .EXAMPLE
     .\scripts\install.ps1 -Uninstall
@@ -259,9 +264,31 @@ function Invoke-CargoBuild {
     $script:SourceDir = Join-Path $root 'target\release'
 }
 
+# `latest` is resolved to the newest published release tag here, so every
+# later step works with a real tag and the download names stay exact. The
+# GitHub CLI goes first for the same reason as in the download below.
+function Resolve-ReleaseTag {
+    param([Parameter(Mandatory)][string] $Tag)
+
+    if ($Tag -ne 'latest') { return $Tag }
+    $gh = (Get-Command gh -ErrorAction SilentlyContinue)
+    if ($gh) {
+        $found = & $gh.Source release view --repo $Repo --json tagName --jq .tagName 2>$null
+        if ($LASTEXITCODE -eq 0 -and $found) { return $found.Trim() }
+    }
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
+        return $release.tag_name
+    } catch {
+        throw "could not find the latest release of $Repo ($($_.Exception.Message)). Pass a tag such as -Version v0.1.16."
+    }
+}
+
 function Save-ReleaseAsset {
     param([Parameter(Mandatory)][string] $Tag)
 
+    $Tag = Resolve-ReleaseTag -Tag $Tag
+    Write-Detail "release $Tag"
     if (-not $Tag.StartsWith('v')) { $Tag = "v$Tag" }
     # Only x64 is released. Windows on ARM can run the x64 build under
     # emulation, and a window manager is close to the worst thing to emulate:
@@ -404,6 +431,11 @@ function Clear-InstallRoot {
 function Install-Mochi {
     if ($Version) {
         Save-ReleaseAsset -Tag $Version
+    } elseif (-not (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'Cargo.toml'))) {
+        # Downloaded on its own rather than run from a checkout: there is
+        # nothing to build, so take the newest release instead of failing.
+        Write-Detail 'no checkout around this script, installing the latest release'
+        Save-ReleaseAsset -Tag 'latest'
     } else {
         Invoke-CargoBuild
     }
