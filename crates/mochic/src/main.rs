@@ -565,13 +565,19 @@ fn check_hotkeys(found: &mut Findings) {
 
     // Lossy, exactly like the daemon: a bad line costs that binding alone.
     let (bindings, errors) = mochi_hotkey::Bindings::parse_lossy(&text);
+    let modes: Vec<&str> = bindings.modes().map(mochi_hotkey::Mode::name).collect();
     found.notes.push(format!(
-        "hotkeys: {label} ({} {})",
+        "hotkeys: {label} ({} {}{})",
         bindings.len(),
         if bindings.len() == 1 {
             "binding"
         } else {
             "bindings"
+        },
+        match modes.as_slice() {
+            [] => String::new(),
+            [one] => format!(", mode {one}"),
+            many => format!(", modes {}", many.join(", ")),
         }
     ));
     if bindings.is_empty() && errors.is_empty() {
@@ -587,10 +593,20 @@ fn check_hotkeys(found: &mut Findings) {
     // binding, because the parser is right not to claim a name it does not own.
     // `focus nowhere` becomes `cmd /c focus nowhere`, which fails silently every
     // time the key is pressed. This is the only place that says so.
-    for binding in bindings.iter() {
+    let everything = bindings
+        .iter()
+        .chain(bindings.modes().flat_map(mochi_hotkey::Mode::iter));
+    for binding in everything {
         let mochi_hotkey::Action::Shell { line, .. } = &binding.action else {
             continue;
         };
+        if let Some(reason) = mochi_hotkey::mode_fallback_reason(line) {
+            found.warnings.push(format!(
+                "{label}: line {}: {reason}, which fails every time the key is pressed",
+                binding.line
+            ));
+            continue;
+        }
         if let Some(reason) = mochi_hotkey::shell_fallback_reason(line) {
             found.warnings.push(format!(
                 concat!(
