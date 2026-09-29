@@ -248,7 +248,13 @@ fn binding_rows(hotkeys: &serde_json::Value) -> Option<Vec<(String, String)>> {
         .as_array()?
         .iter()
         .map(|entry| {
-            let keys = entry.get("keys")?.as_str()?.to_owned();
+            let keys = entry.get("keys")?.as_str()?;
+            // A binding inside a `mode` block only works in that mode, and the
+            // table has to say so or it reads as a key taken from everywhere.
+            let keys = match entry.get("mode").and_then(serde_json::Value::as_str) {
+                Some(mode) => format!("{mode}: {keys}"),
+                None => keys.to_owned(),
+            };
             let command = match entry.get("command")? {
                 serde_json::Value::String(text) => text.clone(),
                 // A binding may also carry its command already split into words.
@@ -1522,6 +1528,25 @@ mod tests {
             "errors": [],
         }));
         assert_eq!(table, "alt + h    focus left\n");
+    }
+
+    #[test]
+    fn a_binding_inside_a_mode_says_which_mode() {
+        let table = hotkey_table(&serde_json::json!({
+            "gate": "all",
+            "bindings": [
+                {"keys": "alt + shift + s", "command": "mode resize"},
+                {"mode": "resize", "keys": "h", "command": "resize-axis horizontal decrease"},
+            ],
+            "errors": [],
+        }));
+        assert_eq!(
+            table,
+            concat!(
+                "alt + shift + s    mode resize\n",
+                "resize: h          resize-axis horizontal decrease\n",
+            )
+        );
     }
 
     #[test]
