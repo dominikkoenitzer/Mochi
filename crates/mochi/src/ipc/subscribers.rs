@@ -419,11 +419,11 @@ mod tests {
         let sent = Notification::new(NotificationEvent::MonitorsChanged { count: 2 });
         while std::time::Instant::now() < deadline {
             subs.notify(sent.clone());
-            if let Ok(got) = seen_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                if got == sent {
-                    assert_eq!(subs.names(), std::slice::from_ref(&name));
-                    return;
-                }
+            if let Ok(got) = seen_rx.recv_timeout(std::time::Duration::from_millis(100))
+                && got == sent
+            {
+                assert_eq!(subs.names(), std::slice::from_ref(&name));
+                return;
             }
         }
         panic!(
