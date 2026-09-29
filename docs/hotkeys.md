@@ -9,8 +9,8 @@ pressed.
 
 `mochic quickstart` writes a hotkey file when there is none, and the install
 script runs it for you. It binds about fifty keys, all of them Mochi commands,
-and it doubles as the reference: every command worth a key appears in it at
-least once.
+plus a resize mode (see [Modes](#modes)), and it doubles as the reference:
+every command worth a key appears in it at least once.
 
 Two things about it are worth knowing before Mochi is started for the first
 time.
@@ -104,6 +104,56 @@ contain them:
 ```
 alt + b                 : [console]::beep(440,200)
 ```
+
+### Modes
+
+A `mode` block holds keys that work only while that mode is on, the way i3 and
+GlazeWM binding modes do. `mode <name>` on the right of a binding switches to
+it, and `mode default` switches back to the keys outside every block:
+
+```
+alt + shift + s         : mode resize
+
+mode resize {
+    h                   : resize-axis horizontal decrease
+    j                   : resize-axis vertical increase
+    k                   : resize-axis vertical decrease
+    l                   : resize-axis horizontal increase
+    esc                 : mode default
+    enter               : mode default
+}
+```
+
+The shipped file has exactly this block. While a mode is on, only its own keys
+are Mochi's. Every other key, including the ones bound outside the block, goes
+to the application as if Mochi were not there, so typing still types and
+`alt + h` is whatever the application makes of it. A command inside the block
+leaves the mode on, so `l` can be pressed as often as the window needs; a
+`mode` line inside it switches straight to the mode it names.
+
+The rules the parser holds a file to, each reported with its line number by
+`mochic check` and `mochic hotkeys`:
+
+- A name is letters, digits, `-` and `_`, in any case. `default` is taken.
+- `mode <name>` has to name a block the file has, or `default`. The block may
+  come after the key that enters it.
+- Every mode needs a key that leads back to `default`, directly or through
+  another mode. A mode without one is left out, along with every key into it,
+  so a missing `esc` line cannot keep `h` from being typed.
+- Blocks do not nest, a block is closed with a `}` on its own line, and a key
+  is bound once per block. The same key may do something different in each.
+
+A file with no `mode` block at all reads exactly as it did before modes
+existed: there, `mode con` is the `cmd` command of that name, and
+`mochic check` says so when a line looks like a mode switch that lost its
+block. In a file that has modes, `cmd /c mode con` still reaches the builtin.
+
+Game mode, `mochic set-hotkeys disable` and every reload of the file go back
+to `default`, so none of them can leave the keyboard in a mode.
+
+`mochic hotkeys` lists a block's keys with the mode in front, as in
+`resize: h`. Nothing on screen shows which mode is on; the log records every
+switch as a `hotkey mode` line.
 
 ### Key names
 
@@ -220,6 +270,8 @@ alt + shift + g : toggle-game-mode
 
 - `mochic hotkeys` shows what is bound, so a typo shows up as a missing line or
   as a parse error with its line number.
+- A mode may still be on. Inside one only its own keys are bound; in the
+  shipped file `Esc` leaves it.
 - The log at `%LOCALAPPDATA%\mochi\mochi.log` records every hotkey that fired
   and every shell command that failed to start.
 - Another program may own the key. Windows calls the most recently installed
