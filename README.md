@@ -144,6 +144,10 @@ milliseconds, so the check costs nothing.
 .\scripts\autostart.ps1 -Watchdog
 ```
 
+With the watchdog on, `alt + shift + e` stops Mochi only until the next check:
+the task starts it again within five minutes. `-Disable` removes the watchdog
+along with the Run value, and that is the way out for good.
+
 ## Running it
 
 Look before you leap. A dry run reads the desktop and writes nothing at all: no

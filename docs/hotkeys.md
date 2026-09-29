@@ -18,7 +18,9 @@ time.
 **The way out is `alt + shift + e`.** It stops Mochi, puts back every window it
 was hiding, takes the borders down and unbinds every one of these keys. A
 tiling window manager rearranges the whole screen the moment it starts, and
-nobody should have to read a manual to undo that.
+nobody should have to read a manual to undo that. If the autostart watchdog is
+on, it starts Mochi again within five minutes; `scripts\autostart.ps1 -Disable`
+removes it.
 
 **`alt` plus an arrow is deliberately not bound.** `alt + left` and `alt + right`
 are Back and Forward in every browser on Windows, and `alt + up` is the parent
