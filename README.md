@@ -38,8 +38,8 @@ What works: BSP, columns, rows, the two stacks, ultrawide and grid layouts;
 focus, move and resize by direction; workspaces and monitors, including a screen
 that is unplugged and comes back; float, monocle, maximize and minimize; stack,
 unstack and cycle-stack; ignore, float and workspace rules; borders,
-transparency and animated moves; hotkeys, pause, reload, and a game mode that
-gives a game every key. Every visual setting has a command, and a command takes
+transparency and animated moves; hotkeys with binding modes, pause, reload, and
+a game mode that gives a game every key. Every visual setting has a command, and a command takes
 effect the moment it lands rather than on the next reload.
 
 Mochi draws borders and nothing else. There is no bar, no tab strip and none is
@@ -77,7 +77,10 @@ would rather have them.
 The file lives at `%USERPROFILE%\.config\mochi\hotkeys` and is reloaded the
 moment it is saved. `mochic hotkeys` prints what Mochi made of it. Game mode is
 one command: it pauses tiling and suspends every binding except the one that
-turns it off again, so the game in front gets the whole keyboard.
+turns it off again, so the game in front gets the whole keyboard. A `mode`
+block holds keys that only work while that mode is on: `alt + shift + s`
+enters the shipped resize mode, where `h`, `j`, `k` and `l` resize and `Esc`
+leaves.
 
 The full reference is [docs/hotkeys.md](docs/hotkeys.md).
 
