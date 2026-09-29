@@ -30,14 +30,17 @@
 
 mod default;
 mod key;
+mod mode;
 mod parse;
 mod shell;
 mod trigger;
 
 pub use default::DEFAULT;
 pub use key::Key;
+pub use mode::{DEFAULT_MODE, ModeId, ModeState};
 pub use parse::{
-    Action, Binding, Bindings, ParseError, ParseErrors, command_from_words, shell_fallback_reason,
+    Action, Binding, Bindings, Mode, ParseError, ParseErrors, command_from_words,
+    shell_fallback_reason,
 };
 pub use shell::Shell;
 pub use trigger::{Modifiers, Trigger};

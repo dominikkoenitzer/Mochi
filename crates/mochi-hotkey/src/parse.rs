@@ -11,6 +11,17 @@
 //! alt + [1,2,3]   : focus-workspace [0,1,2]
 //! ```
 //!
+//! A `mode` block holds bindings that only fire while that mode is active, and
+//! `mode <name>` on the right of a binding switches to it:
+//!
+//! ```text
+//! alt + shift + s : mode resize
+//! mode resize {
+//!     h   : resize-axis horizontal decrease
+//!     esc : mode default
+//! }
+//! ```
+//!
 //! Parsing never stops at the first bad line. [`Bindings::parse`] collects every
 //! error and fails as a whole, which is what a `--check` wants, while
 //! [`Bindings::parse_lossy`] keeps the good lines and hands the errors back, so
@@ -21,6 +32,7 @@ use std::sync::OnceLock;
 
 use mochi_client::Command;
 
+use crate::mode::{DEFAULT_MODE, ModeId};
 use crate::shell::Shell;
 use crate::trigger::Trigger;
 
@@ -36,6 +48,12 @@ pub enum Action {
         /// The line, exactly as written after the `:`.
         line: String,
     },
+    /// Switch the keyboard to another set of bindings: the `mode` block of
+    /// this name, or [`DEFAULT_MODE`] for the bindings outside every block.
+    ///
+    /// The name is always one the file defines; the parser drops a binding
+    /// that names anything else.
+    Mode(String),
 }
 
 /// One binding: a trigger, what it does, and where it came from.
@@ -88,17 +106,84 @@ impl std::ops::Deref for ParseErrors {
     }
 }
 
+/// One set of bindings: the file's top level, or one `mode` block.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Table {
+    by_trigger: HashMap<Trigger, Binding>,
+    /// The triggers in source order, so `iter` does not have to sort.
+    order: Vec<Trigger>,
+}
+
+impl Table {
+    fn get(&self, trigger: Trigger) -> Option<&Binding> {
+        self.by_trigger.get(&trigger)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Binding> {
+        self.order.iter().filter_map(|trigger| self.get(*trigger))
+    }
+
+    fn remove_where(&mut self, doomed: impl Fn(&Binding) -> bool) {
+        self.by_trigger.retain(|_, binding| !doomed(binding));
+        let kept = &self.by_trigger;
+        self.order.retain(|trigger| kept.contains_key(trigger));
+    }
+}
+
+/// A `mode` block: bindings that fire only while the mode is active.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mode {
+    name: String,
+    line: usize,
+    table: Table,
+}
+
+impl Mode {
+    /// The name after `mode`, in lower case.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The 1-based line of the `mode <name> {` that opened the block.
+    pub fn line(&self) -> usize {
+        self.line
+    }
+
+    /// The binding a key press fires while this mode is active.
+    pub fn get(&self, trigger: Trigger) -> Option<&Binding> {
+        self.table.get(trigger)
+    }
+
+    /// How many bindings the block holds.
+    pub fn len(&self) -> usize {
+        self.table.order.len()
+    }
+
+    /// True when the block binds nothing.
+    pub fn is_empty(&self) -> bool {
+        self.table.order.is_empty()
+    }
+
+    /// The block's bindings, in the order the file lists them.
+    pub fn iter(&self) -> impl Iterator<Item = &Binding> {
+        self.table.iter()
+    }
+}
+
 /// Every binding in a file, ready for a keyboard hook to query.
 ///
 /// Lookup goes through a [`HashMap`], so [`Bindings::get`] is one hash of nine
 /// bytes and no allocation at all; it is called on every key press. The struct
 /// owns everything it holds, which makes it `Send` and `'static` so the daemon
 /// can pass a `Box<Bindings>` to its hook thread.
+///
+/// [`Bindings::get`], [`Bindings::iter`] and [`Bindings::len`] are about the
+/// bindings outside every `mode` block, the ones live when no mode is.
+/// [`Bindings::modes`] and [`Bindings::get_in`] reach the rest.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Bindings {
-    by_trigger: HashMap<Trigger, Binding>,
-    /// The triggers in source order, so `iter` does not have to sort.
-    order: Vec<Trigger>,
+    table: Table,
+    modes: Vec<Mode>,
     shell: Shell,
 }
 
@@ -121,45 +206,86 @@ impl Bindings {
     /// This is what the daemon loads a live file with: a typo on one line
     /// costs that binding and nothing else.
     pub fn parse_lossy(text: &str) -> (Self, Vec<ParseError>) {
-        let mut bindings = Self::default();
-        let mut errors = Vec::new();
-
         // A file saved by a Windows editor or written by `Out-File` starts with
         // a byte order mark. It is not whitespace, so leaving it in front of the
         // first line would cost that line: a `.shell` directive stops being one
         // and every shell binding under it would run in the wrong shell.
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
 
-        for (index, raw) in text.lines().enumerate() {
-            let line = index + 1;
-            let content = strip_comment(raw).trim();
-            if content.is_empty() {
-                continue;
-            }
-            if let Err(error) = bindings.read_line(line, content) {
-                errors.extend(error);
-            }
-        }
+        let lines = || {
+            text.lines()
+                .enumerate()
+                .map(|(index, raw)| (index + 1, strip_comment(raw).trim()))
+                .filter(|(_, content)| !content.is_empty())
+        };
 
-        (bindings, errors)
+        // `mode <name>` on the right of a binding is also a `cmd` builtin, and
+        // a file from before modes existed may well bind it. It only means a
+        // mode switch in a file that has modes to switch to.
+        let mut reader = Reader {
+            has_modes: lines().any(|(_, content)| mode_header(content).is_some()),
+            ..Reader::default()
+        };
+
+        for (line, content) in lines() {
+            reader.read(line, content);
+        }
+        reader.finish()
     }
 
-    /// The binding a key press fires, if there is one.
+    /// The binding a key press fires while no mode is active, if there is one.
     ///
     /// A hash lookup on a `Copy` key: no allocation, safe to call from inside a
     /// low-level keyboard hook.
     pub fn get(&self, trigger: Trigger) -> Option<&Binding> {
-        self.by_trigger.get(&trigger)
+        self.table.get(trigger)
     }
 
-    /// How many bindings were read.
+    /// The binding a key press fires while `mode` is active, if there is one.
+    ///
+    /// Only that mode's bindings are looked at: a key the mode does not bind
+    /// is not Mochi's while it is active, whatever the top level says. A
+    /// [`ModeId`] from another set of bindings finds nothing.
+    pub fn get_in(&self, mode: ModeId, trigger: Trigger) -> Option<&Binding> {
+        match mode.index() {
+            None => self.get(trigger),
+            Some(index) => self.modes.get(index)?.get(trigger),
+        }
+    }
+
+    /// The mode a `mode <name>` binding switches to, or `None` for a name the
+    /// file does not define. [`DEFAULT_MODE`] is always there.
+    pub fn mode_id(&self, name: &str) -> Option<ModeId> {
+        if name.eq_ignore_ascii_case(DEFAULT_MODE) {
+            return Some(ModeId::DEFAULT);
+        }
+        self.modes
+            .iter()
+            .position(|mode| mode.name.eq_ignore_ascii_case(name))
+            .map(ModeId::of_index)
+    }
+
+    /// The name of a mode, [`DEFAULT_MODE`] for the top level and for an id
+    /// that does not belong to these bindings.
+    pub fn mode_name(&self, mode: ModeId) -> &str {
+        mode.index()
+            .and_then(|index| self.modes.get(index))
+            .map_or(DEFAULT_MODE, |mode| mode.name.as_str())
+    }
+
+    /// Every `mode` block, in the order the file lists them.
+    pub fn modes(&self) -> impl Iterator<Item = &Mode> {
+        self.modes.iter()
+    }
+
+    /// How many bindings were read outside every `mode` block.
     pub fn len(&self) -> usize {
-        self.order.len()
+        self.table.order.len()
     }
 
-    /// True when the file bound nothing.
+    /// True when the file bound nothing outside a `mode` block.
     pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
+        self.table.order.is_empty()
     }
 
     /// The shell the file's `.shell` line named, [`Shell::Cmd`] by default.
@@ -167,18 +293,268 @@ impl Bindings {
         self.shell
     }
 
-    /// Every binding, in the order the file lists them.
+    /// Every binding outside a `mode` block, in the order the file lists them.
     pub fn iter(&self) -> impl Iterator<Item = &Binding> {
-        self.order.iter().filter_map(|trigger| self.get(*trigger))
+        self.table.iter()
     }
 }
 
-impl Bindings {
+/// Where the lines being read are going.
+#[derive(Debug, Clone, Copy)]
+enum Block {
+    /// Into the `mode` block at this index of [`Bindings::modes`].
+    Mode { index: usize, line: usize },
+    /// Nowhere: a block whose header was wrong. Its lines are still read, so
+    /// their own mistakes are reported, but none of them is bound. Letting
+    /// them fall through to the top level would turn a bare `h` meant for a
+    /// mode into a key taken from every application.
+    Discard { line: usize },
+}
+
+/// The state of one pass over a file.
+#[derive(Debug, Default)]
+struct Reader {
+    bindings: Bindings,
+    errors: Vec<ParseError>,
+    /// The blocks open around the current line, innermost last.
+    open: Vec<Block>,
+    /// Whether the file has a `mode <name> {` line anywhere.
+    has_modes: bool,
+}
+
+impl Reader {
+    fn read(&mut self, line: usize, content: &str) {
+        let error = |text: &str, message: String| ParseError {
+            line,
+            text: text.to_owned(),
+            message,
+        };
+
+        if let Some(name) = mode_header(content) {
+            let block = match self.open_mode(line, name) {
+                Ok(index) => Block::Mode { index, line },
+                Err(message) => {
+                    self.errors.push(error(content, message));
+                    Block::Discard { line }
+                }
+            };
+            self.open.push(block);
+            return;
+        }
+
+        if content == "}" {
+            if self.open.pop().is_none() {
+                self.errors.push(error(
+                    content,
+                    "`}` closes a mode block that was never opened".to_owned(),
+                ));
+            }
+            return;
+        }
+
+        let mut target = match self.open.last() {
+            Some(Block::Discard { .. }) => Table::default(),
+            Some(Block::Mode { index, .. }) => {
+                std::mem::take(&mut self.bindings.modes[*index].table)
+            }
+            None => std::mem::take(&mut self.bindings.table),
+        };
+        if let Err(errors) = self.read_line(&mut target, line, content) {
+            self.errors.extend(errors);
+        }
+        match self.open.last() {
+            Some(Block::Discard { .. }) => {}
+            Some(Block::Mode { index, .. }) => self.bindings.modes[*index].table = target,
+            None => self.bindings.table = target,
+        }
+    }
+
+    /// Checks a `mode <name> {` line and starts its block, giving back where
+    /// in [`Bindings::modes`] it went.
+    fn open_mode(&mut self, line: usize, name: &str) -> Result<usize, String> {
+        if let Some(outer) = self.open.last() {
+            let (Block::Mode { line: at, .. } | Block::Discard { line: at }) = *outer;
+            return Err(format!(
+                "mode blocks do not nest, the block opened on line {at} is still open"
+            ));
+        }
+        if name.is_empty() {
+            return Err("a mode block needs a name, as in `mode resize {`".to_owned());
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!(
+                "`{name}` is not a mode name, a name is letters, digits, `-` and `_`"
+            ));
+        }
+        let name = name.to_ascii_lowercase();
+        if name == DEFAULT_MODE {
+            return Err(
+                "`default` is the name of the bindings outside every block, a block cannot take it"
+                    .to_owned(),
+            );
+        }
+        if let Some(first) = self.bindings.modes.iter().find(|mode| mode.name == name) {
+            return Err(format!(
+                "mode `{name}` is already defined on line {}",
+                first.line
+            ));
+        }
+        self.bindings.modes.push(Mode {
+            name,
+            line,
+            table: Table::default(),
+        });
+        Ok(self.bindings.modes.len() - 1)
+    }
+
+    /// Closes what is still open and drops every mode switch that could strand
+    /// the keyboard.
+    fn finish(mut self) -> (Bindings, Vec<ParseError>) {
+        for block in std::mem::take(&mut self.open) {
+            let (Block::Mode { line, .. } | Block::Discard { line }) = block;
+            self.errors.push(ParseError {
+                line,
+                text: "{".to_owned(),
+                message: "this mode block is never closed with a `}`".to_owned(),
+            });
+        }
+
+        self.drop_unknown_targets();
+        self.drop_modes_with_no_way_out();
+
+        self.errors.sort_by_key(|error| error.line);
+        (self.bindings, self.errors)
+    }
+
+    /// Drops every `mode <name>` binding whose name the file does not define.
+    fn drop_unknown_targets(&mut self) {
+        let known: Vec<String> = std::iter::once(DEFAULT_MODE.to_owned())
+            .chain(self.bindings.modes.iter().map(|mode| mode.name.clone()))
+            .collect();
+        let unknown = |binding: &Binding| match &binding.action {
+            Action::Mode(target) => !known.contains(target),
+            _ => false,
+        };
+
+        let tables = std::iter::once(&self.bindings.table)
+            .chain(self.bindings.modes.iter().map(|m| &m.table));
+        for binding in tables
+            .flat_map(Table::iter)
+            .filter(|binding| unknown(binding))
+        {
+            let Action::Mode(target) = &binding.action else {
+                continue;
+            };
+            self.errors.push(ParseError {
+                line: binding.line,
+                text: binding.source.clone(),
+                message: format!(
+                    "`{target}` is not a mode, this file has {}",
+                    known
+                        .iter()
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+
+        self.bindings.table.remove_where(unknown);
+        for mode in &mut self.bindings.modes {
+            mode.table.remove_where(unknown);
+        }
+    }
+
+    /// Drops every mode no key leads back out of, and every binding into one.
+    ///
+    /// A mode swallows the keys it binds for as long as it is active. One
+    /// with no way back to `default`, even through other modes, would keep
+    /// them until the file was fixed, and when the block binds `h` or `e` that
+    /// is typing the fix made impossible. Better not to enter it at all.
+    fn drop_modes_with_no_way_out(&mut self) {
+        let modes = &self.bindings.modes;
+        let mut can_leave: Vec<bool> = vec![false; modes.len()];
+        let reaches_default = |mode: &Mode, can_leave: &[bool]| {
+            mode.iter().any(|binding| match &binding.action {
+                Action::Mode(target) if target == DEFAULT_MODE => true,
+                Action::Mode(target) => modes
+                    .iter()
+                    .position(|other| &other.name == target)
+                    .is_some_and(|index| can_leave[index]),
+                _ => false,
+            })
+        };
+        loop {
+            let mut changed = false;
+            for (index, mode) in modes.iter().enumerate() {
+                if !can_leave[index] && reaches_default(mode, &can_leave) {
+                    can_leave[index] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let stranded: Vec<String> = modes
+            .iter()
+            .zip(&can_leave)
+            .filter(|(_, leaves)| !**leaves)
+            .map(|(mode, _)| mode.name.clone())
+            .collect();
+        if stranded.is_empty() {
+            return;
+        }
+
+        for mode in modes.iter().filter(|mode| stranded.contains(&mode.name)) {
+            self.errors.push(ParseError {
+                line: mode.line,
+                text: format!("mode {} {{", mode.name),
+                message: format!(
+                    "no key in mode `{}` leads back to `default`, so the mode is left out; \
+                     bind one to `mode default`",
+                    mode.name
+                ),
+            });
+        }
+
+        let into_stranded = |binding: &Binding| matches!(&binding.action, Action::Mode(target) if stranded.contains(target));
+        self.bindings
+            .modes
+            .retain(|mode| !stranded.contains(&mode.name));
+        self.bindings.table.remove_where(into_stranded);
+        for mode in &mut self.bindings.modes {
+            mode.table.remove_where(into_stranded);
+        }
+    }
+}
+
+/// The name in a `mode <name> {` line, or `None` when the line is no such
+/// thing. The name is not checked here; an empty one comes back empty.
+fn mode_header(content: &str) -> Option<&str> {
+    let rest = content.strip_suffix('{')?.trim_end();
+    let word = rest.get(..4)?;
+    let name = &rest[4..];
+    (word.eq_ignore_ascii_case("mode")
+        && (name.is_empty() || name.starts_with(char::is_whitespace)))
+    .then(|| name.trim())
+}
+
+impl Reader {
     /// Reads one non-empty, comment-free line, adding whatever it binds.
     ///
     /// A line with a `[a,b,c]` group turns into several bindings, and any of
     /// them can fail on its own, so the error side is a whole list.
-    fn read_line(&mut self, line: usize, content: &str) -> Result<(), Vec<ParseError>> {
+    fn read_line(
+        &mut self,
+        table: &mut Table,
+        line: usize,
+        content: &str,
+    ) -> Result<(), Vec<ParseError>> {
         let fail = |text: &str, message: String| {
             vec![ParseError {
                 line,
@@ -206,7 +582,7 @@ impl Bindings {
 
         let mut errors = Vec::new();
         for (trigger_text, action_text) in pairs {
-            if let Err(error) = self.add(line, &trigger_text, &action_text) {
+            if let Err(error) = self.add(table, line, &trigger_text, &action_text) {
                 errors.push(error);
             }
         }
@@ -244,15 +620,16 @@ impl Bindings {
             ));
         }
 
-        self.shell = rest.parse().map_err(|message| error(rest, message))?;
+        self.bindings.shell = rest.parse().map_err(|message| error(rest, message))?;
         Ok(())
     }
 }
 
-impl Bindings {
+impl Reader {
     /// Parses one already-expanded `trigger : action` pair and stores it.
     fn add(
-        &mut self,
+        &self,
+        table: &mut Table,
         line: usize,
         trigger_text: &str,
         action_text: &str,
@@ -263,7 +640,7 @@ impl Bindings {
             message,
         })?;
 
-        if let Some(first) = self.by_trigger.get(&trigger) {
+        if let Some(first) = table.get(trigger) {
             return Err(ParseError {
                 line,
                 text: trigger_text.to_owned(),
@@ -274,14 +651,17 @@ impl Bindings {
             });
         }
 
-        let action = action_for(action_text, self.shell).map_err(|message| ParseError {
-            line,
-            text: action_text.to_owned(),
-            message,
-        })?;
+        let action =
+            action_for(action_text, self.bindings.shell, self.has_modes).map_err(|message| {
+                ParseError {
+                    line,
+                    text: action_text.to_owned(),
+                    message,
+                }
+            })?;
 
-        self.order.push(trigger);
-        self.by_trigger.insert(
+        table.order.push(trigger);
+        table.by_trigger.insert(
             trigger,
             Binding {
                 trigger,
@@ -305,11 +685,24 @@ impl Bindings {
 /// The second half of that is not pedantry. `start` is a subcommand of `mochic`
 /// and also the Windows command for opening something, so `alt + enter : start
 /// wt` has to stay a shell line; going by the first word alone would steal it.
-fn action_for(text: &str, shell: Shell) -> Result<Action, String> {
+///
+/// `mode <name>` is a mode switch in a file that has `mode` blocks, and the
+/// `cmd` builtin of that name in one that does not, which is what it was in
+/// every file written before modes existed. Whether the name is a mode the
+/// file defines is checked once the whole file has been read, because the
+/// block may come after the key that enters it.
+fn action_for(text: &str, shell: Shell, has_modes: bool) -> Result<Action, String> {
     let words = split_words(text);
     let Some(first) = words.first() else {
         return Err("there is nothing after the `:` to run".to_owned());
     };
+
+    if has_modes
+        && let [word, name] = words.as_slice()
+        && word.eq_ignore_ascii_case("mode")
+    {
+        return Ok(Action::Mode(name.to_ascii_lowercase()));
+    }
 
     let explicit = first.eq_ignore_ascii_case("mochic") || first.eq_ignore_ascii_case("mochic.exe");
     let rest = if explicit { &words[1..] } else { &words[..] };
@@ -559,6 +952,7 @@ fn split_words(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mode::ModeId;
     use mochi_client::{CycleDirection, Direction};
 
     fn parse(text: &str) -> Bindings {
@@ -1050,5 +1444,292 @@ mod tests {
             shell_fallback_reason("").is_none(),
             "an empty line has nothing to say about"
         );
+    }
+
+    const RESIZE: &str = "\
+alt + shift + s : mode resize
+alt + h         : focus left
+mode resize {
+    h           : resize-axis horizontal decrease
+    esc         : mode default
+}
+";
+
+    #[test]
+    fn a_mode_block_keeps_its_bindings_to_itself() {
+        let bindings = parse(RESIZE);
+        assert_eq!(bindings.len(), 2, "the top level holds the two outside");
+        assert!(bindings.get("h".parse().unwrap()).is_none());
+        assert_eq!(
+            bindings
+                .get("alt + shift + s".parse().unwrap())
+                .unwrap()
+                .action,
+            Action::Mode("resize".to_owned())
+        );
+
+        let modes: Vec<&Mode> = bindings.modes().collect();
+        assert_eq!(modes.len(), 1);
+        let resize = modes[0];
+        assert_eq!(resize.name(), "resize");
+        assert_eq!(resize.line(), 3);
+        assert_eq!(resize.len(), 2);
+        assert!(!resize.is_empty());
+        let h = resize.get("h".parse().unwrap()).unwrap();
+        assert_eq!(h.line, 4);
+        assert_eq!(h.source, "resize-axis horizontal decrease");
+        assert!(matches!(
+            h.action,
+            Action::Command(Command::ResizeAxis { .. })
+        ));
+        assert_eq!(
+            resize
+                .iter()
+                .map(|b| b.trigger.to_string())
+                .collect::<Vec<_>>(),
+            ["h", "esc"]
+        );
+    }
+
+    #[test]
+    fn the_same_key_may_do_different_things_in_different_modes() {
+        let bindings = parse(concat!(
+            "alt + h : focus left\n",
+            "alt + r : mode resize\n",
+            "mode resize {\n",
+            "  alt + h : resize-axis horizontal decrease\n",
+            "  esc : mode default\n",
+            "}\n",
+        ));
+        let resize = bindings.mode_id("resize").unwrap();
+        let key = "alt + h".parse().unwrap();
+        assert_eq!(bindings.get(key).unwrap().source, "focus left");
+        assert_eq!(
+            bindings.get_in(resize, key).unwrap().source,
+            "resize-axis horizontal decrease"
+        );
+        assert_eq!(
+            bindings.get_in(ModeId::DEFAULT, key).unwrap().source,
+            "focus left"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_inside_a_mode_is_still_an_error() {
+        let found = errors("a : mode m\nmode m {\n  h : mode default\n  h : retile\n}");
+        assert_eq!(
+            found,
+            ["line 4: `h` is already bound on line 3, a key can only do one thing"]
+        );
+    }
+
+    #[test]
+    fn a_mode_can_be_entered_before_its_block_and_names_ignore_case() {
+        let bindings = parse(concat!(
+            "alt + r : MODE Resize\n",
+            "Mode RESIZE {\n",
+            "  esc : Mode Default\n",
+            "}\n",
+        ));
+        assert_eq!(
+            bindings.get("alt + r".parse().unwrap()).unwrap().action,
+            Action::Mode("resize".to_owned())
+        );
+        assert_eq!(bindings.modes().next().unwrap().name(), "resize");
+    }
+
+    #[test]
+    fn an_unknown_mode_is_an_error_with_its_line() {
+        let found = Bindings::parse(concat!(
+            "alt + r : mode resize\n",
+            "alt + m : mode moev\n",
+            "mode resize {\n",
+            "  esc : mode default\n",
+            "}\n",
+        ))
+        .unwrap_err();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].line, 2);
+        assert_eq!(found[0].text, "mode moev");
+        assert_eq!(
+            found[0].message,
+            "`moev` is not a mode, this file has `default`, `resize`"
+        );
+    }
+
+    #[test]
+    fn a_lossy_parse_drops_the_switch_to_an_unknown_mode() {
+        // The key has to reach the application, not switch to nothing.
+        let (bindings, found) =
+            Bindings::parse_lossy("alt + m : mode moev\nmode resize {\n esc : mode default\n}");
+        assert_eq!(found.len(), 1);
+        assert!(bindings.get("alt + m".parse().unwrap()).is_none());
+        assert_eq!(bindings.modes().count(), 1);
+    }
+
+    #[test]
+    fn a_mode_with_no_way_back_is_an_error_and_is_left_out() {
+        let (bindings, found) = Bindings::parse_lossy(concat!(
+            "alt + r : mode resize\n",
+            "mode resize {\n",
+            "  h : resize-axis horizontal decrease\n",
+            "}\n",
+        ));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].line, 2);
+        assert!(
+            found[0].message.contains("leads back to `default`"),
+            "{found:?}"
+        );
+        // Neither the mode nor the key into it survives, so `h` stays typable.
+        assert_eq!(bindings.modes().count(), 0);
+        assert!(bindings.get("alt + r".parse().unwrap()).is_none());
+        assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn a_way_back_through_another_mode_counts_and_a_closed_loop_does_not() {
+        let through = parse(concat!(
+            "alt + a : mode a\n",
+            "mode a {\n  b : mode b\n}\n",
+            "mode b {\n  esc : mode default\n}\n",
+        ));
+        assert_eq!(through.modes().count(), 2);
+
+        let (bindings, found) = Bindings::parse_lossy(concat!(
+            "alt + a : mode a\n",
+            "alt + c : mode c\n",
+            "mode a {\n  b : mode b\n}\n",
+            "mode b {\n  a : mode a\n}\n",
+            "mode c {\n  esc : mode default\n}\n",
+        ));
+        let lines: Vec<usize> = found.iter().map(|error| error.line).collect();
+        assert_eq!(lines, [3, 6], "{found:?}");
+        assert_eq!(bindings.modes().map(Mode::name).collect::<Vec<_>>(), ["c"]);
+        assert!(bindings.get("alt + a".parse().unwrap()).is_none());
+        assert!(bindings.get("alt + c".parse().unwrap()).is_some());
+    }
+
+    #[test]
+    fn a_bad_mode_header_is_an_error_with_its_line() {
+        assert_eq!(
+            errors("x : mode default\nmode {\n}"),
+            ["line 2: a mode block needs a name, as in `mode resize {`"]
+        );
+        assert!(errors("mode re size {\n}")[0].contains("is not a mode name"));
+        assert!(errors("mode default {\n}")[0].starts_with("line 1: `default` is the name"));
+        assert_eq!(
+            errors("mode m {\n  esc : mode default\n}\nmode m {\n}"),
+            ["line 4: mode `m` is already defined on line 1"]
+        );
+    }
+
+    #[test]
+    fn a_block_that_is_never_closed_or_closed_twice_is_an_error() {
+        assert_eq!(
+            errors("mode m {\n  esc : mode default\n"),
+            ["line 1: this mode block is never closed with a `}`"]
+        );
+        assert_eq!(
+            errors("mode m {\n  esc : mode default\n}\n}"),
+            ["line 4: `}` closes a mode block that was never opened"]
+        );
+    }
+
+    #[test]
+    fn blocks_do_not_nest() {
+        let found = errors(concat!(
+            "mode a {\n",
+            "  esc : mode default\n",
+            "  mode b {\n",
+            "    esc : mode default\n",
+            "  }\n",
+            "}\n",
+        ));
+        assert_eq!(
+            found,
+            ["line 3: mode blocks do not nest, the block opened on line 1 is still open"]
+        );
+    }
+
+    #[test]
+    fn the_lines_of_a_rejected_block_bind_nothing_anywhere() {
+        // A bare `h` meant for a mode must never land on the top level, where
+        // it would take the letter away from every application.
+        let (bindings, found) = Bindings::parse_lossy(
+            "mode default {\n  h : focus left\n  wiggle : retile\n}\nalt + h : focus left",
+        );
+        assert_eq!(
+            found.len(),
+            2,
+            "the block's own mistakes still count: {found:?}"
+        );
+        assert!(bindings.get("h".parse().unwrap()).is_none());
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings.modes().count(), 0);
+    }
+
+    #[test]
+    fn without_mode_blocks_a_mode_line_is_the_shell_builtin_it_always_was() {
+        // `mode con cols=120` and `mode com1` are `cmd` commands, and a file
+        // written before modes existed binds them as such.
+        let bindings = parse("alt + m : mode con\nalt + n : mode con cols=120");
+        for key in ["alt + m", "alt + n"] {
+            assert!(
+                matches!(
+                    bindings.get(key.parse().unwrap()).unwrap().action,
+                    Action::Shell { .. }
+                ),
+                "{key}"
+            );
+        }
+        // With blocks, three words are still a shell line; two are a switch.
+        let bindings = parse(concat!(
+            "alt + n : mode con cols=120\n",
+            "mode m {\n  esc : mode default\n}\n",
+        ));
+        assert!(matches!(
+            bindings.get("alt + n".parse().unwrap()).unwrap().action,
+            Action::Shell { .. }
+        ));
+    }
+
+    #[test]
+    fn a_file_without_modes_parses_exactly_as_before() {
+        let text = concat!(
+            ".shell pwsh\n",
+            "alt + h : mochic focus left\n",
+            "alt + [1,2] : focus-workspace [0,1]\n",
+            "alt + b : [console]::beep(440,200)\n",
+            "alt + enter : start wt\n",
+        );
+        let bindings = parse(text);
+        assert_eq!(bindings.len(), 5);
+        assert_eq!(bindings.modes().count(), 0);
+        assert!(
+            bindings
+                .iter()
+                .all(|b| !matches!(b.action, Action::Mode(_)))
+        );
+        assert_eq!(bindings.mode_id("default"), Some(ModeId::DEFAULT));
+    }
+
+    #[test]
+    fn a_group_can_switch_to_several_modes() {
+        let bindings = parse(concat!(
+            "alt + [a,b] : mode [one,two]\n",
+            "mode one {\n  esc : mode default\n}\n",
+            "mode two {\n  esc : mode default\n}\n",
+        ));
+        assert_eq!(
+            bindings.get("alt + b".parse().unwrap()).unwrap().action,
+            Action::Mode("two".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_comment_after_a_header_or_a_brace_is_fine() {
+        let bindings = parse("mode m {   # moving things\n  esc : mode default\n}   # done");
+        assert_eq!(bindings.modes().count(), 1);
     }
 }

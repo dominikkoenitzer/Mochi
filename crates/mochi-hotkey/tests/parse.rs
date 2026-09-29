@@ -48,6 +48,17 @@ fn the_real_file_parses_to_every_binding_it_holds() {
 }
 
 #[test]
+fn a_file_from_before_modes_has_none_and_switches_nothing() {
+    let bindings = bindings();
+    assert_eq!(bindings.modes().count(), 0);
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| !matches!(binding.action, Action::Mode(_)))
+    );
+}
+
+#[test]
 fn the_file_has_as_many_bindings_as_it_has_binding_lines() {
     let lines = HOTKEYS
         .lines()
