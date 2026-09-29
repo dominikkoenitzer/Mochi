@@ -56,12 +56,29 @@ const PAUSED: &str = "mochi is paused, nothing was changed";
 /// before the layout is applied to it a second time.
 const SLOW_APPLICATION_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// The `mochic hotkeys` rows of a set of bindings, in file order.
-fn rows_of(bindings: &mochi_hotkey::Bindings) -> Vec<(String, String)> {
-    bindings
-        .iter()
-        .map(|binding| (binding.trigger.to_string(), binding.source.clone()))
-        .collect()
+/// The `mochic hotkeys` rows of a set of bindings: the top level in file
+/// order, then every `mode` block's, carrying the name of its mode.
+fn rows_of(bindings: &mochi_hotkey::Bindings) -> Vec<HotkeyRow> {
+    let row = |mode: Option<&str>, binding: &mochi_hotkey::Binding| HotkeyRow {
+        mode: mode.map(str::to_owned),
+        keys: binding.trigger.to_string(),
+        command: binding.source.clone(),
+    };
+    let top = bindings.iter().map(|binding| row(None, binding));
+    let modes = bindings.modes().flat_map(|mode| {
+        mode.iter()
+            .map(move |binding| row(Some(mode.name()), binding))
+    });
+    top.chain(modes).collect()
+}
+
+/// One line of `mochic hotkeys`.
+#[derive(Debug, Clone)]
+struct HotkeyRow {
+    /// The `mode` block the binding is in, `None` for the top level.
+    mode: Option<String>,
+    keys: String,
+    command: String,
 }
 
 /// The freshly loaded configuration, with every visual key the file does not
@@ -529,7 +546,7 @@ pub struct WindowManager {
     /// One row per binding, the way `mochic hotkeys` prints them. Kept here
     /// rather than read back from the hook thread, which owns the bindings and
     /// must not be asked questions while it is matching key presses.
-    hotkey_rows: Vec<(String, String)>,
+    hotkey_rows: Vec<HotkeyRow>,
     /// The lines of the hotkey file that did not parse.
     hotkey_errors: Vec<String>,
     /// Every notification this manager sent, recorded in tests only.
@@ -2767,7 +2784,12 @@ impl WindowManager {
         let bindings: Vec<_> = self
             .hotkey_rows
             .iter()
-            .map(|(keys, command)| serde_json::json!({ "keys": keys, "command": command }))
+            .map(|row| match &row.mode {
+                Some(mode) => {
+                    serde_json::json!({ "mode": mode, "keys": row.keys, "command": row.command })
+                }
+                None => serde_json::json!({ "keys": row.keys, "command": row.command }),
+            })
             .collect();
         serde_json::json!({
             "path": self.hotkey_path.as_ref().map(|p| p.display().to_string()),
