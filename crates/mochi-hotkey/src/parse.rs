@@ -352,6 +352,8 @@ impl Reader {
             return;
         }
 
+        // The table is lent out for the line and put back after it, so the
+        // line can be read against the rest of the reader while it is added.
         let mut target = match self.open.last() {
             Some(Block::Discard { .. }) => Table::default(),
             Some(Block::Mode { index, .. }) => {
