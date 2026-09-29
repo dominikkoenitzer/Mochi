@@ -767,6 +767,26 @@ pub fn shell_fallback_reason(line: &str) -> Option<String> {
     command_from_words(&words).err()
 }
 
+/// Why a `mode <name>` line is going to be run as a shell command.
+///
+/// In a file with no `mode` blocks the line is the `cmd` builtin it always
+/// was, so a file that switches to a mode but lost its block, or never had
+/// one, runs `cmd /c mode resize` on every press and nothing says why. This
+/// is the sentence a checker prints. `None` for any other line.
+#[must_use]
+pub fn mode_fallback_reason(line: &str) -> Option<String> {
+    let words = split_words(line);
+    let [word, name] = words.as_slice() else {
+        return None;
+    };
+    word.eq_ignore_ascii_case("mode").then(|| {
+        format!(
+            "the file has no `mode {name} {{ ... }}` block, or any other, so `{line}` is \
+             handed to the shell as its `mode` command instead of switching modes"
+        )
+    })
+}
+
 /// True when `word` names a subcommand of the `mochic` grammar.
 ///
 /// The names come from clap itself rather than a list kept here by hand, so a
@@ -1725,6 +1745,21 @@ mode resize {
             bindings.get("alt + b".parse().unwrap()).unwrap().action,
             Action::Mode("two".to_owned())
         );
+    }
+
+    #[test]
+    fn a_mode_line_that_went_to_the_shell_is_told_apart() {
+        let bindings = parse("alt + r : mode resize");
+        let Action::Shell { line, .. } = &bindings.get("alt + r".parse().unwrap()).unwrap().action
+        else {
+            panic!("without blocks it is a shell line");
+        };
+        let reason = mode_fallback_reason(line).expect("a checker should hear about it");
+        assert!(reason.contains("mode resize {"), "{reason}");
+
+        assert!(mode_fallback_reason("mode con cols=120").is_none());
+        assert!(mode_fallback_reason("start wt").is_none());
+        assert!(mode_fallback_reason("").is_none());
     }
 
     #[test]
