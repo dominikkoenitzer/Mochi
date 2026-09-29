@@ -101,7 +101,15 @@ The first build takes a few minutes. Every one after that is seconds.
 
 ## Install
 
-Build and install for the current user, no admin rights needed:
+Without cloning anything, this downloads the installer and puts the latest
+release in place, checksum verified, no admin rights needed:
+
+```
+irm https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/scripts/install.ps1 -OutFile install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+From a checkout, the same script builds from source instead:
 
 ```
 .\scripts\install.ps1
@@ -125,7 +133,7 @@ recognized, which reads like the install failed when it did not.
 This puts `mochi.exe` and `mochic.exe` in `%LOCALAPPDATA%\Programs\Mochi\bin`,
 adds that folder to the user PATH and writes a default `%USERPROFILE%\mochi.json`
 and hotkey file when there is none. `-Version v0.1.16` downloads that release
-instead of building, `-Uninstall` reverses everything.
+instead of building (`-Version latest` the newest one), `-Uninstall` reverses everything.
 
 Start it at login, and see what is registered today:
 
