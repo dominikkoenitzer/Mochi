@@ -772,14 +772,23 @@ pub fn shell_fallback_reason(line: &str) -> Option<String> {
 /// In a file with no `mode` blocks the line is the `cmd` builtin it always
 /// was, so a file that switches to a mode but lost its block, or never had
 /// one, runs `cmd /c mode resize` on every press and nothing says why. This
-/// is the sentence a checker prints. `None` for any other line.
+/// is the sentence a checker prints. `None` for any other line, and for the
+/// devices `mode` really takes, `con`, `com1` and `lpt1` and their siblings:
+/// those are the builtin on purpose.
 #[must_use]
 pub fn mode_fallback_reason(line: &str) -> Option<String> {
     let words = split_words(line);
     let [word, name] = words.as_slice() else {
         return None;
     };
-    word.eq_ignore_ascii_case("mode").then(|| {
+    let lower = name.to_ascii_lowercase();
+    let numbered = |prefix: &str| {
+        lower
+            .strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let device = lower.trim_end_matches(':') == "con" || numbered("com") || numbered("lpt");
+    (word.eq_ignore_ascii_case("mode") && !device).then(|| {
         format!(
             "the file has no `mode {name} {{ ... }}` block, or any other, so `{line}` is \
              handed to the shell as its `mode` command instead of switching modes"
@@ -1758,6 +1767,10 @@ mode resize {
         assert!(reason.contains("mode resize {"), "{reason}");
 
         assert!(mode_fallback_reason("mode con cols=120").is_none());
+        for device in ["mode con", "MODE CON:", "mode com1", "mode lpt2"] {
+            assert!(mode_fallback_reason(device).is_none(), "{device}");
+        }
+        assert!(mode_fallback_reason("mode compose").is_some());
         assert!(mode_fallback_reason("start wt").is_none());
         assert!(mode_fallback_reason("").is_none());
     }
