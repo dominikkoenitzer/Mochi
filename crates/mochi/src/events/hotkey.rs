@@ -7,10 +7,10 @@
 //! **Be fast.** The callback runs inside the raw input path for every key press
 //! on the desktop. Windows silently removes a hook whose callback overruns
 //! `LowLevelHooksTimeout` (300 ms by default), so this one does a hash lookup
-//! and a non-blocking channel send and nothing else. No locks: the bindings live
-//! in thread-local storage on the hook thread and a reload is *posted* to that
-//! thread as a message rather than shared with it, and the one thing that is
-//! shared, which of them are live, is a single atomic.
+//! and a non-blocking channel send and nothing else. No locks: the bindings and
+//! the active `mode` live in thread-local storage on the hook thread and a
+//! reload is *posted* to that thread as a message rather than shared with it,
+//! and the one thing that is shared, which of them are live, is a single atomic.
 //!
 //! **Swallow nothing that was not asked for.** A key press is only ever
 //! withheld from the desktop when it matches a binding exactly. Every other key,
@@ -27,13 +27,13 @@
 //! the window sitting in its File menu. A swallowed press under Alt or Win now
 //! injects one masking keystroke, so the modifier is no longer a bare press.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, anyhow};
-use mochi_hotkey::{Action, Bindings, Key, Modifiers, Shell, Trigger};
+use mochi_hotkey::{Action, Bindings, Key, ModeState, Modifiers, Shell, Trigger};
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -122,6 +122,12 @@ impl Gate {
 thread_local! {
     /// The bindings the hook matches against. Only the hook thread touches this.
     static BINDINGS: RefCell<Bindings> = RefCell::new(Bindings::default());
+    /// Which of the file's modes the next press is matched in.
+    ///
+    /// Lives here and nowhere else: the press that switches it is read on this
+    /// thread, and so is the next one, which has to see the switch already.
+    /// Nothing else asks, so nothing has to be shared.
+    static MODE: Cell<ModeState> = const { Cell::new(ModeState::new()) };
     /// Where a match is reported.
     static SENDER: RefCell<Option<EventSender>> = const { RefCell::new(None) };
     /// What the hook did with the last press of each key that is down.
@@ -380,8 +386,17 @@ fn press(vk: u16) -> Option<Modifiers> {
     let gate = Gate::from_usize(GATE.load(Ordering::Relaxed));
     let action = BINDINGS.with(|cell| {
         let bindings = cell.borrow();
-        let binding = bindings.get(trigger)?;
-        gate.admits(&binding.action).then(|| binding.action.clone())
+        let mut mode = MODE.get();
+        // Game mode and hotkeys off belong to the top level. Whatever mode
+        // was active when they started is over: the one key game mode keeps
+        // lives at the top level, and coming back from either should not
+        // land the user in a mode they entered before it.
+        if gate != Gate::All {
+            mode.reset();
+        }
+        let binding = mode.press(&bindings, trigger, |action| gate.admits(action));
+        MODE.set(mode);
+        binding.map(|binding| binding.action.clone())
     });
 
     let action = action?;
@@ -524,6 +539,7 @@ fn hotkey_thread(tx: EventSender, bindings: Bindings, ready: Sender<Result<u32, 
     let _ = unsafe { UnhookWindowsHookEx(hook) };
     SENDER.with(|cell| *cell.borrow_mut() = None);
     BINDINGS.with(|cell| *cell.borrow_mut() = Bindings::default());
+    MODE.set(ModeState::new());
 }
 
 /// Installs the keyboard hook. Must be called on the thread that pumps it.
@@ -550,6 +566,9 @@ fn pump(mut hook: HHOOK, instance: HINSTANCE) -> HHOOK {
                 let bindings = *unsafe { Box::from_raw(message.wParam.0 as *mut Bindings) };
                 tracing::info!(bindings = bindings.len(), "hotkeys reloaded");
                 BINDINGS.with(|cell| *cell.borrow_mut() = bindings);
+                // The mode that was active may not exist in the new file, and
+                // the file is saved exactly when someone is changing it.
+                MODE.set(ModeState::new());
 
                 // Windows silently removes a low-level hook whose callback
                 // once overran its timeout, and nothing tells the process it
