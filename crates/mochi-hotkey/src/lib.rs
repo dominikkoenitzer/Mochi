@@ -25,6 +25,11 @@
 //! The grammar on the right of the `:` is the `mochic` grammar itself, taken
 //! from `mochi-client`, so a binding cannot drift away from the command line it
 //! was copied from.
+//!
+//! A `mode <name> { ... }` block holds bindings that fire only while that mode
+//! is active, and `mode <name>` on the right of a binding switches to it.
+//! [`ModeState`] is the whole state machine: which mode is active, and what a
+//! press in it does.
 
 #![deny(missing_docs)]
 
