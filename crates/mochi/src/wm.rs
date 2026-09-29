@@ -1782,6 +1782,12 @@ impl WindowManager {
                 crate::events::hotkey::run_shell(shell, &line);
                 Flow::Continue
             }
+            // The hook thread owns the active mode and switched it on the
+            // press; this is the record of it in the log.
+            mochi_hotkey::Action::Mode(mode) => {
+                tracing::info!(%trigger, mode, "hotkey mode");
+                Flow::Continue
+            }
         }
     }
 
