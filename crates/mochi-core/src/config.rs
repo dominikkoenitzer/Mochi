@@ -352,6 +352,108 @@ pub struct MonitorConfig {
     pub window_based_work_area_offset_limit: Option<usize>,
 }
 
+/// The width a scratchpad takes when its entry names none, as a fraction of
+/// the work area.
+pub const DEFAULT_SCRATCHPAD_WIDTH: f64 = 0.6;
+
+/// The height a scratchpad takes when its entry names none.
+pub const DEFAULT_SCRATCHPAD_HEIGHT: f64 = 0.5;
+
+/// The smallest fraction a scratchpad is shown at. Anything below it is a
+/// window too small to type into, which is never what a typo meant.
+pub const MIN_SCRATCHPAD_FRACTION: f64 = 0.1;
+
+/// One window kept out of the layout and summoned with `toggle-scratchpad`.
+///
+/// The window is found with `match`, or started with `command` when nothing
+/// matches, and from then on it is shown centred on the focused monitor and
+/// taken off screen again by the same command. It never takes a tile.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScratchpadConfig {
+    /// The name `toggle-scratchpad`, `scratchpad-claim` and
+    /// `scratchpad-release` are given. Case does not matter.
+    pub name: String,
+    /// Which window belongs to this scratchpad. The first window that matches
+    /// is the one taken, so a title or a class says more than an executable.
+    #[serde(rename = "match")]
+    pub rule: MatchingRule,
+    /// The command line that starts the application when no window matches,
+    /// run through `cmd.exe` the way a hotkey shell line is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Width as a fraction of the monitor's work area. Defaults to `0.6`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    /// Height as a fraction of the monitor's work area. Defaults to `0.5`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f64>,
+    /// Take the window off screen as soon as another application takes the
+    /// focus. A dialog of the same process does not count. Defaults to `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hide_on_focus_loss: Option<bool>,
+}
+
+/// Sound because a fraction can only come from JSON, which has no NaN, and the
+/// one value that breaks reflexivity can therefore never be stored here.
+/// Without it the whole [`Config`] would lose `Eq` over two numbers.
+impl Eq for ScratchpadConfig {}
+
+impl ScratchpadConfig {
+    /// The width fraction, clamped to what can be shown.
+    #[must_use]
+    pub fn width(&self) -> f64 {
+        fraction(self.width, DEFAULT_SCRATCHPAD_WIDTH)
+    }
+
+    /// The height fraction, clamped to what can be shown.
+    #[must_use]
+    pub fn height(&self) -> f64 {
+        fraction(self.height, DEFAULT_SCRATCHPAD_HEIGHT)
+    }
+
+    /// Whether another application taking the focus hides the window.
+    #[must_use]
+    pub fn hides_on_focus_loss(&self) -> bool {
+        self.hide_on_focus_loss.unwrap_or(true)
+    }
+
+    /// The rectangle this scratchpad takes, centred in `work_area`.
+    #[must_use]
+    pub fn rect_in(&self, work_area: Rect) -> Rect {
+        // Rounded, not truncated, so an even fraction of an even area is
+        // exact and the window sits in the middle to the pixel.
+        #[allow(clippy::cast_possible_truncation)]
+        let scaled = |length: i32, fraction: f64| (f64::from(length) * fraction).round() as i32;
+        let width = scaled(work_area.width(), self.width());
+        let height = scaled(work_area.height(), self.height());
+        let left = work_area.left + (work_area.width() - width) / 2;
+        let top = work_area.top + (work_area.height() - height) / 2;
+        Rect::new(left, top, left + width, top + height)
+    }
+
+    /// Reports an entry that cannot do what it says.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::EmptyScratchpadName`] for an entry with no name, or whatever
+    /// the `match` rule reports from [`MatchingRule::validate`].
+    pub fn validate(&self) -> Result<()> {
+        if self.name.trim().is_empty() {
+            return Err(Error::EmptyScratchpadName);
+        }
+        self.rule.validate()
+    }
+}
+
+/// A configured fraction, or `default` when it is missing, and never outside
+/// what a window can be shown at.
+fn fraction(value: Option<f64>, default: f64) -> f64 {
+    match value {
+        Some(value) if value.is_finite() => value.clamp(MIN_SCRATCHPAD_FRACTION, 1.0),
+        _ => default,
+    }
+}
+
 /// The whole configuration file.
 ///
 /// Everything is optional. [`Config::default`] is what you get from an empty
@@ -451,6 +553,10 @@ pub struct Config {
     pub transparency_ignore_rules: Option<Vec<MatchingRule>>,
     /// Applications that need an extra beat before their window is ready.
     pub slow_application_identifiers: Option<Vec<MatchingRule>>,
+
+    /// Windows kept out of the layout, each summoned by name with
+    /// `toggle-scratchpad`.
+    pub scratchpads: Option<Vec<ScratchpadConfig>>,
 
     /// The monitors, in the order they should be indexed.
     pub monitors: Option<Vec<MonitorConfig>>,
@@ -1893,6 +1999,7 @@ mod tests {
             "work_area_offset",
             "monitor_index_preferences",
             "display_index_preferences",
+            "scratchpads",
         ] {
             assert!(properties.contains_key(key), "the schema is missing {key}");
         }
@@ -1944,5 +2051,128 @@ mod tests {
                 "the schema is missing the configured key {key}"
             );
         }
+    }
+
+    #[test]
+    fn a_scratchpad_entry_parses_with_its_rule_under_match() {
+        let config = Config::from_json(
+            r#"{
+              "scratchpads": [{
+                "name": "term",
+                "match": { "kind": "Title", "id": "scratch", "matching_strategy": "Equals" },
+                "command": "wt.exe -w new --title scratch --suppressApplicationTitle",
+                "width": 0.6,
+                "height": 0.5,
+                "hide_on_focus_loss": true
+              }]
+            }"#,
+        )
+        .unwrap();
+        let pads = config.scratchpads.as_deref().expect("the list was dropped");
+        assert_eq!(pads.len(), 1);
+        let pad = &pads[0];
+        assert_eq!(pad.name, "term");
+        assert_eq!(
+            pad.rule,
+            MatchingRule::simple(
+                crate::rules::ApplicationIdentifier::Title,
+                "scratch",
+                crate::rules::MatchingStrategy::Equals
+            )
+        );
+        assert_eq!(
+            pad.command.as_deref(),
+            Some("wt.exe -w new --title scratch --suppressApplicationTitle")
+        );
+        assert!(pad.hides_on_focus_loss());
+        assert!(pad.validate().is_ok());
+
+        // And it survives the trip back to disk.
+        let back = Config::from_json(&config.to_json().unwrap()).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn a_scratchpad_that_names_only_what_it_must_gets_the_defaults() {
+        let config = Config::from_json(
+            r#"{ "scratchpads": [{ "name": "notes", "match": [
+                { "kind": "Exe", "id": "notepad.exe", "matching_strategy": "Equals" },
+                { "kind": "Title", "id": "scratch", "matching_strategy": "Contains" }
+            ] }] }"#,
+        )
+        .unwrap();
+        let pad = &config.scratchpads.unwrap()[0];
+        assert_eq!(pad.command, None);
+        assert!((pad.width() - DEFAULT_SCRATCHPAD_WIDTH).abs() < f64::EPSILON);
+        assert!((pad.height() - DEFAULT_SCRATCHPAD_HEIGHT).abs() < f64::EPSILON);
+        assert!(pad.hides_on_focus_loss());
+        assert_eq!(
+            pad.rule.conditions().len(),
+            2,
+            "a composite rule is accepted"
+        );
+    }
+
+    #[test]
+    fn a_scratchpad_without_a_rule_is_a_parse_error_not_a_window_for_everything() {
+        assert!(Config::from_json(r#"{ "scratchpads": [{ "name": "term" }] }"#).is_err());
+    }
+
+    #[test]
+    fn a_scratchpad_fraction_is_kept_to_what_can_be_shown() {
+        let pad = |width: f64| ScratchpadConfig {
+            name: "term".into(),
+            rule: MatchingRule::simple(
+                crate::rules::ApplicationIdentifier::Title,
+                "scratch",
+                crate::rules::MatchingStrategy::Equals,
+            ),
+            command: None,
+            width: Some(width),
+            height: None,
+            hide_on_focus_loss: Some(false),
+        };
+        assert!((pad(3.0).width() - 1.0).abs() < f64::EPSILON);
+        assert!((pad(0.0).width() - MIN_SCRATCHPAD_FRACTION).abs() < f64::EPSILON);
+        assert!((pad(-1.0).width() - MIN_SCRATCHPAD_FRACTION).abs() < f64::EPSILON);
+        assert!((pad(0.75).width() - 0.75).abs() < f64::EPSILON);
+        assert!(!pad(0.5).hides_on_focus_loss());
+    }
+
+    #[test]
+    fn a_scratchpad_is_centred_in_the_work_area_it_is_given() {
+        let pad = ScratchpadConfig {
+            name: "term".into(),
+            rule: MatchingRule::simple(
+                crate::rules::ApplicationIdentifier::Title,
+                "scratch",
+                crate::rules::MatchingStrategy::Equals,
+            ),
+            command: None,
+            width: Some(0.5),
+            height: Some(0.5),
+            hide_on_focus_loss: None,
+        };
+        // A work area that does not start at the origin, the way a second
+        // screen or a taskbar on the left leaves it.
+        let rect = pad.rect_in(Rect::new(3840, 40, 4920, 1960));
+        assert_eq!(rect, Rect::new(4110, 520, 4650, 1480));
+    }
+
+    #[test]
+    fn a_scratchpad_with_no_name_or_an_empty_rule_is_reported() {
+        let empty_name = Config::from_json(
+            r#"{ "scratchpads": [{ "name": " ", "match": { "kind": "Title", "id": "x" } }] }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_name.scratchpads.unwrap()[0].validate(),
+            Err(Error::EmptyScratchpadName)
+        );
+        let empty_id = Config::from_json(
+            r#"{ "scratchpads": [{ "name": "term", "match": { "kind": "Title", "id": "" } }] }"#,
+        )
+        .unwrap();
+        assert!(empty_id.scratchpads.unwrap()[0].validate().is_err());
     }
 }

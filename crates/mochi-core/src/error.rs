@@ -80,6 +80,10 @@ pub enum Error {
         kind: crate::rules::ApplicationIdentifier,
     },
 
+    /// A `scratchpads` entry had no name, so no command could ever reach it.
+    #[error("a scratchpad has an empty name, so no command can reach it")]
+    EmptyScratchpadName,
+
     /// JSON could not be turned into a config or a rule set.
     #[error("invalid json: {0}")]
     Json(String),

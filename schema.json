@@ -276,6 +276,17 @@
       "format": "int32",
       "default": null
     },
+    "scratchpads": {
+      "description": "Windows kept out of the layout, each summoned by name with\n`toggle-scratchpad`.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/ScratchpadConfig"
+      }
+    },
     "slow_application_identifiers": {
       "description": "Applications that need an extra beat before their window is ready.",
       "type": [
@@ -1063,6 +1074,54 @@
         "top",
         "right",
         "bottom"
+      ]
+    },
+    "ScratchpadConfig": {
+      "description": "One window kept out of the layout and summoned with `toggle-scratchpad`.\n\nThe window is found with `match`, or started with `command` when nothing\nmatches, and from then on it is shown centred on the focused monitor and\ntaken off screen again by the same command. It never takes a tile.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The command line that starts the application when no window matches,\nrun through `cmd.exe` the way a hotkey shell line is.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "height": {
+          "description": "Height as a fraction of the monitor's work area. Defaults to `0.5`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "hide_on_focus_loss": {
+          "description": "Take the window off screen as soon as another application takes the\nfocus. A dialog of the same process does not count. Defaults to `true`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "match": {
+          "description": "Which window belongs to this scratchpad. The first window that matches\nis the one taken, so a title or a class says more than an executable.",
+          "$ref": "#/$defs/MatchingRule"
+        },
+        "name": {
+          "description": "The name `toggle-scratchpad`, `scratchpad-claim` and\n`scratchpad-release` are given. Case does not matter.",
+          "type": "string"
+        },
+        "width": {
+          "description": "Width as a fraction of the monitor's work area. Defaults to `0.6`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "name",
+        "match"
       ]
     },
     "StackbarConfig": {
