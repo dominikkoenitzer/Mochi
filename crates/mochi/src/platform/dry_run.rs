@@ -60,6 +60,11 @@ impl<P: Platform> Platform for DryRunPlatform<P> {
         self.inner.is_maximized(hwnd)
     }
 
+    fn window_shape(&self, hwnd: Hwnd) -> Option<crate::platform::types::WindowShape> {
+        // A read, so it passes through.
+        self.inner.window_shape(hwnd)
+    }
+
     fn outranks_us(&self, hwnd: Hwnd) -> bool {
         // A read, so it passes through.
         self.inner.outranks_us(hwnd)

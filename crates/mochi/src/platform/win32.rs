@@ -41,7 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::appview::{self, ViewCloakError};
-use super::types::{FRAME_HOST, Hwnd, MonitorId, MonitorInfo, WindowInfo, ex_style};
+use super::types::{FRAME_HOST, Hwnd, MonitorId, MonitorInfo, WindowInfo, WindowShape, ex_style};
 use super::wide::{file_name, from_wide};
 use super::{CloakUnsupported, Platform, ShowState, WindowPlacement, ZOrder};
 
@@ -784,6 +784,18 @@ impl Platform for Win32Platform {
         // SAFETY: IsZoomed tolerates any handle value and answers false for one
         // that is not a window.
         unsafe { IsZoomed(hwnd(h)) }.as_bool()
+    }
+
+    fn window_shape(&self, h: Hwnd) -> Option<WindowShape> {
+        let handle = hwnd(h);
+        let mut r = RECT::default();
+        // SAFETY: GetWindowRect fails cleanly for a handle that is not a
+        // window, and GetWindowLongPtrW answers 0 for one.
+        unsafe { GetWindowRect(handle, &raw mut r) }.ok()?;
+        Some(WindowShape {
+            style: unsafe { GetWindowLongPtrW(handle, GWL_STYLE) } as u32,
+            rect: rect(r),
+        })
     }
 
     fn outranks_us(&self, h: Hwnd) -> bool {

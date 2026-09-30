@@ -128,6 +128,13 @@ pub trait Platform: Send + Sync {
     /// cross-process calls per event. `IsZoomed` is a flag read.
     fn is_maximized(&self, hwnd: Hwnd) -> bool;
 
+    /// The window's style and rect, for [`types::is_fullscreen`].
+    ///
+    /// Its own call for the same reason as [`Platform::is_maximized`]: it is
+    /// asked on every location change of a managed window. Two plain reads.
+    /// `None` when the handle is no longer a window.
+    fn window_shape(&self, hwnd: Hwnd) -> Option<types::WindowShape>;
+
     /// Whether the window belongs to a process that outranks Mochi.
     ///
     /// Asked by opening the process, not by reading a token: Windows refuses
