@@ -69,6 +69,17 @@ The groups below follow the order of the hotkey file.
 | `manage` | none | Start managing the focused window even if a rule would skip it. |
 | `unmanage` | none | Stop managing the focused window and leave it where it is. |
 
+## Scratchpads
+
+A scratchpad is a window kept out of the layout and shown with one command. The
+`scratchpads` list in `mochi.json` names them; see the configuration reference.
+
+| Command | Arguments | Does |
+|---|---|---|
+| `toggle-scratchpad` | name | Show the scratchpad centred on the monitor you are looking at and focus it. Again hides it; on another monitor it is moved over instead. With no window yet, the first one open that matches is taken, or its `command` is started. |
+| `scratchpad-claim` | name | Make the focused window the scratchpad's, out of the layout and centred. A window it held before goes back to the layout. |
+| `scratchpad-release` | name | Give the scratchpad's window back to the layout, on screen. |
+
 ## Layouts
 
 | Command | Arguments | Does |
