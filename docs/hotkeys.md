@@ -266,6 +266,18 @@ written, and there is no window in which the keyboard belongs to nobody.
 alt + shift + g : toggle-game-mode
 ```
 
+## Scratchpads
+
+A scratchpad is worth a key of its own: one press shows it over the layout,
+the next hides it. The name is an entry of `scratchpads` in `mochi.json` (see
+the configuration reference), so the binding does nothing until that entry
+exists, and that is why the shipped file leaves it out. `alt + shift + t` is
+free in the shipped file:
+
+```
+alt + shift + t : toggle-scratchpad term
+```
+
 ## When a key does nothing
 
 - `mochic hotkeys` shows what is bound, so a typo shows up as a missing line or
