@@ -58,6 +58,8 @@ Exactly one response per command, tagged by a `response` field:
 {"response":"state","state":{ ... }}
 {"response":"query","answer":2}
 {"response":"hotkeys","hotkeys":{ ... }}
+{"response":"why","why":{ ... }}
+{"response":"doctor","doctor":{ ... }}
 ```
 
 `mochic` exits non-zero and prints `message` on `error`.
@@ -136,6 +138,7 @@ with a search and replace.
 | `set-hotkeys` | `state`: `enable` `disable` |
 | `toggle-game-mode` | |
 | `state` | |
+| `why`, `doctor` | |
 | `query` | `target` |
 | `focus`, `move` | `direction`: `left` `right` `up` `down` |
 | `resize-axis` | `axis`: `horizontal` `vertical`, `sizing`: `increase` `decrease` |
