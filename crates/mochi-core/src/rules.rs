@@ -350,6 +350,8 @@ pub struct RuleSets {
     pub transparency_ignore_rules: Vec<MatchingRule>,
     /// Applications that need an extra beat before their window is ready.
     pub slow_application_identifiers: Vec<MatchingRule>,
+    /// Windows that are tiled like any other even when they go fullscreen.
+    pub fullscreen_passthrough_ignore_rules: Vec<MatchingRule>,
 }
 
 /// What the window manager should do with a window, according to the rules.
@@ -390,6 +392,8 @@ impl RuleSets {
             .extend(other.transparency_ignore_rules);
         self.slow_application_identifiers
             .extend(other.slow_application_identifiers);
+        self.fullscreen_passthrough_ignore_rules
+            .extend(other.fullscreen_passthrough_ignore_rules);
     }
 
     /// `true` when no list holds a rule.
@@ -404,6 +408,7 @@ impl RuleSets {
             && self.layered_whitelist.is_empty()
             && self.transparency_ignore_rules.is_empty()
             && self.slow_application_identifiers.is_empty()
+            && self.fullscreen_passthrough_ignore_rules.is_empty()
     }
 
     /// The number of rules across every list.
@@ -418,6 +423,7 @@ impl RuleSets {
             + self.layered_whitelist.len()
             + self.transparency_ignore_rules.len()
             + self.slow_application_identifiers.len()
+            + self.fullscreen_passthrough_ignore_rules.len()
     }
 
     /// `true` when an ignore rule matches.
@@ -430,6 +436,12 @@ impl RuleSets {
     #[must_use]
     pub fn should_stay_opaque(&self, window: &WindowInfo<'_>) -> bool {
         matches_any(&self.transparency_ignore_rules, window)
+    }
+
+    /// `true` when the window is tiled even while it covers its monitor.
+    #[must_use]
+    pub fn keeps_fullscreen_tiled(&self, window: &WindowInfo<'_>) -> bool {
+        matches_any(&self.fullscreen_passthrough_ignore_rules, window)
     }
 
     /// `true` when a manage rule forces the window to be managed.
@@ -529,7 +541,7 @@ impl RuleSets {
         errors
     }
 
-    fn lists(&self) -> [&Vec<MatchingRule>; 9] {
+    fn lists(&self) -> [&Vec<MatchingRule>; 10] {
         [
             &self.ignore_rules,
             &self.manage_rules,
@@ -540,10 +552,11 @@ impl RuleSets {
             &self.layered_whitelist,
             &self.transparency_ignore_rules,
             &self.slow_application_identifiers,
+            &self.fullscreen_passthrough_ignore_rules,
         ]
     }
 
-    fn lists_mut(&mut self) -> [&mut Vec<MatchingRule>; 9] {
+    fn lists_mut(&mut self) -> [&mut Vec<MatchingRule>; 10] {
         [
             &mut self.ignore_rules,
             &mut self.manage_rules,
@@ -554,6 +567,7 @@ impl RuleSets {
             &mut self.layered_whitelist,
             &mut self.transparency_ignore_rules,
             &mut self.slow_application_identifiers,
+            &mut self.fullscreen_passthrough_ignore_rules,
         ]
     }
 }
