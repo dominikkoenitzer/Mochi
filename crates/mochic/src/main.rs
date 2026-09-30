@@ -959,10 +959,10 @@ fn check_app_rules_text(label: &str, text: &str) -> Findings {
 /// Every rule list, with the key it is spelled with in `mochi.json` and the key
 /// the community `applications.json` spells the same list with.
 ///
-/// This mirrors the nine lists `RuleSets::validate` walks. `own_ignore_rules`
+/// This mirrors the ten lists `RuleSets::validate` walks. `own_ignore_rules`
 /// is deliberately not among them: `Config::rule_sets` fills it with a copy of
 /// `ignore_rules`, and reporting a rule twice for one mistake helps nobody.
-fn rule_lists(sets: &RuleSets) -> [(&'static str, &'static str, &Vec<MatchingRule>); 9] {
+fn rule_lists(sets: &RuleSets) -> [(&'static str, &'static str, &Vec<MatchingRule>); 10] {
     [
         ("ignore_rules", "ignore", &sets.ignore_rules),
         ("manage_rules", "manage", &sets.manage_rules),
@@ -996,6 +996,11 @@ fn rule_lists(sets: &RuleSets) -> [(&'static str, &'static str, &Vec<MatchingRul
             "slow_application_identifiers",
             "slow_application",
             &sets.slow_application_identifiers,
+        ),
+        (
+            "fullscreen_passthrough_ignore_rules",
+            "fullscreen_passthrough_ignore",
+            &sets.fullscreen_passthrough_ignore_rules,
         ),
     ]
 }
@@ -1802,7 +1807,7 @@ mod tests {
 
     /// Whatever `RuleSets::validate` complains about has to turn up here too,
     /// with a list name attached. The lists are named one by one in
-    /// [`rule_lists`], so a tenth list added to `RuleSets` would otherwise be
+    /// [`rule_lists`], so an eleventh list added to `RuleSets` would otherwise be
     /// checked by the daemon and skipped in silence by this command.
     #[test]
     fn no_list_of_rules_goes_unchecked() {
@@ -1821,6 +1826,7 @@ mod tests {
             layered_whitelist: vec![broken.clone()],
             transparency_ignore_rules: vec![broken.clone()],
             slow_application_identifiers: vec![broken.clone()],
+            fullscreen_passthrough_ignore_rules: vec![broken.clone()],
             own_ignore_rules: Vec::new(),
         };
 
@@ -1829,7 +1835,7 @@ mod tests {
             .flat_map(|(key, _, rules)| broken_rules(key, None, rules))
             .collect();
         assert_eq!(reported.len(), sets.validate().len());
-        assert_eq!(reported.len(), 9, "{reported:?}");
+        assert_eq!(reported.len(), 10, "{reported:?}");
     }
 
     #[test]

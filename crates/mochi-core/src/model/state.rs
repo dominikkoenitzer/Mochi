@@ -87,6 +87,9 @@ pub struct State {
     monitors: Ring<Monitor>,
     /// Warp the cursor to the middle of a window when it takes focus.
     pub mouse_follows_focus: bool,
+    /// Leave a fullscreen window and its monitor alone until it leaves
+    /// fullscreen.
+    pub fullscreen_passthrough: bool,
     /// What moving a container past a monitor edge does.
     pub cross_monitor_move_behaviour: MoveBehaviour,
     /// How windows on an inactive workspace are taken off screen.
@@ -140,6 +143,7 @@ impl Default for State {
         Self {
             monitors: Ring::new(),
             mouse_follows_focus: true,
+            fullscreen_passthrough: true,
             cross_monitor_move_behaviour: MoveBehaviour::default(),
             window_hiding_behaviour: HidingBehaviour::default(),
             focus_follows_mouse: None,

@@ -553,6 +553,14 @@ pub struct Config {
     pub transparency_ignore_rules: Option<Vec<MatchingRule>>,
     /// Applications that need an extra beat before their window is ready.
     pub slow_application_identifiers: Option<Vec<MatchingRule>>,
+    /// Leave a window alone while it covers its whole monitor with no title
+    /// bar, the way a game, a video in F11 or a slideshow does. On by default.
+    ///
+    /// Its monitor is not retiled, and gets no borders and no fading, until
+    /// the window leaves fullscreen.
+    pub fullscreen_passthrough: Option<bool>,
+    /// Windows that are tiled like any other even when they go fullscreen.
+    pub fullscreen_passthrough_ignore_rules: Option<Vec<MatchingRule>>,
 
     /// Windows kept out of the layout, each summoned by name with
     /// `toggle-scratchpad`.
@@ -656,6 +664,10 @@ impl Config {
                 .slow_application_identifiers
                 .clone()
                 .unwrap_or_default(),
+            fullscreen_passthrough_ignore_rules: self
+                .fullscreen_passthrough_ignore_rules
+                .clone()
+                .unwrap_or_default(),
         }
     }
 
@@ -720,6 +732,9 @@ impl Config {
         }
         if let Some(value) = self.mouse_follows_focus {
             state.mouse_follows_focus = value;
+        }
+        if let Some(value) = self.fullscreen_passthrough {
+            state.fullscreen_passthrough = value;
         }
         if let Some(value) = self.float_override {
             state.float_override = value;
@@ -1959,6 +1974,30 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_passthrough_is_on_unless_the_file_turns_it_off() {
+        let mut state = State::new();
+        assert!(state.fullscreen_passthrough, "on by default");
+        Config::from_json("{}").unwrap().apply_to(&mut state);
+        assert!(
+            state.fullscreen_passthrough,
+            "a file that says nothing keeps it"
+        );
+
+        let config = Config::from_json(
+            r#"{
+                "fullscreen_passthrough": false,
+                "fullscreen_passthrough_ignore_rules": [
+                    { "kind": "Exe", "id": "game.exe", "matching_strategy": "Equals" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        config.apply_to(&mut state);
+        assert!(!state.fullscreen_passthrough);
+        assert_eq!(state.rules.fullscreen_passthrough_ignore_rules.len(), 1);
+    }
+
+    #[test]
     fn the_config_round_trips_through_json() {
         let config = Config::from_json(REAL_CONFIG).unwrap();
         let json = config.to_json().unwrap();
@@ -1979,6 +2018,8 @@ mod tests {
             "window_hiding_behaviour",
             "cross_monitor_move_behaviour",
             "mouse_follows_focus",
+            "fullscreen_passthrough",
+            "fullscreen_passthrough_ignore_rules",
             "default_workspace_padding",
             "default_container_padding",
             "border",

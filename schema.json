@@ -160,6 +160,25 @@
       ],
       "default": null
     },
+    "fullscreen_passthrough": {
+      "description": "Leave a window alone while it covers its whole monitor with no title\nbar, the way a game, a video in F11 or a slideshow does. On by default.\n\nIts monitor is not retiled, and gets no borders and no fading, until\nthe window leaves fullscreen.",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": null
+    },
+    "fullscreen_passthrough_ignore_rules": {
+      "description": "Windows that are tiled like any other even when they go fullscreen.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "$ref": "#/$defs/MatchingRule"
+      }
+    },
     "global_work_area_offset": {
       "description": "An alias the existing config format also accepts for `work_area_offset`.",
       "anyOf": [
