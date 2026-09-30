@@ -239,7 +239,8 @@ shape is stable across changes to the model:
     "default_workspace_padding": 10,
     "default_container_padding": 10
   },
-  "rules": 312, "subscribers": []
+  "rules": 312, "subscribers": [],
+  "fullscreen": [{"window": 1181290, "monitor": 0, "frozen": true}]
 }
 ```
 
@@ -249,6 +250,13 @@ older daemon rather than an unset value. The two use different spellings on
 purpose: `settings` echoes back what a `mochic` command set, so its enums are
 the kebab-case the command line takes, while `behaviour` mirrors `mochi.json`,
 so its enums are the PascalCase the file uses.
+
+`fullscreen` lists every window that has taken a whole monitor over, see
+[fullscreen windows](configuration.md#fullscreen-windows), and the monitor it
+holds. `frozen` is true while that monitor is left alone; it is false for a
+window on a workspace nobody is looking at, which holds its monitor again once
+its workspace is shown. The list is empty when nothing is fullscreen. `why`
+adds `fullscreen_monitor` for a managed window that is one.
 
 What can be null:
 

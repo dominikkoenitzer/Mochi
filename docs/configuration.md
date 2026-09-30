@@ -81,6 +81,7 @@ anything, and it names the line and the column. Run it after every edit.
 | `cross_monitor_move_behaviour` | `Swap`, `Insert`, `NoOp` | `Swap` | What happens when a window is moved past the edge of a monitor. `NoOp` leaves it where it is, so a monitor edge behaves like a screen edge. |
 | `window_container_behaviour` | `Create`, `Append` | `Create` | Whether a new window gets a container of its own or is stacked onto the focused one. |
 | `mouse_follows_focus` | boolean | `true` | Warp the cursor into a window when it takes focus. |
+| `fullscreen_passthrough` | boolean | `true` | Leave a window alone while it covers its whole monitor with no title bar: a borderless game, a video in F11, a slideshow. That monitor is not retiled and loses its borders and fading until the window leaves fullscreen. See below. |
 | `focus_follows_mouse` | `Windows`, `Mochi` | unset | Focus whatever window the cursor moves over, and with which implementation. See below: this is not a boolean. |
 | `float_override` | boolean | `false` | Make every new window float. |
 | `resize_delta` | integer | `50` | How many pixels one `mochic resize-axis` step moves a boundary. |
@@ -107,6 +108,7 @@ anything, and it names the line and the column. Run it after every edit.
 | `layered_whitelist` | rule array | `[]` | Layered windows to manage anyway. Parsed, not acted on, see below. |
 | `slow_application_identifiers` | rule array | `[]` | Applications that need an extra beat before their window is ready. |
 | `scratchpads` | array | `[]` | Windows kept out of the layout and shown by name with one key, see below. |
+| `fullscreen_passthrough_ignore_rules` | rule array | `[]` | Windows that are tiled like any other even when they go fullscreen. |
 | `monitors` | array | `[]` | Per monitor settings in physical order, see below. |
 | `work_area_offset` | offset object | none | Pixels taken off every monitor's work area, to leave room for something else on screen. |
 | `global_work_area_offset` | offset object | none | The other spelling the existing config format uses for the same thing. `work_area_offset` wins when both are present. |
@@ -189,6 +191,21 @@ re-reading the window for, and `slow_application_identifiers` gives an
 application an extra beat before its window is judged. Those three were wired up
 after this page was first written and it said otherwise until 2026-09-21, which
 was worth correcting: acting on it would have meant deleting rules that work.
+
+## Fullscreen windows
+
+A window counts as fullscreen when it has no title bar and its rectangle
+covers the whole monitor, taskbar included, unless that is the rectangle Mochi
+gave it (a captionless window in monocle with no padding). It stays in the
+model, but its monitor is left alone: no retile moves anything there, and no
+border or fading is drawn on it. The other monitors carry on as usual.
+
+The monitor comes back a quarter of a second after the window leaves
+fullscreen, is minimized or closed, or after a display change, and only that
+monitor is retiled. Pausing and game mode do not change any of this, so leaving
+game mode never pulls a game that is still fullscreen back into a tile.
+`mochic state` lists the frozen monitors and the window holding each one, and
+`mochic why` says so for the focused window.
 
 ## Pinning a monitor
 
