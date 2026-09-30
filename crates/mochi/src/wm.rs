@@ -2597,6 +2597,13 @@ impl WindowManager {
             Command::SendToNamedWorkspace { name } => {
                 self.run_op(|core| core.move_to_named_workspace(&name, false))
             }
+            // --- scratchpads ----------------------------------------------
+            Command::ToggleScratchpad { name }
+            | Command::ScratchpadClaim { name }
+            | Command::ScratchpadRelease { name } => {
+                Response::error(format!("no scratchpad is named {name:?}"))
+            }
+
             Command::WorkspacePadding {
                 monitor,
                 workspace,
