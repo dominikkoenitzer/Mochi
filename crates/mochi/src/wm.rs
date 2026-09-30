@@ -3860,8 +3860,11 @@ impl WindowManager {
             .unwrap_or_default()
             .into_iter()
             .find(|info| {
+                // A tiled window counts even while its workspace is hidden:
+                // cloaked, it is no candidate, and passing it over would start
+                // a second copy of what is already running one screen away.
                 self.scratchpad_holding(info.hwnd).is_none()
-                    && self.is_candidate(info)
+                    && (self.is_candidate(info) || self.core.is_managed(window_id(info.hwnd)))
                     && rule.matches(&rule_info(info))
             });
         if let Some(info) = found {
@@ -8118,6 +8121,30 @@ alt + j : focus down
         assert!(response.error_message().is_some());
         assert!(platform.rect_of(Hwnd(2)).is_none());
         assert!(wm.state().is_managed(window_id(Hwnd(2))));
+    }
+
+    #[test]
+    fn a_matching_window_on_a_hidden_workspace_is_taken_rather_than_started_again() {
+        let (mut wm, platform) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        // Both go off screen with their workspace, and the fake reports the
+        // cloak the way Windows does.
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        for window in platform.windows.lock().unwrap().iter_mut() {
+            window.cloaked = true;
+        }
+        assert!(wm.we_hid(Hwnd(2)));
+
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert!(
+            wm.launched.lock().unwrap().is_empty(),
+            "a second copy was started while the first sat on a hidden workspace"
+        );
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert!(!wm.we_hid(Hwnd(2)), "it was taken and left off screen");
+        assert_eq!(cloak_calls(&platform, Hwnd(2)).last(), Some(&false));
     }
 
     #[test]
