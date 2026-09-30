@@ -111,6 +111,11 @@ impl Daemon {
     /// Starts the daemon against the test config, managing only the testbed
     /// class, with `RUST_LOG=debug` going to a log file under `%TEMP%`.
     fn start_with(tag: &str, extra: &[&str]) -> Daemon {
+        Daemon::start_with_config(tag, &config_path(), extra)
+    }
+
+    /// The same against a config file of the test's own.
+    fn start_with_config(tag: &str, config: &std::path::Path, extra: &[&str]) -> Daemon {
         // A daemon left over from an earlier run would take the single
         // instance mutex and the new one would exit at once.
         let _ = send(&Command::Stop);
@@ -125,7 +130,7 @@ impl Daemon {
             .arg(mochi_testbed::DAEMON_MANAGE_FLAG)
             .arg(mochi_testbed::TEST_WINDOW_CLASS)
             .arg("--config")
-            .arg(config_path())
+            .arg(config)
             .args(extra)
             .env("RUST_LOG", "debug")
             .stdin(Stdio::null())
@@ -1018,6 +1023,140 @@ fn a_hard_killed_daemon_gives_its_windows_back_on_the_next_start() {
             infos(&windows).iter().all(|w| !off_screen(w))
         })
         .map_err(|_| "a window stayed off screen after stop".to_owned())
+    });
+
+    drop(windows);
+    steps.finish(&format!("{log} and {second_log}"));
+}
+
+// ---------------------------------------------------------------------------
+// test: a scratchpad is hidden on the record, so a hard kill gives it back
+// ---------------------------------------------------------------------------
+
+/// A config with one scratchpad and no `command`, so this suite never starts a
+/// program of its own: the scratchpad is given a testbed window by a claim.
+/// The focus loss hide is off, because this desktop is shared with whatever
+/// else the runner has open and a stray focus change is not what is tested.
+fn scratchpad_config_path() -> PathBuf {
+    let path = temp_dir().join("mochi-scratchpad.json");
+    std::fs::write(
+        &path,
+        concat!(
+            "{\n",
+            "  \"window_hiding_behaviour\": \"Cloak\",\n",
+            "  \"default_workspace_padding\": 14,\n",
+            "  \"default_container_padding\": 10,\n",
+            "  \"scratchpads\": [\n",
+            "    {\n",
+            "      \"name\": \"term\",\n",
+            "      \"match\": { \"kind\": \"Title\", \"id\": \"no window has this title\", \"matching_strategy\": \"Equals\" },\n",
+            "      \"width\": 0.5,\n",
+            "      \"height\": 0.5,\n",
+            "      \"hide_on_focus_loss\": false\n",
+            "    }\n",
+            "  ]\n",
+            "}\n"
+        ),
+    )
+    .expect("could not write the scratchpad config");
+    path
+}
+
+#[test]
+fn a_claimed_scratchpad_toggles_and_comes_back_after_a_hard_kill() {
+    skip_unless_allowed!("a_claimed_scratchpad_toggles_and_comes_back_after_a_hard_kill");
+
+    let config = scratchpad_config_path();
+    let mut daemon = Daemon::start_with_config("scratchpad", &config, &["--no-hotkeys"]);
+    let log = daemon.log();
+    let windows = TestWindows::spawn(2, 0).expect("could not spawn the test windows");
+    let pad = windows.handles()[0];
+    let term = || "term".to_owned();
+    let info_of = |windows: &TestWindows| infos(windows).into_iter().find(|w| w.hwnd == pad);
+    let hidden = |windows: &TestWindows| info_of(windows).is_some_and(|w| off_screen(&w));
+
+    let mut steps = Steps::default();
+
+    steps.step("the daemon adopts both windows", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} windows", managed_count()))
+    });
+
+    steps.step(
+        "scratchpad-claim takes the focused window out of the layout",
+        || {
+            mochi_testbed::focus_window(pad).map_err(|e| e.to_string())?;
+            wait_for(STEP, || {
+                state().and_then(|s| s["foreground_window"].as_i64()) == Some(pad)
+            })
+            .map_err(|_| "the daemon never saw the window take the focus".to_owned())?;
+            command(&Command::ScratchpadClaim { name: term() })?;
+            wait_for(STEP, || managed_count() == 1)
+                .map_err(|_| format!("state shows {} windows", managed_count()))?;
+            let info = info_of(&windows).ok_or("the claimed window is gone")?;
+            check(!off_screen(&info), "the claimed window is not on screen")
+        },
+    );
+
+    steps.step("it is centred on the work area at half its size", || {
+        let area = area().ok_or("no state")?;
+        let frame = wait_some(STEP, || {
+            info_of(&windows)
+                .map(|w| w.frame)
+                .filter(|frame| layout_assert::check_all_within(&[*frame], area.work_area).is_ok())
+        })
+        .ok_or("the scratchpad is not inside the work area")?;
+        let centre = |low: i32, high: i32| (low + high) / 2;
+        // The frame is the visible window, a few pixels inside the rectangle
+        // that was asked for, so the centre is compared and not the edges.
+        check(
+            (centre(frame.left, frame.right) - centre(area.work_area.left, area.work_area.right))
+                .abs()
+                <= 16
+                && (centre(frame.top, frame.bottom)
+                    - centre(area.work_area.top, area.work_area.bottom))
+                .abs()
+                    <= 16,
+            format!("{frame:?} is not centred on {:?}", area.work_area),
+        )
+    });
+
+    steps.step("toggle-scratchpad takes it off screen", || {
+        command(&Command::ToggleScratchpad { name: term() })?;
+        wait_for(STEP, || hidden(&windows)).map_err(|_| "it is still on screen".to_owned())
+    });
+
+    steps.step("toggling again brings it back", || {
+        command(&Command::ToggleScratchpad { name: term() })?;
+        wait_for(STEP, || !hidden(&windows)).map_err(|_| "it stayed off screen".to_owned())
+    });
+
+    steps.step(
+        "a hard kill while it is hidden leaves it off screen",
+        || {
+            command(&Command::ToggleScratchpad { name: term() })?;
+            wait_for(STEP, || hidden(&windows)).map_err(|_| "it is still on screen".to_owned())?;
+            daemon.hard_kill();
+            check(
+                hidden(&windows),
+                "the scratchpad came back on its own, so the kill was not hard",
+            )
+        },
+    );
+
+    let mut second = Daemon::start("scratchpad-2");
+    let second_log = second.log();
+
+    steps.step("the next start brings it back from the record", || {
+        wait_for(Duration::from_secs(10), || !hidden(&windows)).map_err(|_| {
+            "the scratchpad is still off screen, so it was never written down".to_owned()
+        })
+    });
+
+    steps.step("stop leaves it visible", || {
+        second.stop();
+        wait_for(Duration::from_secs(5), || !hidden(&windows))
+            .map_err(|_| "the scratchpad went off screen after stop".to_owned())
     });
 
     drop(windows);
