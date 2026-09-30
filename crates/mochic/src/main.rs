@@ -1268,6 +1268,10 @@ fn advice(reason: &str, exe: &str) -> (String, Option<String>) {
             "Windows is hiding it: it is on another virtual desktop, or it is an app the system has suspended.".into(),
             Some("nothing to do: Mochi will take it when it comes back.".into()),
         ),
+        "scratchpad" => (
+            "it is a scratchpad: Mochi holds it out of the layout on purpose and shows it over the other windows when its toggle is pressed.".into(),
+            Some("give it back to tiling with mochic scratchpad-release, followed by the name of its entry in the scratchpads list of your mochi.json".into()),
+        ),
         "manage-class" => (
             "this Mochi was started with --manage-class and this window's class was not one of the ones named, so it is being left alone on purpose.".into(),
             None,
@@ -1475,6 +1479,7 @@ mod tests {
             "paused",
             "rule",
             "manage-class",
+            "scratchpad",
             "unknown",
         ] {
             let (explanation, _) = super::advice(reason, "some.exe");

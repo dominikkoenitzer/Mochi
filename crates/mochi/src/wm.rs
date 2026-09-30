@@ -3143,7 +3143,16 @@ impl WindowManager {
 
         // Asked in the order the daemon itself asks, so the reason given is
         // the one that actually decided this window's fate and not merely the
-        // first that happens to be true of it.
+        // first that happens to be true of it. A scratchpad comes first: it is
+        // held out of the model before the pause or any rule is consulted.
+        if let Some(index) = self.scratchpad_holding(hwnd) {
+            object.insert("reason".into(), "scratchpad".into());
+            object.insert(
+                "scratchpad".into(),
+                self.scratchpads[index].config.name.clone().into(),
+            );
+            return Response::Why { why };
+        }
         if self.core.is_paused {
             object.insert("reason".into(), "paused".into());
             return Response::Why { why };
@@ -8066,6 +8075,21 @@ alt + j : focus down
         );
         assert!(wm.launched.lock().unwrap().is_empty());
         assert!(platform.rect_of(Hwnd(2)).is_none());
+    }
+
+    #[test]
+    fn why_names_the_scratchpad_holding_the_window_in_front() {
+        let (mut wm, _) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        toggle(&mut wm);
+        let (Response::Why { why }, _) = wm.handle_command(Command::Why) else {
+            panic!("why did not answer with an explanation");
+        };
+        assert_eq!(why["managed"], false);
+        assert_eq!(why["reason"], "scratchpad");
+        assert_eq!(why["scratchpad"], "term");
     }
 
     #[test]
