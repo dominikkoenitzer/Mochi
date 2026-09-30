@@ -101,11 +101,11 @@ anything, and it names the line and the column. Run it after every edit.
 | `ignore_rules` | rule array | `[]` | Windows Mochi never touches. |
 | `manage_rules` | rule array | `[]` | Windows Mochi manages even though the usual checks say no. |
 | `floating_applications` | rule array | `[]` | Windows that are managed but never tiled. |
-| `tray_and_multi_window_applications` | rule array | `[]` | Applications that keep a hidden window alive in the tray. Parsed, not acted on, see below. |
-| `object_name_change_applications` | rule array | `[]` | Applications that reuse one window and only change its title. Parsed, not acted on, see below. |
+| `tray_and_multi_window_applications` | rule array | `[]` | Applications that keep a hidden window alive in the tray. |
+| `object_name_change_applications` | rule array | `[]` | Applications that reuse one window and only change its title. |
 | `border_overflow_applications` | rule array | `[]` | Applications whose own border sits outside their window rectangle. Parsed, not acted on, see below. |
 | `layered_whitelist` | rule array | `[]` | Layered windows to manage anyway. Parsed, not acted on, see below. |
-| `slow_application_identifiers` | rule array | `[]` | Applications that need an extra beat before their window is ready. Parsed, not acted on, see below. |
+| `slow_application_identifiers` | rule array | `[]` | Applications that need an extra beat before their window is ready. |
 | `monitors` | array | `[]` | Per monitor settings in physical order, see below. |
 | `work_area_offset` | offset object | none | Pixels taken off every monitor's work area, to leave room for something else on screen. |
 | `global_work_area_offset` | offset object | none | The other spelling the existing config format uses for the same thing. `work_area_offset` wins when both are present. |
