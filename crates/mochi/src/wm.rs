@@ -2681,11 +2681,6 @@ impl WindowManager {
             Command::SendToNamedWorkspace { name } => {
                 self.run_op(|core| core.move_to_named_workspace(&name, false))
             }
-            // --- scratchpads ----------------------------------------------
-            Command::ToggleScratchpad { name } => self.toggle_scratchpad(&name),
-            Command::ScratchpadClaim { name } => self.claim_scratchpad(&name),
-            Command::ScratchpadRelease { name } => self.release_scratchpad(&name),
-
             Command::WorkspacePadding {
                 monitor,
                 workspace,
@@ -2696,6 +2691,11 @@ impl WindowManager {
                 workspace,
                 size,
             } => self.set_padding(monitor, workspace, None, Some(size)),
+
+            // --- scratchpads -------------------------------------------
+            Command::ToggleScratchpad { name } => self.toggle_scratchpad(&name),
+            Command::ScratchpadClaim { name } => self.claim_scratchpad(&name),
+            Command::ScratchpadRelease { name } => self.release_scratchpad(&name),
 
             // --- monitors -------------------------------------------------
             Command::FocusMonitor { index } => self.run_op(|core| core.focus_monitor(index)),
