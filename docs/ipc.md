@@ -157,6 +157,7 @@ with a search and replace.
 | `focus-workspace`, `move-to-workspace`, `send-to-workspace` | `index` |
 | `focus-last-workspace` | |
 | `focus-named-workspace`, `move-to-named-workspace`, `send-to-named-workspace` | `name` |
+| `toggle-scratchpad`, `scratchpad-claim`, `scratchpad-release` | `name`, an entry of `scratchpads` in `mochi.json` |
 | `workspace-padding`, `container-padding` | `monitor`, `workspace`, `size` |
 | `focus-monitor`, `move-to-monitor`, `send-to-monitor` | `index` |
 | `focus-follows-mouse`, `mouse-follows-focus`, `border`, `animation` | `state`: `enable` `disable` |
