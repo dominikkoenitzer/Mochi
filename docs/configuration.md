@@ -256,9 +256,8 @@ whichever form went in.
 
 ## stackbar
 
-Off by default and not drawn at all: nothing is ever painted above a window
-unless the configuration asks for it. The shape is already fixed, so a copied config keeps
-validating.
+Never drawn, whatever the configuration says: the block parses so a copied
+config keeps validating.
 
 | Key | Type | Meaning |
 |---|---|---|
