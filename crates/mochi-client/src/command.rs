@@ -424,7 +424,7 @@ pub enum Command {
         name: String,
     },
 
-    // --- scratchpads --------------------------------------------------------
+    // --- scratchpads ------------------------------------------------------
     /// Show the named scratchpad centred on the focused monitor, or take it
     /// off screen when it is already showing there. Starts its `command` when
     /// no window matches yet.
