@@ -1608,6 +1608,7 @@ impl WindowManager {
                 &mut targets,
             );
         }
+        self.push_scratchpad_targets(&mut targets);
         targets
     }
 
@@ -3924,6 +3925,50 @@ impl WindowManager {
         }
         let targets = self.visuals_targets();
         self.visuals.update(&targets);
+    }
+
+    /// Adds the scratchpads on screen to a borders and transparency pass.
+    ///
+    /// The one holding the keyboard draws as a floating window and takes the
+    /// focused border from whichever tile had it; one left on screen without
+    /// the keyboard is an unfocused window like any other.
+    fn push_scratchpad_targets(&self, targets: &mut crate::visuals::VisualsTargets) {
+        use mochi_render::BorderKind;
+
+        let opaque = |hwnd: Hwnd| {
+            self.platform
+                .window_info(hwnd)
+                .is_ok_and(|info| self.core.rules.should_stay_opaque(&rule_info(&info)))
+        };
+        for hwnd in self.scratchpads.iter().filter_map(|pad| pad.hwnd) {
+            if self.we_hid(hwnd) || !self.platform.is_on_screen(hwnd) {
+                continue;
+            }
+            let Ok(info) = self.platform.window_info(hwnd) else {
+                continue;
+            };
+            if self.foreground == Some(hwnd) {
+                for entry in &mut targets.tiled {
+                    if entry.2 != BorderKind::Unfocused {
+                        entry.2 = BorderKind::Unfocused;
+                        if !opaque(entry.0) && !targets.unfocused.contains(&entry.0) {
+                            targets.unfocused.push(entry.0);
+                        }
+                    }
+                }
+                targets.focused = Some(hwnd);
+                targets
+                    .tiled
+                    .push((hwnd, info.visible_frame(), BorderKind::Floating));
+            } else {
+                if !opaque(hwnd) {
+                    targets.unfocused.push(hwnd);
+                }
+                targets
+                    .tiled
+                    .push((hwnd, info.visible_frame(), BorderKind::Unfocused));
+            }
+        }
     }
 
     // -----------------------------------------------------------------
