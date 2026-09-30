@@ -2063,18 +2063,24 @@ impl WindowManager {
 
     /// The monitor a managed window has taken over, if it has.
     ///
-    /// On the location-change path, so the caption is looked at first: nearly
-    /// every window has one, and for those this is one style read and one
-    /// rect read. The rest is only asked of a window without a title bar.
+    /// On the location-change path, which is the flood path, so the cheap
+    /// questions come first. Nearly every window has a title bar, and for
+    /// those this is one style read and one rect read. A window without one
+    /// that covers no monitor, which is every frameless application in a
+    /// tile, costs a comparison per monitor on top. Only a window that really
+    /// covers a monitor is looked up in the model and the rules.
     fn fullscreen_monitor(&self, hwnd: Hwnd) -> Option<usize> {
         if !self.core.fullscreen_passthrough {
             return None;
         }
         let shape = self.platform.window_shape(hwnd)?;
-        let caption = crate::platform::types::style::WS_CAPTION;
-        if shape.style & caption == caption {
-            return None;
-        }
+        let (monitor, size) = self
+            .core
+            .monitors()
+            .iter()
+            .enumerate()
+            .find(|(_, m)| crate::platform::is_fullscreen(shape, m.size, None))
+            .map(|(index, m)| (index, m.size))?;
         let id = window_id(hwnd);
         let window = self.core.window(id)?;
         if self.core.rules.keeps_fullscreen_tiled(&window.info()) {
@@ -2089,10 +2095,25 @@ impl WindowManager {
                     .find(|(other, _)| *other == hwnd)
                     .map(|(_, rect)| rect)
             });
-        self.core
-            .monitors()
-            .iter()
-            .position(|monitor| crate::platform::is_fullscreen(shape, monitor.size, placed))
+        crate::platform::is_fullscreen(shape, size, placed).then_some(monitor)
+    }
+
+    /// Asks every held window again, after something the answer depends on
+    /// changed underneath it: the monitors, or the configuration.
+    ///
+    /// A game that changed the display mode is still fullscreen on the new
+    /// size, and one that is not any more, or that a reload now keeps tiled,
+    /// gives its monitor back like any other.
+    fn recheck_fullscreen(&mut self, why: &str) {
+        for hwnd in self.fullscreen.keys().copied().collect::<Vec<_>>() {
+            self.fullscreen.remove(&hwnd);
+            if let Some(monitor) = self.fullscreen_monitor(hwnd) {
+                self.fullscreen.insert(hwnd, monitor);
+            } else if let Some((monitor, _)) = self.core.locate_window(window_id(hwnd)) {
+                tracing::info!(%hwnd, monitor, why, "a fullscreen window let go of its monitor");
+                self.defer_monitor_retile(monitor);
+            }
+        }
     }
 
     /// Whether a fullscreen window holds this monitor right now.
@@ -2633,18 +2654,8 @@ impl WindowManager {
         }
 
         // The indices the fullscreen windows were held by belong to the ring
-        // that is gone. Each is asked again against the new one: a game that
-        // changed the display mode is still fullscreen on the new size, and
-        // one that is not any more gives its monitor back like any other.
-        for hwnd in self.fullscreen.keys().copied().collect::<Vec<_>>() {
-            self.fullscreen.remove(&hwnd);
-            if let Some(monitor) = self.fullscreen_monitor(hwnd) {
-                self.fullscreen.insert(hwnd, monitor);
-            } else if let Some((monitor, _)) = self.core.locate_window(window_id(hwnd)) {
-                tracing::info!(%hwnd, monitor, "a display change ended a fullscreen window's hold");
-                self.defer_monitor_retile(monitor);
-            }
-        }
+        // that is gone, so each is asked again against the new one.
+        self.recheck_fullscreen("the displays changed");
 
         tracing::info!(
             monitors = self.core.monitors().len(),
@@ -4290,6 +4301,9 @@ impl WindowManager {
         self.notify(NotificationEvent::Reload {
             path: path.display().to_string(),
         });
+        // Before the retile: a reload that turned passthrough off, or added an
+        // ignore rule for the window, hands its monitor back in the same pass.
+        self.recheck_fullscreen("the configuration changed");
         self.retile();
         Ok(())
     }
@@ -8615,6 +8629,25 @@ alt + j : focus down
             platform.rect_of(Hwnd(2)),
             wm.state().rect_for_window(WindowId(2)),
             "the monitor stayed frozen after its fullscreen window was minimized"
+        );
+    }
+
+    #[test]
+    fn turning_passthrough_off_gives_the_monitor_back() {
+        let (mut wm, platform) = two_screens();
+        goes_fullscreen(&platform, Hwnd(1), main_screen().size);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+        assert!(!wm.fullscreen.is_empty());
+
+        // What a reload that sets `fullscreen_passthrough` to false does.
+        wm.core.fullscreen_passthrough = false;
+        wm.recheck_fullscreen("the configuration changed");
+        assert!(wm.fullscreen.is_empty(), "the monitor stayed held");
+        platform.clear_history();
+        wm.handle_command(Command::Retile);
+        assert_eq!(
+            platform.rect_of(Hwnd(1)),
+            wm.state().rect_for_window(WindowId(1))
         );
     }
 }
