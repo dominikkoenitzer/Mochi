@@ -309,7 +309,8 @@ exist still reports the path it would have read. `keys` is the chord as Mochi
 normalised it,
 so a binding written `Shift+ALT+H` comes back as `alt + shift + h` and a typo in
 a modifier is visible. `command` is the right hand side of the line, a Mochi
-command or a shell line.
+command or a shell line. A binding inside a mode block also carries `mode`, the
+block's name: `{"mode":"resize","keys":"h","command":"resize-axis horizontal decrease"}`.
 
 `gate` says which bindings fire: `all` normally, `game-mode` while
 `{"cmd":"toggle-game-mode"}` is holding everything but its own key for a game,
