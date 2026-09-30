@@ -8393,4 +8393,228 @@ alt + j : focus down
         assert_eq!(cloak_calls(&platform, Hwnd(2)).last(), Some(&false));
         assert!(wm.state().is_managed(window_id(Hwnd(2))));
     }
+
+    /// The window drops its title bar and covers the whole of `screen`, the
+    /// way a borderless game or a video in F11 does.
+    fn goes_fullscreen(platform: &FakePlatform, hwnd: Hwnd, screen: Rect) {
+        let mut windows = platform.windows.lock().unwrap();
+        let window = windows.iter_mut().find(|w| w.hwnd == hwnd).unwrap();
+        window.style = style::WS_VISIBLE | style::WS_POPUP;
+        window.rect = screen;
+        window.frame = screen;
+    }
+
+    /// And gets its title bar back, in a window of its own size.
+    fn leaves_fullscreen(platform: &FakePlatform, hwnd: Hwnd) {
+        let mut windows = platform.windows.lock().unwrap();
+        let window = windows.iter_mut().find(|w| w.hwnd == hwnd).unwrap();
+        window.style = style::WS_VISIBLE | style::WS_CAPTION;
+        window.rect = Rect::new(0, 0, 800, 600);
+        window.frame = Rect::new(0, 0, 800, 600);
+    }
+
+    /// Two windows on the 4K screen and one on the portrait screen.
+    fn two_screens() -> (WindowManager, Arc<FakePlatform>) {
+        manager_on(
+            vec![
+                window(1, "Game"),
+                window(2, "Editor"),
+                window_on_portrait(3, "Portrait"),
+            ],
+            vec![main_screen(), portrait_screen()],
+        )
+    }
+
+    #[test]
+    fn a_retile_leaves_a_fullscreen_window_and_its_monitor_alone() {
+        let (mut wm, platform) = two_screens();
+        goes_fullscreen(&platform, Hwnd(1), main_screen().size);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+        assert!(
+            wm.state().is_managed(WindowId(1)),
+            "a fullscreen window stays in the model"
+        );
+
+        platform.clear_history();
+        wm.handle_command(Command::Retile);
+        assert_eq!(
+            platform.rect_of(Hwnd(1)),
+            None,
+            "the retile pulled the fullscreen window back into its tile"
+        );
+        assert_eq!(
+            platform.rect_of(Hwnd(2)),
+            None,
+            "the retile moved a window under the fullscreen one"
+        );
+        assert_eq!(
+            platform.rect_of(Hwnd(3)),
+            wm.state().rect_for_window(WindowId(3)),
+            "the other monitor should be retiled as usual"
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_window_drops_borders_and_fading_only_on_its_monitor() {
+        let (mut wm, platform) = two_screens();
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(3));
+        goes_fullscreen(&platform, Hwnd(1), main_screen().size);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+
+        let targets = wm.visuals_targets();
+        let drawn: Vec<Hwnd> = targets.tiled.iter().map(|(hwnd, _, _)| *hwnd).collect();
+        assert_eq!(
+            drawn,
+            vec![Hwnd(3)],
+            "a border was drawn over the fullscreen monitor, or the other one lost its own"
+        );
+        assert!(
+            !targets.unfocused.contains(&Hwnd(1)) && !targets.unfocused.contains(&Hwnd(2)),
+            "a window on the fullscreen monitor is faded: {:?}",
+            targets.unfocused
+        );
+        assert_eq!(targets.focused, Some(Hwnd(3)));
+    }
+
+    #[test]
+    fn leaving_fullscreen_retiles_that_monitor_once() {
+        let (mut wm, platform) = two_screens();
+        goes_fullscreen(&platform, Hwnd(1), main_screen().size);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+
+        leaves_fullscreen(&platform, Hwnd(1));
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+
+        let deferred = wm
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the monitor was never given back");
+        assert!(matches!(deferred, Event::RetileMonitor(1)), "{deferred:?}");
+        platform.clear_history();
+        wm.on_event(deferred);
+        assert_eq!(
+            platform.rect_of(Hwnd(1)),
+            wm.state().rect_for_window(WindowId(1)),
+            "the window did not go back to its tile"
+        );
+        assert_eq!(
+            platform.rect_of(Hwnd(3)),
+            None,
+            "only the monitor the window let go of is retiled"
+        );
+        assert!(
+            wm.rx
+                .recv_timeout(std::time::Duration::from_millis(400))
+                .is_err(),
+            "the monitor was retiled more than once"
+        );
+    }
+
+    #[test]
+    fn leaving_a_pause_does_not_pull_a_fullscreen_game_back() {
+        // Game mode ends by unpausing, and unpausing retiles everything.
+        let (mut wm, platform) = two_screens();
+        wm.handle_command(Command::TogglePause);
+        assert!(wm.state().is_paused);
+
+        // The game goes fullscreen while tiling is paused.
+        goes_fullscreen(&platform, Hwnd(1), main_screen().size);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+
+        platform.clear_history();
+        wm.handle_command(Command::TogglePause);
+        assert!(!wm.state().is_paused);
+        assert_eq!(
+            platform.rect_of(Hwnd(1)),
+            None,
+            "leaving the pause pulled the fullscreen game into its tile"
+        );
+        assert_eq!(
+            platform.rect_of(Hwnd(3)),
+            wm.state().rect_for_window(WindowId(3)),
+            "the other monitor should be tiled again"
+        );
+    }
+
+    #[test]
+    fn a_window_that_appears_fullscreen_is_not_tiled() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        platform.windows.lock().unwrap().push(window(2, "Game"));
+        goes_fullscreen(&platform, Hwnd(2), main_screen().size);
+
+        platform.clear_history();
+        wm.on_window_event(WindowEventKind::Created, Hwnd(2));
+        assert!(wm.state().is_managed(WindowId(2)), "it joins the model");
+        assert_eq!(
+            platform.rect_of(Hwnd(2)),
+            None,
+            "a window that opened fullscreen was pulled into a tile"
+        );
+        assert_eq!(wm.fullscreen.get(&Hwnd(2)), Some(&0));
+    }
+
+    #[test]
+    fn a_monocle_window_mochi_put_over_the_monitor_is_not_fullscreen() {
+        // An auto-hidden taskbar and no padding: the monocle tile IS the
+        // monitor, and a captionless window placed there is where Mochi put it.
+        let screen = MonitorInfo {
+            work_area: main_screen().size,
+            ..main_screen()
+        };
+        let (mut wm, platform) = manager_on(vec![window(1, "Terminal")], vec![screen]);
+        wm.core.default_workspace_padding = 0;
+        wm.core.default_container_padding = 0;
+        wm.handle_command(Command::ToggleMonocle);
+        let placed = platform
+            .rect_of(Hwnd(1))
+            .expect("monocle placed the window");
+        assert_eq!(placed, main_screen().size);
+
+        goes_fullscreen(&platform, Hwnd(1), placed);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+        assert!(
+            wm.fullscreen.is_empty(),
+            "Mochi's own monocle rect was taken for a fullscreen window"
+        );
+        platform.clear_history();
+        wm.handle_command(Command::Retile);
+        assert_eq!(platform.rect_of(Hwnd(1)), Some(placed));
+    }
+
+    #[test]
+    fn a_fullscreen_passthrough_ignore_rule_keeps_the_window_tiled() {
+        let (mut wm, platform) = two_screens();
+        wm.core
+            .rules
+            .fullscreen_passthrough_ignore_rules
+            .push(titled("Game"));
+        goes_fullscreen(&platform, Hwnd(1), main_screen().size);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+        assert!(wm.fullscreen.is_empty());
+
+        platform.clear_history();
+        wm.handle_command(Command::Retile);
+        assert_eq!(
+            platform.rect_of(Hwnd(1)),
+            wm.state().rect_for_window(WindowId(1))
+        );
+    }
+
+    #[test]
+    fn a_minimized_fullscreen_window_gives_its_monitor_back() {
+        let (mut wm, platform) = two_screens();
+        goes_fullscreen(&platform, Hwnd(1), main_screen().size);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+        assert!(!wm.fullscreen.is_empty());
+
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(1));
+        assert!(wm.fullscreen.is_empty(), "the hold outlived the window");
+        platform.clear_history();
+        wm.handle_command(Command::Retile);
+        assert_eq!(
+            platform.rect_of(Hwnd(2)),
+            wm.state().rect_for_window(WindowId(2)),
+            "the monitor stayed frozen after its fullscreen window was minimized"
+        );
+    }
 }
