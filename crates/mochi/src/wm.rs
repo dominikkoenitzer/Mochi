@@ -3917,6 +3917,13 @@ impl WindowManager {
             Ok(info) => info,
             Err(e) => return Response::error(e),
         };
+        // `--manage-class` promises that nothing else on the desktop is
+        // touched, and a claim is no exception to it.
+        if !self.manage_classes.is_empty() && !self.class_is_forced(&info.class) {
+            return Response::error(
+                "this mochi was started with --manage-class and the focused window's class was not named",
+            );
+        }
         if self.out_of_reach(&info) {
             return Response::error(SCRATCHPAD_ELEVATED);
         }
@@ -8090,6 +8097,27 @@ alt + j : focus down
         assert_eq!(why["managed"], false);
         assert_eq!(why["reason"], "scratchpad");
         assert_eq!(why["scratchpad"], "term");
+    }
+
+    #[test]
+    fn a_claim_under_manage_class_leaves_every_other_class_alone() {
+        let (mut wm, platform) = manager_focused_on(
+            vec![
+                process_window(1, "Editor", 10),
+                process_window(2, "Notes", 20),
+            ],
+            Hwnd(2),
+        );
+        wm.set_scratchpads(vec![scratch_pad()]);
+        wm.manage_classes = vec!["MochiTestWindow".into()];
+        platform.clear_history();
+
+        let (response, _) = wm.handle_command(Command::ScratchpadClaim {
+            name: "term".into(),
+        });
+        assert!(response.error_message().is_some());
+        assert!(platform.rect_of(Hwnd(2)).is_none());
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
     }
 
     #[test]
