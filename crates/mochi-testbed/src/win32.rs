@@ -497,6 +497,19 @@ pub fn resize_window(hwnd: i64, width: i32, height: i32) -> Result<()> {
     .map_err(|e| Error::win32("SetWindowPos", &e))
 }
 
+/// Replaces a window's style, the way a game dropping its title bar for
+/// borderless fullscreen does.
+///
+/// # Errors
+/// When the handle is not a window.
+pub fn set_style(hwnd: i64, style: u32) -> Result<()> {
+    if !window_exists(hwnd) {
+        return Err(Error::not_found(format!("hwnd 0x{hwnd:x}")));
+    }
+    unsafe { SetWindowLongPtrW(as_hwnd(hwnd), GWL_STYLE, style as isize) };
+    Ok(())
+}
+
 /// Moves and resizes in one call, the way a layout does.
 ///
 /// # Errors
