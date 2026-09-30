@@ -2059,8 +2059,13 @@ impl WindowManager {
         let previous = self.foreground.replace(hwnd);
         self.scratchpad_lost_focus(previous, hwnd);
         if self.scratchpad_holding(hwnd).is_some() {
-            // Not in the model, so there is nothing to point it at. The
-            // borders still have to move onto it.
+            // Not in the model, so there is nothing to point it at. A bar
+            // still hears where the keyboard went, the way it does for any
+            // window Mochi does not tile, and the borders move onto it.
+            let window = self.platform.window_info(hwnd).ok();
+            self.notify(NotificationEvent::FocusChange {
+                window: window.as_ref().map(window_ref),
+            });
             self.draw_visuals();
             return;
         }
