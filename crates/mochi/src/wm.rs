@@ -2056,7 +2056,8 @@ impl WindowManager {
 
     /// A window took the foreground.
     fn window_focused(&mut self, hwnd: Hwnd) {
-        self.foreground = Some(hwnd);
+        let previous = self.foreground.replace(hwnd);
+        self.scratchpad_lost_focus(previous, hwnd);
         if self.scratchpad_holding(hwnd).is_some() {
             // Not in the model, so there is nothing to point it at. The
             // borders still have to move onto it.
@@ -3749,6 +3750,38 @@ impl WindowManager {
         let placement = crate::platform::WindowPlacement::new(hwnd, rect);
         if let Err(e) = self.platform.set_position(&placement) {
             tracing::debug!(%hwnd, error = %e, "could not place the scratchpad window");
+        }
+    }
+
+    /// Hides a scratchpad whose window just lost the keyboard to another
+    /// application.
+    ///
+    /// A window of the same process is not another application: a settings
+    /// dialog or a second window of the scratchpad's own program must not take
+    /// the scratchpad away from under itself.
+    fn scratchpad_lost_focus(&mut self, previous: Option<Hwnd>, now: Hwnd) {
+        let Some(before) = previous.filter(|before| *before != now) else {
+            return;
+        };
+        let Some(index) = self.scratchpad_holding(before) else {
+            return;
+        };
+        if self.core.is_paused
+            || !self.scratchpads[index].config.hides_on_focus_loss()
+            || self.we_hid(before)
+        {
+            return;
+        }
+        let pid = |hwnd: Hwnd| self.platform.window_info(hwnd).ok().map(|info| info.pid);
+        if let (Some(a), Some(b)) = (pid(before), pid(now))
+            && a != 0
+            && a == b
+        {
+            return;
+        }
+        let response = self.dismiss_scratchpad(index, false);
+        if let Some(message) = response.error_message() {
+            tracing::debug!(%before, message, "could not hide the scratchpad on focus loss");
         }
     }
 
