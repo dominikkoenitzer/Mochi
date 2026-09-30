@@ -12,11 +12,14 @@ safety.rs        panic hook, RestoreGuard, the restore hook the daemon installs
 config.rs        path resolution for mochi.json and the hotkey file, reading them plus applications.json, quickstart stub, file watcher
 state.rs         the session facts, Settings, and snapshot(), the JSON `mochic state` prints
 wm.rs            the event loop, the mochi-core model, command handling, Changes to Win32
+recover.rs       the crash record, so every hidden window comes back after a crash
+visuals.rs       borders, transparency and animation, handed to mochi-render
 
 platform/
   mod.rs         the Platform trait, WindowPlacement, ZOrder, ShowState
   types.rs       Hwnd, MonitorId, MonitorInfo, WindowInfo, style bits, is_manageable
   win32.rs       the real implementation, plus compensate_invisible_border
+  appview.rs     cloaking other processes' windows through the shell's application views
   dry_run.rs     reads through, writes become log lines
   dpi.rs         SetProcessDpiAwarenessContext fallback behind the manifest
   wide.rs        UTF-16 helpers
