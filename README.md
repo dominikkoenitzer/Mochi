@@ -19,7 +19,7 @@ managers that came before it, but shares no code with any of them.
 
 ## Status
 
-All five milestones are done, see [PLAN.md](PLAN.md). Mochi tiles real windows
+All six milestones are done, see [PLAN.md](PLAN.md). Mochi tiles real windows
 and binds its own keys, and the proof is a test suite that drives throwaway
 windows and injects real key presses on a real desktop rather than only checking
 a model in memory. CI runs it: the end to end job fails if those tests skip,
