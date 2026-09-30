@@ -504,6 +504,54 @@ pub fn is_manageable_with(w: &WindowInfo, allow_tool_window: bool) -> Result<(),
     Ok(())
 }
 
+/// The two things [`is_fullscreen`] looks at, read on their own.
+///
+/// Asked on the location-change path, which is the flood path, so it is a
+/// style read and a rect read rather than a whole [`WindowInfo`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowShape {
+    /// `GWL_STYLE`.
+    pub style: u32,
+    /// `GetWindowRect`.
+    pub rect: Rect,
+}
+
+/// Whether a window has taken its monitor over the way a game, a video player
+/// in F11 or a slideshow does.
+///
+/// Such a window has no title bar and covers the whole monitor, taskbar
+/// included, so the work area is the wrong measure. Tiling one pulls it back
+/// into its tile on every retile, which ends a game's fullscreen and cuts a
+/// video down to a quarter of the screen.
+///
+/// Three conditions, all needed:
+///
+/// - no caption: `WS_CAPTION` is two bits, and a window with only one of them
+///   has no title bar either;
+/// - the window rect covers the whole monitor rect. Overshooting it counts,
+///   because some applications place themselves a pixel past the edge;
+/// - Mochi did not put it there. `placed` is the rectangle the layout gives
+///   the window. When that already covers the monitor, a captionless window in
+///   monocle with no padding under an auto-hidden taskbar, the window sits
+///   where Mochi put it and is not taking anything over.
+///
+/// A minimized or invisible window has taken nothing over, whatever its rect.
+#[must_use]
+pub fn is_fullscreen(shape: WindowShape, monitor: Rect, placed: Option<Rect>) -> bool {
+    let covers = |rect: Rect| {
+        rect.left <= monitor.left
+            && rect.top <= monitor.top
+            && rect.right >= monitor.right
+            && rect.bottom >= monitor.bottom
+    };
+    shape.style & style::WS_CAPTION != style::WS_CAPTION
+        && shape.style & style::WS_VISIBLE != 0
+        && shape.style & style::WS_MINIMIZE == 0
+        && !monitor.is_empty()
+        && covers(shape.rect)
+        && !placed.is_some_and(covers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +569,73 @@ mod tests {
             visible: true,
             ..WindowInfo::placeholder(Hwnd(0x1234))
         }
+    }
+
+    /// The 4K main screen and the portrait screen to its right.
+    const MAIN: Rect = Rect::new(0, 0, 3840, 2160);
+    const PORTRAIT: Rect = Rect::new(3840, 0, 4920, 1920);
+    const POPUP: u32 = style::WS_POPUP | style::WS_VISIBLE;
+
+    fn shape(style: u32, rect: Rect) -> WindowShape {
+        WindowShape { style, rect }
+    }
+
+    #[test]
+    fn a_captionless_window_over_the_whole_monitor_is_fullscreen() {
+        assert!(is_fullscreen(shape(POPUP, MAIN), MAIN, None));
+        // Placed in a tile somewhere else, and it took the screen anyway.
+        let tile = Some(Rect::new(0, 0, 1920, 2160));
+        assert!(is_fullscreen(shape(POPUP, MAIN), MAIN, tile));
+    }
+
+    #[test]
+    fn a_window_with_a_caption_is_never_fullscreen() {
+        let captioned = style::WS_VISIBLE | style::WS_CAPTION | style::WS_THICKFRAME;
+        assert!(!is_fullscreen(shape(captioned, MAIN), MAIN, None));
+        // One of the two caption bits is not a caption.
+        let border_only = style::WS_VISIBLE | 0x0080_0000;
+        assert!(is_fullscreen(shape(border_only, MAIN), MAIN, None));
+    }
+
+    #[test]
+    fn a_maximized_window_under_an_auto_hidden_taskbar_is_not_fullscreen() {
+        // Maximized with the taskbar hidden, the work area is the monitor and
+        // the rect overshoots it by the invisible resize border.
+        let maximized = style::WS_VISIBLE | style::WS_CAPTION | style::WS_MAXIMIZE;
+        let rect = Rect::new(-8, -8, 3848, 2168);
+        assert!(!is_fullscreen(shape(maximized, rect), MAIN, None));
+    }
+
+    #[test]
+    fn a_captionless_window_mochi_put_over_the_monitor_is_not_fullscreen() {
+        // Monocle, no padding, auto-hidden taskbar: the tile is the monitor.
+        assert!(!is_fullscreen(shape(POPUP, MAIN), MAIN, Some(MAIN)));
+    }
+
+    #[test]
+    fn a_one_pixel_overshoot_still_covers_the_monitor() {
+        let rect = Rect::new(-1, -1, 3841, 2161);
+        assert!(is_fullscreen(shape(POPUP, rect), MAIN, None));
+        // One pixel short of the edge covers nothing.
+        let short = Rect::new(0, 0, 3839, 2160);
+        assert!(!is_fullscreen(shape(POPUP, short), MAIN, None));
+        // Nor does the work area above a visible taskbar.
+        let work_area = Rect::new(0, 0, 3840, 2112);
+        assert!(!is_fullscreen(shape(POPUP, work_area), MAIN, None));
+    }
+
+    #[test]
+    fn the_portrait_monitor_is_measured_by_its_own_rect() {
+        assert!(is_fullscreen(shape(POPUP, PORTRAIT), PORTRAIT, None));
+        assert!(!is_fullscreen(shape(POPUP, PORTRAIT), MAIN, None));
+        assert!(!is_fullscreen(shape(POPUP, MAIN), PORTRAIT, None));
+    }
+
+    #[test]
+    fn a_minimized_or_hidden_window_is_not_fullscreen() {
+        let minimized = POPUP | style::WS_MINIMIZE;
+        assert!(!is_fullscreen(shape(minimized, MAIN), MAIN, None));
+        assert!(!is_fullscreen(shape(style::WS_POPUP, MAIN), MAIN, None));
     }
 
     #[test]
