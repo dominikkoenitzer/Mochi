@@ -272,6 +272,21 @@ pub enum Cmd {
         /// The name from the configuration
         name: String,
     },
+    /// Show a scratchpad on the focused monitor, or hide it again
+    ToggleScratchpad {
+        /// The name from the scratchpads list
+        name: String,
+    },
+    /// Make the focused window a scratchpad's window
+    ScratchpadClaim {
+        /// The name from the scratchpads list
+        name: String,
+    },
+    /// Give a scratchpad's window back to tiling
+    ScratchpadRelease {
+        /// The name from the scratchpads list
+        name: String,
+    },
     /// Set the outer padding of one workspace
     #[command(allow_negative_numbers = true)]
     WorkspacePadding {
@@ -578,6 +593,9 @@ impl Cmd {
             Cmd::SendToNamedWorkspace { name } => {
                 Command::SendToNamedWorkspace { name: name.clone() }
             }
+            Cmd::ToggleScratchpad { name } => Command::ToggleScratchpad { name: name.clone() },
+            Cmd::ScratchpadClaim { name } => Command::ScratchpadClaim { name: name.clone() },
+            Cmd::ScratchpadRelease { name } => Command::ScratchpadRelease { name: name.clone() },
             Cmd::WorkspacePadding {
                 monitor,
                 workspace,
@@ -1041,6 +1059,38 @@ mod tests {
             Command::AnimationStyle {
                 style: AnimationStyle::EaseOutQuad
             }
+        );
+    }
+
+    #[test]
+    fn the_scratchpad_commands_parse_and_bind() {
+        assert_eq!(
+            parse(&["toggle-scratchpad", "term"]),
+            Command::ToggleScratchpad {
+                name: "term".into()
+            }
+        );
+        assert_eq!(
+            parse(&["scratchpad-claim", "term"]),
+            Command::ScratchpadClaim {
+                name: "term".into()
+            }
+        );
+        assert_eq!(
+            parse(&["scratchpad-release", "term"]),
+            Command::ScratchpadRelease {
+                name: "term".into()
+            }
+        );
+        assert_eq!(
+            binding("toggle-scratchpad term"),
+            Ok(Command::ToggleScratchpad {
+                name: "term".into()
+            })
+        );
+        assert!(
+            binding("toggle-scratchpad").is_err(),
+            "a scratchpad command without a name has nothing to act on"
         );
     }
 

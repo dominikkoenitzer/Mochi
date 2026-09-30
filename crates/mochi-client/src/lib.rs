@@ -159,6 +159,12 @@ mod tests {
             r#"{"cmd":"send-to-workspace","index":3}"#
         );
         assert_eq!(
+            round_trip(Command::ToggleScratchpad {
+                name: "term".into()
+            }),
+            r#"{"cmd":"toggle-scratchpad","name":"term"}"#
+        );
+        assert_eq!(
             round_trip(Command::SendToMonitor { index: 1 }),
             r#"{"cmd":"send-to-monitor","index":1}"#
         );
@@ -272,6 +278,15 @@ mod tests {
                 direction: CycleDirection::Next,
             },
             Command::FocusLastWorkspace,
+            Command::ToggleScratchpad {
+                name: "term".into(),
+            },
+            Command::ScratchpadClaim {
+                name: "term".into(),
+            },
+            Command::ScratchpadRelease {
+                name: "term".into(),
+            },
             Command::WorkspacePadding {
                 monitor: 0,
                 workspace: 0,
@@ -334,7 +349,7 @@ mod tests {
             Command::UnsubscribePipe { name: "bar".into() },
         ];
 
-        assert_eq!(all.len(), 61, "add new variants to this list");
+        assert_eq!(all.len(), 64, "add new variants to this list");
         let mut seen = std::collections::HashSet::new();
         for cmd in &all {
             let json: serde_json::Value = serde_json::to_value(cmd).unwrap();

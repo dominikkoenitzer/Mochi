@@ -423,6 +423,26 @@ pub enum Command {
         /// The name as it appears in the configuration.
         name: String,
     },
+
+    // --- scratchpads --------------------------------------------------------
+    /// Show the named scratchpad centred on the focused monitor, or take it
+    /// off screen when it is already showing there. Starts its `command` when
+    /// no window matches yet.
+    ToggleScratchpad {
+        /// The name from the `scratchpads` list in the configuration.
+        name: String,
+    },
+    /// Make the focused window the named scratchpad's window, taking it out of
+    /// the layout.
+    ScratchpadClaim {
+        /// The name from the `scratchpads` list in the configuration.
+        name: String,
+    },
+    /// Give the named scratchpad's window back to the layout.
+    ScratchpadRelease {
+        /// The name from the `scratchpads` list in the configuration.
+        name: String,
+    },
     /// Set the outer padding of one workspace.
     WorkspacePadding {
         /// Zero-based monitor index.
@@ -682,6 +702,9 @@ impl Command {
             Self::FocusNamedWorkspace { .. } => "focus-named-workspace",
             Self::MoveToNamedWorkspace { .. } => "move-to-named-workspace",
             Self::SendToNamedWorkspace { .. } => "send-to-named-workspace",
+            Self::ToggleScratchpad { .. } => "toggle-scratchpad",
+            Self::ScratchpadClaim { .. } => "scratchpad-claim",
+            Self::ScratchpadRelease { .. } => "scratchpad-release",
             Self::WorkspacePadding { .. } => "workspace-padding",
             Self::ContainerPadding { .. } => "container-padding",
             Self::FocusMonitor { .. } => "focus-monitor",
