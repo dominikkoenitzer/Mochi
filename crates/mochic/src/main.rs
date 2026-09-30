@@ -1377,11 +1377,20 @@ fn why_paragraph(why: &serde_json::Value) -> String {
                 .and_then(serde_json::Value::as_u64)
                 .map_or_else(|| "?".to_string(), |n| n.to_string())
         };
-        out.push_str(&format!(
-            "Mochi is tiling this window, on monitor {}, workspace {}.\n",
-            number("monitor"),
-            number("workspace"),
-        ));
+        if why.get("fullscreen_monitor").is_some() {
+            out.push_str(&format!(
+                "Mochi manages this window, on monitor {}, workspace {}, and leaves it alone while it is fullscreen: monitor {} is not retiled, and gets no borders or fading, until it leaves fullscreen.\n",
+                number("monitor"),
+                number("workspace"),
+                number("fullscreen_monitor"),
+            ));
+        } else {
+            out.push_str(&format!(
+                "Mochi is tiling this window, on monitor {}, workspace {}.\n",
+                number("monitor"),
+                number("workspace"),
+            ));
+        }
         out.push_str(&keyboard_note(why));
         return out;
     }
@@ -1506,6 +1515,19 @@ mod tests {
         assert!(out.contains("is tiling this window"), "{out}");
         assert!(out.contains("monitor 1"), "{out}");
         assert!(out.contains("workspace 3"), "{out}");
+    }
+
+    #[test]
+    fn why_says_a_fullscreen_window_holds_its_monitor() {
+        let why = serde_json::json!({
+            "hwnd": "0x1a2b", "title": "A game", "exe": "game.exe",
+            "class": "UnityWndClass", "managed": true,
+            "monitor": 0, "workspace": 2, "fullscreen_monitor": 0,
+        });
+        let out = super::why_paragraph(&why);
+        assert!(out.contains("while it is fullscreen"), "{out}");
+        assert!(out.contains("monitor 0 is not retiled"), "{out}");
+        assert!(!out.contains("is tiling this window"), "{out}");
     }
 
     #[test]

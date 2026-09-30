@@ -2189,6 +2189,23 @@ impl WindowManager {
         self.apply_changes(Changes::none().retile(monitor, workspace));
     }
 
+    /// Every window holding a monitor, for `mochic state`.
+    ///
+    /// `frozen` is false for one on a workspace nobody is looking at: it
+    /// holds its monitor again the moment its workspace is shown.
+    fn fullscreen_json(&self) -> serde_json::Value {
+        self.fullscreen
+            .iter()
+            .map(|(hwnd, monitor)| {
+                serde_json::json!({
+                    "window": hwnd.as_i64(),
+                    "monitor": monitor,
+                    "frozen": self.is_frozen(*monitor),
+                })
+            })
+            .collect()
+    }
+
     /// Hands the borders and the fading the desktop as it is now.
     fn redraw_visuals(&mut self) {
         // Paused means the visuals are off the desktop on purpose.
@@ -2741,14 +2758,16 @@ impl WindowManager {
                 // and the copy this document reports never heard about it, so
                 // `mochic state` listed bars that were gone for good.
                 self.session.subscribers = self.subscribers.names().to_vec();
-                Response::State {
-                    state: snapshot(
-                        &self.session,
-                        &self.core,
-                        self.foreground,
-                        &self.on_screen(),
-                    ),
+                let mut state = snapshot(
+                    &self.session,
+                    &self.core,
+                    self.foreground,
+                    &self.on_screen(),
+                );
+                if let Some(object) = state.as_object_mut() {
+                    object.insert("fullscreen".into(), self.fullscreen_json());
                 }
+                Response::State { state }
             }
             Command::Query { target } => self.query(target),
             Command::Why => self.explain_foreground(),
@@ -3335,6 +3354,9 @@ impl WindowManager {
             object.insert("managed".into(), true.into());
             object.insert("monitor".into(), monitor.into());
             object.insert("workspace".into(), workspace.into());
+            if let Some(&held) = self.fullscreen.get(&hwnd) {
+                object.insert("fullscreen_monitor".into(), held.into());
+            }
             return Response::Why { why };
         }
         object.insert("managed".into(), false.into());
