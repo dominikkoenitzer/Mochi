@@ -545,6 +545,9 @@ mod tests {
         fn is_maximized(&self, _hwnd: Hwnd) -> bool {
             false
         }
+        fn window_shape(&self, _hwnd: Hwnd) -> Option<crate::platform::types::WindowShape> {
+            None
+        }
         fn outranks_us(&self, _hwnd: Hwnd) -> bool {
             false
         }
