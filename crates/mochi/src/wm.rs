@@ -548,6 +548,13 @@ pub struct WindowManager {
     routed: HashSet<Hwnd>,
     /// Windows Mochi dropped from the model because the user minimized them.
     minimized: HashSet<Hwnd>,
+    /// Windows that have taken a whole monitor over, and the monitor each one
+    /// holds. See [`crate::platform::is_fullscreen`].
+    ///
+    /// Pure observation, like `minimized`: Mochi hides nothing and changes
+    /// nothing about these windows, so nothing goes into the crash record. It
+    /// only stops touching the monitor while the window is on screen there.
+    fullscreen: BTreeMap<Hwnd, usize>,
     /// Rules a `mochic` command added, and the workspace rules with them.
     ///
     /// Kept because a reload REPLACES the rule sets rather than merging them:
@@ -679,6 +686,7 @@ impl WindowManager {
             workspace_rules: Vec::new(),
             routed: HashSet::new(),
             minimized: HashSet::new(),
+            fullscreen: BTreeMap::new(),
             added_rules: Vec::new(),
             added_workspace_rules: Vec::new(),
             foreground: None,
@@ -1120,6 +1128,10 @@ impl WindowManager {
         match self.core.add_window_to(monitor, workspace, window) {
             Ok(changes) => {
                 self.routed.insert(info.hwnd);
+                // Before the changes are applied: a window that appears
+                // fullscreen joins the model with its monitor held, rather than
+                // being pulled into a tile first and let go of after.
+                self.follow_fullscreen(info.hwnd);
                 tracing::info!(
                     hwnd = %info.hwnd,
                     title = %info.title,
@@ -1302,6 +1314,8 @@ impl WindowManager {
         if self.foreground == Some(hwnd) {
             self.foreground = None;
         }
+        // Before the removal, so the retile it triggers places the monitor.
+        self.release_fullscreen(hwnd, why);
         let Some(window) = self.core.window(id).cloned() else {
             return;
         };
@@ -1642,6 +1656,11 @@ impl WindowManager {
         if target.is_maximized() {
             return;
         }
+        // The same as a maximized workspace: the screen belongs to the window,
+        // so no border is drawn over the game and nothing on it is faded.
+        if self.is_frozen(monitor) {
+            return;
+        }
 
         let focused = if has_focus {
             target.focused_window_id().map(handle)
@@ -1666,7 +1685,11 @@ impl WindowManager {
 
         let platform = self.platform.as_ref();
         let rules = &self.core.rules;
+        let fullscreen = &self.fullscreen;
         let mut push = |hwnd: Hwnd, rect: Rect| {
+            if fullscreen.contains_key(&hwnd) {
+                return;
+            }
             let kind = if Some(hwnd) == focused {
                 focused_kind
             } else {
@@ -1725,7 +1748,22 @@ impl WindowManager {
     /// A workspace nobody is looking at gets nothing: its windows are off
     /// screen, and moving a cloaked window only makes it flicker when it comes
     /// back. Floating windows are left exactly where the user put them.
+    ///
+    /// A monitor a fullscreen window holds gets nothing either, and neither
+    /// does a fullscreen window anywhere else: pulling one back into its tile
+    /// ends the game's fullscreen or cuts the video down to a tile.
     fn placements_for(&self, monitor: usize, workspace: usize) -> Vec<(Hwnd, Rect)> {
+        if self.is_frozen(monitor) {
+            return Vec::new();
+        }
+        let mut placements = self.layout_for(monitor, workspace);
+        placements.retain(|(hwnd, _)| !self.fullscreen.contains_key(hwnd));
+        placements
+    }
+
+    /// Where the layout puts every visible window of a workspace, fullscreen
+    /// windows or not. [`WindowManager::placements_for`] is what is applied.
+    fn layout_for(&self, monitor: usize, workspace: usize) -> Vec<(Hwnd, Rect)> {
         let Some(display) = self.core.monitors().get(monitor) else {
             return Vec::new();
         };
@@ -1828,6 +1866,10 @@ impl WindowManager {
                 tracing::debug!(command = name, ok = response.is_ok(), "command handled");
                 reply.send(response);
                 flow
+            }
+            Event::RetileMonitor(id) => {
+                self.retile_monitor(id);
+                Flow::Continue
             }
             Event::Shutdown(reason) => {
                 tracing::info!(?reason, "shutting down");
@@ -1969,6 +2011,11 @@ impl WindowManager {
         if !self.core.is_managed(id) {
             return;
         }
+        // Before the maximize: a fullscreen window is neither tiled nor
+        // maximized, and some games report themselves zoomed as well.
+        if self.follow_fullscreen(hwnd) {
+            return;
+        }
         let Some((monitor, workspace)) = self.core.locate_window(id) else {
             return;
         };
@@ -2011,6 +2058,143 @@ impl WindowManager {
                 self.apply_changes(changes);
             }
             Err(e) => tracing::debug!(%hwnd, error = %e, "could not follow the maximize"),
+        }
+    }
+
+    /// The monitor a managed window has taken over, if it has.
+    ///
+    /// On the location-change path, so the caption is looked at first: nearly
+    /// every window has one, and for those this is one style read and one
+    /// rect read. The rest is only asked of a window without a title bar.
+    fn fullscreen_monitor(&self, hwnd: Hwnd) -> Option<usize> {
+        if !self.core.fullscreen_passthrough {
+            return None;
+        }
+        let shape = self.platform.window_shape(hwnd)?;
+        let caption = crate::platform::types::style::WS_CAPTION;
+        if shape.style & caption == caption {
+            return None;
+        }
+        let id = window_id(hwnd);
+        let window = self.core.window(id)?;
+        if self.core.rules.keeps_fullscreen_tiled(&window.info()) {
+            return None;
+        }
+        let placed = self
+            .core
+            .locate_window(id)
+            .and_then(|(monitor, workspace)| {
+                self.layout_for(monitor, workspace)
+                    .into_iter()
+                    .find(|(other, _)| *other == hwnd)
+                    .map(|(_, rect)| rect)
+            });
+        self.core
+            .monitors()
+            .iter()
+            .position(|monitor| crate::platform::is_fullscreen(shape, monitor.size, placed))
+    }
+
+    /// Whether a fullscreen window holds this monitor right now.
+    ///
+    /// Only while the window is on screen: one on a workspace the user has
+    /// switched away from is cloaked, and holding its monitor then would stop
+    /// the workspace they switched to from ever being tiled.
+    fn is_frozen(&self, monitor: usize) -> bool {
+        self.fullscreen.iter().any(|(hwnd, held)| {
+            *held == monitor
+                && self
+                    .core
+                    .locate_window(window_id(*hwnd))
+                    .is_some_and(|(at, workspace)| {
+                        self.core
+                            .monitors()
+                            .get(at)
+                            .is_some_and(|m| m.focused_workspace_idx() == workspace)
+                    })
+        })
+    }
+
+    /// Reads whether a managed window is fullscreen and follows the change.
+    ///
+    /// Returns true while it is. Runs while paused as well, so that coming out
+    /// of a pause or game mode never pulls a game that is still fullscreen
+    /// back into its tile.
+    fn follow_fullscreen(&mut self, hwnd: Hwnd) -> bool {
+        let now = self.fullscreen_monitor(hwnd);
+        let before = self.fullscreen.get(&hwnd).copied();
+        if now == before {
+            return now.is_some();
+        }
+        match now {
+            Some(monitor) => {
+                tracing::info!(%hwnd, monitor, "a window went fullscreen, leaving its monitor alone");
+                self.fullscreen.insert(hwnd, monitor);
+                if let Some(old) = before {
+                    self.defer_monitor_retile(old);
+                }
+                self.redraw_visuals();
+            }
+            None => self.release_fullscreen(hwnd, "left fullscreen"),
+        }
+        now.is_some()
+    }
+
+    /// Gives a monitor back after its fullscreen window left, a beat later.
+    fn release_fullscreen(&mut self, hwnd: Hwnd, why: &str) {
+        if let Some(monitor) = self.fullscreen.remove(&hwnd) {
+            tracing::info!(%hwnd, monitor, why, "a fullscreen window let go of its monitor");
+            self.defer_monitor_retile(monitor);
+        }
+    }
+
+    /// Retiles one monitor a beat from now, on the loop.
+    ///
+    /// The same wait as [`WindowManager::defer_retile`], for the same reason:
+    /// a game leaving fullscreen resizes itself over several frames, and a
+    /// tile given in the middle of that is overwritten by the next one. Sent by
+    /// handle rather than index, because a display change in between reorders
+    /// the indices.
+    fn defer_monitor_retile(&self, monitor: usize) {
+        let Some(id) = self.core.monitors().get(monitor).map(|m| m.id) else {
+            return;
+        };
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(SLOW_APPLICATION_SETTLE);
+            let _ = tx.send(Event::RetileMonitor(id));
+        });
+    }
+
+    /// Lays out the workspace on screen on one monitor, and nothing else.
+    fn retile_monitor(&mut self, id: isize) {
+        let Some(monitor) = self.core.monitor_idx_for_id(id) else {
+            return;
+        };
+        // Taken over again in the meantime, by the same window or another.
+        if self.is_frozen(monitor) {
+            return;
+        }
+        let workspace = self
+            .core
+            .monitors()
+            .get(monitor)
+            .map_or(0, Monitor::focused_workspace_idx);
+        tracing::debug!(
+            monitor,
+            workspace,
+            "retiling a monitor a fullscreen window let go of"
+        );
+        // Paused, `apply_changes` touches nothing, which is right.
+        self.apply_changes(Changes::none().retile(monitor, workspace));
+    }
+
+    /// Hands the borders and the fading the desktop as it is now.
+    fn redraw_visuals(&mut self) {
+        // Paused means the visuals are off the desktop on purpose.
+        if !self.core.is_paused {
+            let targets = self.visuals_targets();
+            self.visuals.update(&targets);
         }
     }
 
@@ -2429,6 +2613,20 @@ impl WindowManager {
                 .position(|monitor| monitor.size == area)
         }) {
             self.core.monitors_mut().focus(idx);
+        }
+
+        // The indices the fullscreen windows were held by belong to the ring
+        // that is gone. Each is asked again against the new one: a game that
+        // changed the display mode is still fullscreen on the new size, and
+        // one that is not any more gives its monitor back like any other.
+        for hwnd in self.fullscreen.keys().copied().collect::<Vec<_>>() {
+            self.fullscreen.remove(&hwnd);
+            if let Some(monitor) = self.fullscreen_monitor(hwnd) {
+                self.fullscreen.insert(hwnd, monitor);
+            } else if let Some((monitor, _)) = self.core.locate_window(window_id(hwnd)) {
+                tracing::info!(%hwnd, monitor, "a display change ended a fullscreen window's hold");
+                self.defer_monitor_retile(monitor);
+            }
         }
 
         tracing::info!(

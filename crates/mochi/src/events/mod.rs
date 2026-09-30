@@ -233,6 +233,11 @@ pub enum Event {
         /// Where to send the answer.
         reply: Reply,
     },
+    /// A monitor a fullscreen window has let go of, by its raw handle.
+    ///
+    /// Sent by the daemon to itself a beat after the window left fullscreen,
+    /// so that only that monitor is retiled and the window has settled first.
+    RetileMonitor(isize),
     /// Wind down.
     Shutdown(ShutdownReason),
 }
