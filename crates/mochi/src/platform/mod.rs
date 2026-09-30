@@ -18,8 +18,8 @@ mod win32;
 pub use appview::disconnect as disconnect_shell;
 pub use dry_run::DryRunPlatform;
 pub use types::{
-    FRAME_HOST, Hwnd, MonitorInfo, Unmanageable, WindowInfo, is_frame_host, is_manageable,
-    is_manageable_with,
+    FRAME_HOST, Hwnd, MonitorInfo, Unmanageable, WindowInfo, WindowShape, is_frame_host,
+    is_fullscreen, is_manageable, is_manageable_with,
 };
 pub use win32::Win32Platform;
 
