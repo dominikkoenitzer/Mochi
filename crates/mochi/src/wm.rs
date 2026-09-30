@@ -4536,6 +4536,17 @@ mod tests {
         fn is_maximized(&self, hwnd: Hwnd) -> bool {
             self.zoomed.lock().unwrap().contains(&hwnd)
         }
+        fn window_shape(&self, hwnd: Hwnd) -> Option<crate::platform::WindowShape> {
+            self.windows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|w| w.hwnd == hwnd)
+                .map(|w| crate::platform::WindowShape {
+                    style: w.style,
+                    rect: w.rect,
+                })
+        }
         fn outranks_us(&self, hwnd: Hwnd) -> bool {
             // Mirrors the real thing: the executable is unreadable for exactly
             // the windows whose process Mochi may not open.
