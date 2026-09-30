@@ -1522,6 +1522,121 @@ fn a_window_that_defends_a_minimum_size_does_not_make_the_daemon_thrash() {
 }
 
 // ---------------------------------------------------------------------------
+// fullscreen: a window that takes its monitor over is left alone until it
+// gives it back
+// ---------------------------------------------------------------------------
+
+/// `WS_CAPTION`, the title bar a borderless fullscreen window drops.
+const WS_CAPTION: u32 = 0x00C0_0000;
+
+/// The monitor this window holds according to the daemon, if it holds one.
+fn fullscreen_monitor_of(hwnd: i64) -> Option<u64> {
+    let state = state()?;
+    state["fullscreen"]
+        .as_array()?
+        .iter()
+        .find(|held| held["window"].as_i64() == Some(hwnd) && held["frozen"] == true)
+        .and_then(|held| held["monitor"].as_u64())
+}
+
+/// The rectangle the daemon's layout gives this window.
+fn tile_of(hwnd: i64) -> Option<Rect> {
+    let state = state()?;
+    state["monitors"]
+        .as_array()?
+        .iter()
+        .flat_map(|m| m["workspaces"].as_array().into_iter().flatten())
+        .flat_map(|w| w["containers"].as_array().into_iter().flatten())
+        .flat_map(|c| c["windows"].as_array().into_iter().flatten())
+        .find(|w| w["hwnd"].as_i64() == Some(hwnd))
+        .and_then(|w| rect(&w["rect"]))
+}
+
+#[test]
+fn a_fullscreen_window_is_left_alone_until_it_leaves_fullscreen() {
+    skip_unless_allowed!("a_fullscreen_window_is_left_alone_until_it_leaves_fullscreen");
+
+    let mut daemon = Daemon::start("fullscreen");
+    let log = daemon.log();
+    let game = TestWindows::spawn(1, 0).expect("could not spawn the test window");
+    let hwnd = game.handles()[0];
+    let screen = mochi_testbed::monitor_at(0)
+        .expect("no monitor to go fullscreen on")
+        .rect;
+
+    let mut steps = Steps::default();
+
+    steps.step("the daemon adopts the window", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 1)
+            .map_err(|_| format!("state shows {} windows", managed_count()))?;
+        wait_for_tiling(&game, 1).map(|_| ())
+    });
+
+    let style = mochi_testbed::window_info(hwnd)
+        .map(|w| w.style)
+        .unwrap_or_default();
+
+    steps.step("the window goes borderless fullscreen", || {
+        mochi_testbed::set_style(hwnd, style & !WS_CAPTION).map_err(|e| e.to_string())?;
+        mochi_testbed::set_rect(hwnd, screen).map_err(|e| e.to_string())?;
+        wait_for(STEP, || fullscreen_monitor_of(hwnd).is_some())
+            .map_err(|_| "the daemon never saw the window go fullscreen".to_owned())
+    });
+
+    let other = TestWindows::spawn(1, 0).expect("could not spawn the second window");
+
+    steps.step("a new window does not pull it back into a tile", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} windows", managed_count()))?;
+        wait_until_still(&other);
+        // Long enough for a retile the new window caused to have landed.
+        std::thread::sleep(Duration::from_millis(800));
+        let now = mochi_testbed::window_rect(hwnd).map_err(|e| e.to_string())?;
+        check(
+            now == screen,
+            format!("the fullscreen window was moved from {screen} to {now}"),
+        )
+    });
+
+    steps.step("leaving fullscreen puts it back in its tile", || {
+        mochi_testbed::set_style(hwnd, style).map_err(|e| e.to_string())?;
+        let small = Rect::new(
+            screen.left + 100,
+            screen.top + 100,
+            screen.left + 700,
+            screen.top + 500,
+        );
+        mochi_testbed::set_rect(hwnd, small).map_err(|e| e.to_string())?;
+        wait_for(STEP, || fullscreen_monitor_of(hwnd).is_none())
+            .map_err(|_| "the daemon still holds the monitor".to_owned())?;
+        wait_for(STEP, || {
+            let tile = tile_of(hwnd);
+            let frame = frame_of(&game, hwnd);
+            matches!((tile, frame), (Some(tile), Some(frame)) if close_enough(tile, frame, 4))
+        })
+        .map_err(|_| {
+            format!(
+                "the window stayed at {:?}, its tile is {:?}",
+                frame_of(&game, hwnd),
+                tile_of(hwnd)
+            )
+        })
+    });
+
+    steps.step("stop leaves both windows visible", || {
+        daemon.stop();
+        wait_for(Duration::from_secs(5), || {
+            all_infos().iter().all(|w| w.visible && !w.cloaked)
+        })
+        .map_err(|_| "a window stayed hidden after stop".to_owned())
+    });
+
+    drop(other);
+    drop(game);
+    steps.finish(&log);
+}
+
+// ---------------------------------------------------------------------------
 // the shell cloak, which is the path every real application takes and which no
 // other test in this file can reach
 // ---------------------------------------------------------------------------
