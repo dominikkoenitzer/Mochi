@@ -7599,4 +7599,483 @@ alt + j : focus down
         assert_eq!(hidden.lock().unwrap().len(), 1);
         let _ = std::fs::remove_file(&path);
     }
+
+    // -----------------------------------------------------------------
+    // scratchpads
+    // -----------------------------------------------------------------
+
+    /// The command a scratchpad in these tests is started with.
+    const SCRATCH_COMMAND: &str = "wt.exe -w new --title scratch --suppressApplicationTitle";
+
+    /// A scratchpad called `term` for the window titled `scratch`.
+    fn scratch_pad() -> mochi_core::config::ScratchpadConfig {
+        mochi_core::config::ScratchpadConfig {
+            name: "term".into(),
+            rule: titled("scratch"),
+            command: Some(SCRATCH_COMMAND.into()),
+            width: None,
+            height: None,
+            hide_on_focus_loss: None,
+        }
+    }
+
+    /// A window of its own process, so focus loss can tell it from others.
+    fn process_window(hwnd: isize, title: &str, pid: u32) -> WindowInfo {
+        WindowInfo {
+            pid,
+            ..window(hwnd, title)
+        }
+    }
+
+    /// A manager with an editor tiled and the `term` scratchpad configured.
+    fn scratch_manager(windows: Vec<WindowInfo>) -> (WindowManager, Arc<FakePlatform>) {
+        let (mut wm, platform) = manager_focused_on(windows, Hwnd(1));
+        wm.set_scratchpads(vec![scratch_pad()]);
+        (wm, platform)
+    }
+
+    fn toggle(wm: &mut WindowManager) -> Response {
+        wm.handle_command(Command::ToggleScratchpad {
+            name: "term".into(),
+        })
+        .0
+    }
+
+    fn cloak_calls(platform: &FakePlatform, hwnd: Hwnd) -> Vec<bool> {
+        platform
+            .cloaks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(h, _)| *h == hwnd)
+            .map(|&(_, on)| on)
+            .collect()
+    }
+
+    /// Where the default 0.6 by 0.5 scratchpad lands on the main screen's
+    /// work area of 3840 by 2112.
+    const CENTRED_ON_MAIN: Rect = Rect::new(768, 528, 3072, 1584);
+
+    #[test]
+    fn a_scratchpad_comes_out_of_the_layout_and_is_shown_centred_and_focused() {
+        let (mut wm, platform) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        assert!(
+            wm.state().is_managed(window_id(Hwnd(2))),
+            "tiled to begin with"
+        );
+
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(2))),
+            "a scratchpad kept its tile, so the layout has a hole where it floats"
+        );
+        assert_eq!(wm.state().all_window_ids().count(), 1);
+        assert_eq!(platform.rect_of(Hwnd(2)), Some(CENTRED_ON_MAIN));
+        assert_eq!(platform.focused.lock().unwrap().last(), Some(&Hwnd(2)));
+        assert!(!wm.we_hid(Hwnd(2)));
+    }
+
+    #[test]
+    fn toggling_a_scratchpad_cloaks_it_on_the_record_and_brings_it_back() {
+        let (mut wm, platform) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        let path = record_path("mochi96s-scratchpad-toggle");
+        *wm.hidden.lock().unwrap() = Hidden::with_record(path.clone());
+
+        toggle(&mut wm);
+        platform.cloaks.lock().unwrap().clear();
+
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert_eq!(cloak_calls(&platform, Hwnd(2)), [true]);
+        assert!(wm.we_hid(Hwnd(2)), "the hide was not written down");
+        let entries = crate::recover::load(&path).expect("the record did not parse");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.hwnd, entry.behaviour, entry.pid))
+                .collect::<Vec<_>>(),
+            [(2, Some(HidingBehaviour::Cloak), 20)],
+            "a hard kill now would leave the scratchpad cloaked with nothing naming it"
+        );
+        assert_eq!(
+            platform.focused.lock().unwrap().last(),
+            Some(&Hwnd(1)),
+            "the keyboard stayed on a window that went off screen"
+        );
+
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert_eq!(cloak_calls(&platform, Hwnd(2)), [true, false]);
+        assert!(!wm.we_hid(Hwnd(2)));
+        assert!(
+            crate::recover::load(&path).is_none_or(|entries| entries.is_empty()),
+            "the record still names a scratchpad that is back on screen"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_hidden_scratchpad_is_put_back_by_the_restore_hook_and_by_restore_windows() {
+        let (mut wm, platform) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        toggle(&mut wm);
+        toggle(&mut wm);
+        assert!(wm.we_hid(Hwnd(2)));
+
+        // What the panic hook, `mochic stop` and the console close run.
+        restore(platform.as_ref(), &wm.hidden());
+        assert_eq!(cloak_calls(&platform, Hwnd(2)).last(), Some(&false));
+        assert!(!wm.we_hid(Hwnd(2)));
+
+        // Back on screen, so the next toggle hides it again, and this time
+        // the escape hatch finds it.
+        toggle(&mut wm);
+        assert!(wm.we_hid(Hwnd(2)));
+        assert_eq!(wm.handle_command(Command::RestoreWindows).0, Response::Ok);
+        assert_eq!(cloak_calls(&platform, Hwnd(2)).last(), Some(&false));
+        assert!(!wm.we_hid(Hwnd(2)));
+    }
+
+    #[test]
+    fn a_scratchpad_stays_on_screen_across_a_workspace_switch() {
+        let (mut wm, platform) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        toggle(&mut wm);
+        platform.cloaks.lock().unwrap().clear();
+
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert_eq!(cloak_calls(&platform, Hwnd(1)), [true]);
+        assert!(
+            cloak_calls(&platform, Hwnd(2)).is_empty(),
+            "the workspace switch took the scratchpad with it"
+        );
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+        assert!(cloak_calls(&platform, Hwnd(2)).is_empty());
+    }
+
+    #[test]
+    fn a_scratchpad_with_no_window_starts_its_command_once_and_claims_what_opens() {
+        let (mut wm, platform) = scratch_manager(vec![process_window(1, "Editor", 10)]);
+
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert_eq!(*wm.launched.lock().unwrap(), [SCRATCH_COMMAND]);
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert_eq!(
+            wm.launched.lock().unwrap().len(),
+            1,
+            "a second press while the first copy was starting started another"
+        );
+
+        // Windows Terminal opens under its own name and takes the title after.
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .push(process_window(5, "Windows Terminal", 50));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(5));
+        assert!(
+            wm.state().is_managed(window_id(Hwnd(5))),
+            "tiled until it matches"
+        );
+
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|w| w.hwnd == Hwnd(5))
+            .unwrap()
+            .title = "scratch".into();
+        wm.on_window_event(WindowEventKind::NameChange, Hwnd(5));
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(5))),
+            "the started window stayed in the layout once it had its title"
+        );
+        assert_eq!(platform.rect_of(Hwnd(5)), Some(CENTRED_ON_MAIN));
+        assert_eq!(platform.focused.lock().unwrap().last(), Some(&Hwnd(5)));
+
+        // First match only: a second window of the same title is tiled.
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .push(process_window(6, "scratch", 60));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(6));
+        assert!(wm.state().is_managed(window_id(Hwnd(6))));
+    }
+
+    #[test]
+    fn a_window_that_matches_when_it_opens_is_never_tiled() {
+        let (mut wm, platform) = scratch_manager(vec![process_window(1, "Editor", 10)]);
+        toggle(&mut wm);
+        platform.clear_history();
+
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .push(process_window(5, "scratch", 50));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(5));
+        assert!(!wm.state().is_managed(window_id(Hwnd(5))));
+        assert_eq!(wm.state().all_window_ids().count(), 1);
+        assert_eq!(platform.rect_of(Hwnd(5)), Some(CENTRED_ON_MAIN));
+    }
+
+    #[test]
+    fn a_closed_scratchpad_is_started_again_by_the_next_toggle() {
+        let (mut wm, platform) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        toggle(&mut wm);
+        toggle(&mut wm);
+        assert!(wm.we_hid(Hwnd(2)));
+
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .retain(|w| w.hwnd != Hwnd(2));
+        wm.on_window_event(WindowEventKind::Destroyed, Hwnd(2));
+        assert!(
+            !wm.we_hid(Hwnd(2)),
+            "a dead handle stayed in the record, for the next window to inherit"
+        );
+
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert_eq!(*wm.launched.lock().unwrap(), [SCRATCH_COMMAND]);
+    }
+
+    #[test]
+    fn a_scratchpad_showing_on_another_screen_is_moved_here_not_hidden() {
+        let (mut wm, platform) = manager_on_focused_on(
+            vec![
+                process_window(1, "Editor", 10),
+                process_window(2, "scratch", 20),
+            ],
+            vec![main_screen(), portrait_screen()],
+            Hwnd(1),
+        );
+        wm.set_scratchpads(vec![scratch_pad()]);
+        toggle(&mut wm);
+        assert_eq!(platform.rect_of(Hwnd(2)), Some(CENTRED_ON_MAIN));
+
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        platform.cloaks.lock().unwrap().clear();
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert!(
+            cloak_calls(&platform, Hwnd(2)).is_empty(),
+            "a toggle on the other screen hid it instead of bringing it over"
+        );
+        let rect = platform.rect_of(Hwnd(2)).unwrap();
+        assert!(
+            portrait_screen().work_area.contains_rect(&rect),
+            "{rect:?} is not on the portrait screen"
+        );
+    }
+
+    #[test]
+    fn a_scratchpad_crossing_to_a_screen_at_another_dpi_is_placed_again_once_visible() {
+        let (mut wm, platform) = manager_on_focused_on(
+            vec![
+                process_window(1, "Editor", 10),
+                process_window(2, "scratch", 20),
+            ],
+            vec![main_screen(), portrait_screen()],
+            Hwnd(1),
+        );
+        wm.set_scratchpads(vec![scratch_pad()]);
+        let placed = |platform: &FakePlatform| {
+            platform
+                .history
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(hwnd, _)| *hwnd == Hwnd(2))
+                .count()
+        };
+
+        // Hidden, then summoned on the screen it is already on: once.
+        toggle(&mut wm);
+        toggle(&mut wm);
+        platform.clear_history();
+        toggle(&mut wm);
+        assert_eq!(placed(&platform), 1, "placed twice with no DPI change");
+
+        // Hidden, then summoned on the portrait screen at 96 DPI: twice.
+        toggle(&mut wm);
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        platform.clear_history();
+        toggle(&mut wm);
+        assert_eq!(
+            placed(&platform),
+            2,
+            "the window was not placed again after crossing to another DPI"
+        );
+    }
+
+    #[test]
+    fn a_paused_daemon_refuses_every_scratchpad_command() {
+        let (mut wm, platform) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        wm.handle_command(Command::TogglePause);
+        platform.clear_history();
+        for command in [
+            Command::ToggleScratchpad {
+                name: "term".into(),
+            },
+            Command::ScratchpadClaim {
+                name: "term".into(),
+            },
+            Command::ScratchpadRelease {
+                name: "term".into(),
+            },
+        ] {
+            let name = command.name();
+            assert_eq!(
+                wm.handle_command(command).0.error_message(),
+                Some(PAUSED),
+                "{name} answered while paused"
+            );
+        }
+        assert!(platform.rect_of(Hwnd(2)).is_none());
+        assert!(wm.launched.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_scratchpad_the_file_does_not_name_is_an_error() {
+        let (mut wm, _) = scratch_manager(vec![process_window(1, "Editor", 10)]);
+        let (response, _) = wm.handle_command(Command::ToggleScratchpad {
+            name: "notes".into(),
+        });
+        assert!(response.error_message().is_some());
+        assert!(wm.launched.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn losing_the_focus_to_another_application_hides_the_scratchpad_but_not_to_its_own_dialog() {
+        let (mut wm, platform) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+            process_window(3, "Settings", 20),
+        ]);
+        toggle(&mut wm);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(3));
+        assert!(!wm.we_hid(Hwnd(2)), "its own dialog hid the scratchpad");
+
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(1));
+        assert!(wm.we_hid(Hwnd(2)), "another application took the focus");
+        assert_eq!(cloak_calls(&platform, Hwnd(2)), [true]);
+    }
+
+    #[test]
+    fn a_scratchpad_that_asks_to_stay_keeps_its_place_when_the_focus_moves() {
+        let (mut wm, _) = manager_focused_on(
+            vec![
+                process_window(1, "Editor", 10),
+                process_window(2, "scratch", 20),
+            ],
+            Hwnd(1),
+        );
+        wm.set_scratchpads(vec![mochi_core::config::ScratchpadConfig {
+            hide_on_focus_loss: Some(false),
+            ..scratch_pad()
+        }]);
+        toggle(&mut wm);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(1));
+        assert!(!wm.we_hid(Hwnd(2)));
+    }
+
+    #[test]
+    fn claiming_takes_the_focused_window_and_releasing_gives_it_back_to_the_layout() {
+        let (mut wm, platform) = manager_focused_on(
+            vec![
+                process_window(1, "Editor", 10),
+                process_window(2, "Notes", 20),
+            ],
+            Hwnd(2),
+        );
+        wm.set_scratchpads(vec![scratch_pad()]);
+
+        let (response, _) = wm.handle_command(Command::ScratchpadClaim {
+            name: "term".into(),
+        });
+        assert_eq!(response, Response::Ok);
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert_eq!(platform.rect_of(Hwnd(2)), Some(CENTRED_ON_MAIN));
+
+        // Hidden, and then released: it has to come back on screen and tiled.
+        toggle(&mut wm);
+        assert!(wm.we_hid(Hwnd(2)));
+        let (response, _) = wm.handle_command(Command::ScratchpadRelease {
+            name: "term".into(),
+        });
+        assert_eq!(response, Response::Ok);
+        assert!(
+            !wm.we_hid(Hwnd(2)),
+            "released while hidden, and left hidden"
+        );
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
+        assert_eq!(wm.state().all_window_ids().count(), 2);
+
+        // Released for good: it does not match, so the toggle starts the
+        // command instead of taking the window straight back.
+        toggle(&mut wm);
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
+        assert_eq!(*wm.launched.lock().unwrap(), [SCRATCH_COMMAND]);
+    }
+
+    #[test]
+    fn a_window_that_runs_as_administrator_is_refused_as_a_scratchpad() {
+        let elevated = WindowInfo {
+            exe: String::new(),
+            ..process_window(2, "scratch", 20)
+        };
+        let (mut wm, platform) =
+            manager_focused_on(vec![process_window(1, "Editor", 10), elevated], Hwnd(2));
+        wm.set_scratchpads(vec![scratch_pad()]);
+        platform.clear_history();
+
+        let (response, _) = wm.handle_command(Command::ScratchpadClaim {
+            name: "term".into(),
+        });
+        assert_eq!(response.error_message(), Some(SCRATCHPAD_ELEVATED));
+        assert_eq!(
+            toggle(&mut wm).error_message(),
+            Some(SCRATCHPAD_ELEVATED),
+            "a toggle found the elevated window and started a second copy"
+        );
+        assert!(wm.launched.lock().unwrap().is_empty());
+        assert!(platform.rect_of(Hwnd(2)).is_none());
+    }
+
+    #[test]
+    fn a_reload_that_drops_a_scratchpad_gives_its_hidden_window_back() {
+        let (mut wm, platform) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        toggle(&mut wm);
+        toggle(&mut wm);
+        assert!(wm.we_hid(Hwnd(2)));
+
+        wm.set_scratchpads(Vec::new());
+        assert!(!wm.we_hid(Hwnd(2)));
+        assert_eq!(cloak_calls(&platform, Hwnd(2)).last(), Some(&false));
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
+    }
 }
