@@ -316,7 +316,9 @@ Windows Terminal opens under its own name and only then takes the title.
 `mochic check` warns about a scratchpad that matches on the executable alone.
 
 A scratchpad stays on screen across workspace switches and is never set always
-on top, so a window you click can still cover it. It is taken off screen the
+on top, so a window you click can still cover it. `hide_on_focus_loss` reacts
+to you: clicking or switching to another application hides it, and a Mochi
+command that moves the keyboard, a workspace switch among them, does not. It is taken off screen the
 same way a hidden workspace is, and written into the same record, so `mochic
 stop`, `mochic restore-windows` and the next start after a crash all give it
 back. After a restart it is an ordinary tiled window until the next toggle
