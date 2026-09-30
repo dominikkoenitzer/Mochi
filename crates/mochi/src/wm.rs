@@ -19,6 +19,15 @@
 //! configuration they were built from is kept in `visual_config`, so a
 //! `mochic border-width` can change one key and push it into the managers
 //! straight away instead of waiting for the next reload.
+//!
+//! # Scratchpads
+//!
+//! A scratchpad window lives in `scratchpads`, never in the model, so no layout
+//! ever gives it a tile. It is taken off screen and put back through the same
+//! `hide_window` and `show_window` as a workspace switch, which is what puts it
+//! in the crash record: `mochic stop`, `restore-windows` and the next start
+//! after a hard kill bring it back like any other hidden window. Placing it is
+//! the one position written outside `apply_changes`.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
@@ -55,6 +64,15 @@ const PAUSED: &str = "mochi is paused, nothing was changed";
 /// How long a `slow_application_identifiers` window is given to finish opening
 /// before the layout is applied to it a second time.
 const SLOW_APPLICATION_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long a scratchpad's `command` is given to open the window it is waiting
+/// for. The first matching window inside it is claimed, and a second toggle in
+/// the meantime does not start a second copy.
+const SCRATCHPAD_LAUNCH_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What a scratchpad command answers for a window that runs as administrator.
+const SCRATCHPAD_ELEVATED: &str = "the window runs as administrator and mochi does not, \
+     so Windows will not let mochi move or hide it";
 
 /// The `mochic hotkeys` rows of a set of bindings: the top level in file
 /// order, then every `mode` block's, carrying the name of its mode.
@@ -482,6 +500,26 @@ struct WorkspaceRule {
     initial_only: bool,
 }
 
+/// A `scratchpads` entry and the window it holds.
+#[derive(Debug, Clone)]
+struct Scratchpad {
+    config: mochi_core::config::ScratchpadConfig,
+    /// The window, once one has been found, started or claimed.
+    hwnd: Option<Hwnd>,
+    /// When `command` was started, for as long as its window has not appeared.
+    launched: Option<std::time::Instant>,
+}
+
+impl Scratchpad {
+    /// Whether a window that appears now is the one `command` was started for.
+    fn is_waiting(&self) -> bool {
+        self.hwnd.is_none()
+            && self
+                .launched
+                .is_some_and(|at| at.elapsed() <= SCRATCHPAD_LAUNCH_WINDOW)
+    }
+}
+
 /// What was focused, so a change can be announced to the subscribers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Focus {
@@ -525,6 +563,12 @@ pub struct WindowManager {
     added_workspace_rules: Vec<WorkspaceRule>,
     /// The foreground window, as far as Mochi knows.
     foreground: Option<Hwnd>,
+    /// Windows kept out of the model and summoned by name, in file order.
+    ///
+    /// Outside the model on purpose: nothing that computes a layout can see
+    /// them, so no workspace switch cloaks one and no tile is ever reserved
+    /// for a window that floats over all of them.
+    scratchpads: Vec<Scratchpad>,
     /// The configuration the visuals were built from. Every tiling key ends
     /// up in the model, but these have no home except here, and a command
     /// that changes one has to hand the whole set back to the managers.
@@ -556,6 +600,10 @@ pub struct WindowManager {
     /// not have" is exactly what the tests below check.
     #[cfg(test)]
     sent: Mutex<Vec<NotificationEvent>>,
+    /// Every scratchpad command line that would have been started, recorded
+    /// in tests instead of starting anything.
+    #[cfg(test)]
+    launched: Mutex<Vec<String>>,
 }
 
 impl WindowManager {
@@ -634,6 +682,7 @@ impl WindowManager {
             added_rules: Vec::new(),
             added_workspace_rules: Vec::new(),
             foreground: None,
+            scratchpads: Vec::new(),
             visual_config: Config::default(),
             visuals,
             hotkeys: None,
@@ -644,6 +693,8 @@ impl WindowManager {
             hotkey_errors: Vec::new(),
             #[cfg(test)]
             sent: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            launched: Mutex::new(Vec::new()),
         };
 
         wm.refresh_monitors();
@@ -923,6 +974,7 @@ impl WindowManager {
         // wholesale, so what a command added has to be put back.
         self.workspace_rules
             .extend(self.added_workspace_rules.iter().cloned());
+        self.set_scratchpads(loaded.config.scratchpads.clone().unwrap_or_default());
 
         if let Some(mouse) = &self.mouse {
             mouse.set_enabled(self.core.focus_follows_mouse.is_some());
@@ -1050,6 +1102,12 @@ impl WindowManager {
 
     /// Adds a window to the model, obeying the rules and the workspace routing.
     fn manage(&mut self, info: &WindowInfo) {
+        // Before any rule or route: a scratchpad window never takes a tile,
+        // and the window a scratchpad command was started for is claimed the
+        // moment it shows up rather than tiled and then pulled out again.
+        if self.scratchpad_holding(info.hwnd).is_some() || self.claim_for_waiting_scratchpad(info) {
+            return;
+        }
         let window = core_window(info);
         if self.core.rules.decide(&window.info()) == RuleDecision::Ignore {
             tracing::debug!(hwnd = %info.hwnd, title = %info.title, "an ignore rule matched");
@@ -1813,6 +1871,7 @@ impl WindowManager {
         match kind {
             WindowEventKind::LocationChange => self.follow_external_maximize(hwnd),
             WindowEventKind::Destroyed => {
+                self.scratchpad_window_closed(hwnd);
                 if self.lives_in_the_tray(hwnd) {
                     // The application put its window away rather than closing:
                     // the handle is still a live window and the same one comes
@@ -1980,6 +2039,11 @@ impl WindowManager {
         if self.core.is_paused || self.core.is_managed(window_id(hwnd)) {
             return;
         }
+        // Its own uncloak comes back as an event too, and a scratchpad is
+        // never anything but a scratchpad while it is held.
+        if self.scratchpad_holding(hwnd).is_some() {
+            return;
+        }
         let Ok(info) = self.platform.window_info(hwnd) else {
             return;
         };
@@ -1992,6 +2056,12 @@ impl WindowManager {
     /// A window took the foreground.
     fn window_focused(&mut self, hwnd: Hwnd) {
         self.foreground = Some(hwnd);
+        if self.scratchpad_holding(hwnd).is_some() {
+            // Not in the model, so there is nothing to point it at. The
+            // borders still have to move onto it.
+            self.draw_visuals();
+            return;
+        }
         let id = window_id(hwnd);
 
         if !self.core.is_managed(id) {
@@ -2099,6 +2169,13 @@ impl WindowManager {
             if !info.title.trim().is_empty() {
                 self.window_appeared(hwnd);
             }
+            return;
+        }
+
+        // Windows Terminal opens its window under its own name and only then
+        // takes the `--title` it was given, so the window a scratchpad started
+        // has usually been tiled before its title could match.
+        if self.claim_for_waiting_scratchpad(&info) {
             return;
         }
 
@@ -2598,11 +2675,9 @@ impl WindowManager {
                 self.run_op(|core| core.move_to_named_workspace(&name, false))
             }
             // --- scratchpads ----------------------------------------------
-            Command::ToggleScratchpad { name }
-            | Command::ScratchpadClaim { name }
-            | Command::ScratchpadRelease { name } => {
-                Response::error(format!("no scratchpad is named {name:?}"))
-            }
+            Command::ToggleScratchpad { name } => self.toggle_scratchpad(&name),
+            Command::ScratchpadClaim { name } => self.claim_scratchpad(&name),
+            Command::ScratchpadRelease { name } => self.release_scratchpad(&name),
 
             Command::WorkspacePadding {
                 monitor,
@@ -3432,6 +3507,423 @@ impl WindowManager {
         }
         tracing::info!(setting = what, "applied");
         Response::Ok
+    }
+
+    // -----------------------------------------------------------------
+    // scratchpads
+    // -----------------------------------------------------------------
+
+    /// Replaces the scratchpad list with the one a configuration file names.
+    ///
+    /// An entry that keeps its name keeps its window, so a reload never
+    /// starts a second copy of something already running. An entry the file
+    /// no longer names gives its window back to the layout: dropping it on the
+    /// floor while it was hidden would strand it off screen with nothing but
+    /// the crash record left pointing at it.
+    fn set_scratchpads(&mut self, entries: Vec<mochi_core::config::ScratchpadConfig>) {
+        let mut previous = std::mem::take(&mut self.scratchpads);
+        for config in entries {
+            if let Err(e) = config.validate() {
+                tracing::warn!(name = %config.name, error = %e, "a scratchpad was dropped");
+                continue;
+            }
+            if self.scratchpad_named(&config.name).is_some() {
+                tracing::warn!(name = %config.name, "a second scratchpad of the same name was dropped");
+                continue;
+            }
+            let kept = previous
+                .iter()
+                .position(|pad| pad.config.name.eq_ignore_ascii_case(&config.name))
+                .map(|index| previous.remove(index));
+            self.scratchpads.push(Scratchpad {
+                config,
+                hwnd: kept.as_ref().and_then(|pad| pad.hwnd),
+                launched: kept.and_then(|pad| pad.launched),
+            });
+        }
+        for gone in previous {
+            if let Some(hwnd) = gone.hwnd {
+                tracing::info!(%hwnd, name = %gone.config.name, "the scratchpad is gone from the file, giving its window back");
+                self.give_back(hwnd);
+            }
+        }
+    }
+
+    /// The scratchpad with this name, whatever its case.
+    fn scratchpad_named(&self, name: &str) -> Option<usize> {
+        self.scratchpads
+            .iter()
+            .position(|pad| pad.config.name.trim().eq_ignore_ascii_case(name.trim()))
+    }
+
+    /// The scratchpad holding this window, if one is.
+    fn scratchpad_holding(&self, hwnd: Hwnd) -> Option<usize> {
+        self.scratchpads
+            .iter()
+            .position(|pad| pad.hwnd == Some(hwnd))
+    }
+
+    /// The scratchpad of this name, or the answer that there is none.
+    fn scratchpad_or_error(&self, name: &str) -> std::result::Result<usize, Response> {
+        self.scratchpad_named(name).ok_or_else(|| {
+            Response::error(format!(
+                "no scratchpad is named {name:?}, the scratchpads list in mochi.json names them"
+            ))
+        })
+    }
+
+    /// Lets go of a handle whose window no longer exists.
+    ///
+    /// Windows reuses handle values, so a dead one kept here would sooner or
+    /// later be some other window, summoned and hidden by a key that was never
+    /// meant for it.
+    fn forget_closed_scratchpad(&mut self, index: usize) {
+        let Some(hwnd) = self.scratchpads[index].hwnd else {
+            return;
+        };
+        if self.platform.window_info(hwnd).is_err() {
+            tracing::info!(%hwnd, name = %self.scratchpads[index].config.name, "the scratchpad window is gone");
+            self.scratchpads[index].hwnd = None;
+            record(&self.hidden).show(hwnd);
+            if self.foreground == Some(hwnd) {
+                self.foreground = None;
+            }
+        }
+    }
+
+    /// A destroyed window that a scratchpad held is forgotten, so the next
+    /// toggle starts the application again.
+    fn scratchpad_window_closed(&mut self, hwnd: Hwnd) {
+        if let Some(index) = self.scratchpad_holding(hwnd) {
+            self.forget_closed_scratchpad(index);
+        }
+    }
+
+    /// Whether Windows would refuse Mochi every move and every cloak.
+    fn out_of_reach(&self, info: &WindowInfo) -> bool {
+        !info.reachable || self.platform.outranks_us(info.hwnd)
+    }
+
+    /// Hands a window that appeared to the scratchpad whose command is
+    /// waiting for it. True when it was taken.
+    ///
+    /// The first match only, and only while the command's window is open: a
+    /// window that matches later is left to the layout like any other, which
+    /// is why the documentation asks for a title or a class rather than an
+    /// executable that also owns every other window of the application.
+    fn claim_for_waiting_scratchpad(&mut self, info: &WindowInfo) -> bool {
+        if !self.manage_classes.is_empty() && !self.class_is_forced(&info.class) {
+            return false;
+        }
+        let rule = rule_info(info);
+        let Some(index) = self
+            .scratchpads
+            .iter()
+            .position(|pad| pad.is_waiting() && pad.config.rule.matches(&rule))
+        else {
+            return false;
+        };
+        self.scratchpads[index].launched = None;
+        if self.out_of_reach(info) {
+            tracing::warn!(hwnd = %info.hwnd, name = %self.scratchpads[index].config.name, "the scratchpad window runs as administrator, leaving it alone");
+            return false;
+        }
+        tracing::info!(hwnd = %info.hwnd, title = %info.title, name = %self.scratchpads[index].config.name, "the scratchpad window opened");
+        self.take_into_scratchpad(index, info.hwnd);
+        let response = self.summon_scratchpad(index);
+        if let Some(message) = response.error_message() {
+            tracing::warn!(hwnd = %info.hwnd, message, "could not show the scratchpad window");
+        }
+        true
+    }
+
+    /// Makes `hwnd` the window of a scratchpad, out of the model if it was in.
+    fn take_into_scratchpad(&mut self, index: usize, hwnd: Hwnd) {
+        if self.core.is_managed(window_id(hwnd)) {
+            self.unmanage(hwnd, "taken by a scratchpad");
+        }
+        let pad = &mut self.scratchpads[index];
+        pad.hwnd = Some(hwnd);
+        pad.launched = None;
+    }
+
+    /// Puts a window that is no longer a scratchpad back where it came from:
+    /// on screen, and into the layout if the rules take it.
+    fn give_back(&mut self, hwnd: Hwnd) {
+        if self.we_hid(hwnd) {
+            self.show_window(hwnd);
+        }
+        self.window_appeared(hwnd);
+    }
+
+    /// Shows a scratchpad centred on the focused monitor and focuses it.
+    ///
+    /// Placed while it is still cloaked, so it never flashes up where it was
+    /// last hidden. A window coming from a screen at another DPI is placed a
+    /// second time once it is visible: Windows rescales it as it crosses, and
+    /// the application answers the change with a size of its own choosing.
+    fn summon_scratchpad(&mut self, index: usize) -> Response {
+        let Some(hwnd) = self.scratchpads[index].hwnd else {
+            return Response::error("the scratchpad holds no window");
+        };
+        let info = match self.platform.window_info(hwnd) {
+            Ok(info) => info,
+            Err(e) => return Response::error(e),
+        };
+        let monitor = self.core.focused_monitor_idx();
+        let workspace = self
+            .core
+            .monitors()
+            .get(monitor)
+            .map_or(0, Monitor::focused_workspace_idx);
+        let Some(area) = self.core.work_area_for(monitor, workspace) else {
+            return Response::error("no monitor is focused");
+        };
+        let rect = self.scratchpads[index].config.rect_in(area);
+        let dpi_of = |index: Option<usize>| {
+            index
+                .and_then(|index| self.core.monitors().get(index))
+                .map(|display| display.dpi)
+        };
+        let from = dpi_of(
+            info.monitor
+                .and_then(|id| self.core.monitor_idx_for_id(id.0)),
+        );
+        let crossing = from != dpi_of(Some(monitor));
+        let cloaked_by_us = record(&self.hidden).behaviour_of(hwnd) == Some(HidingBehaviour::Cloak);
+
+        // A window the user minimized is not brought back by an uncloak.
+        if info.minimized
+            && !self.we_hid(hwnd)
+            && let Err(e) = self.platform.show(hwnd, ShowState::Restore)
+        {
+            tracing::debug!(%hwnd, error = %e, "could not restore the scratchpad window");
+        }
+        self.place_scratchpad(hwnd, rect);
+        self.show_window(hwnd);
+        if self.we_hid(hwnd) {
+            return Response::error("the scratchpad window refused to come back on screen");
+        }
+        // A minimized or hidden window only takes its place once it is shown.
+        if crossing || !cloaked_by_us {
+            self.place_scratchpad(hwnd, rect);
+        }
+        self.focus_hwnd(hwnd);
+        self.draw_visuals();
+        tracing::info!(%hwnd, monitor, name = %self.scratchpads[index].config.name, "scratchpad shown");
+        Response::Ok
+    }
+
+    /// Takes a scratchpad off screen. With `refocus`, the keyboard goes back
+    /// to the window the model has focused, since nothing else will take it.
+    fn dismiss_scratchpad(&mut self, index: usize, refocus: bool) -> Response {
+        let Some(hwnd) = self.scratchpads[index].hwnd else {
+            return Response::error("the scratchpad holds no window");
+        };
+        self.hide_window(hwnd);
+        if !self.we_hid(hwnd) {
+            return Response::error("the scratchpad window could not be taken off screen");
+        }
+        if self.foreground == Some(hwnd) {
+            self.foreground = None;
+        }
+        if refocus {
+            match self.core.focused_window_id() {
+                Some(id) => self.focus_hwnd(handle(id)),
+                None => {
+                    if let Err(e) = self.platform.focus_desktop() {
+                        tracing::debug!(error = %e, "could not take the keyboard off the scratchpad");
+                    }
+                }
+            }
+        }
+        self.draw_visuals();
+        tracing::info!(%hwnd, name = %self.scratchpads[index].config.name, "scratchpad hidden");
+        Response::Ok
+    }
+
+    /// Moves a scratchpad window, without animation: it is off screen or about
+    /// to be focused, and there is nothing to watch.
+    fn place_scratchpad(&self, hwnd: Hwnd, rect: Rect) {
+        let placement = crate::platform::WindowPlacement::new(hwnd, rect);
+        if let Err(e) = self.platform.set_position(&placement) {
+            tracing::debug!(%hwnd, error = %e, "could not place the scratchpad window");
+        }
+    }
+
+    /// Starts a scratchpad's command, or in tests writes down that it would.
+    fn launch_scratchpad(&self, line: &str) {
+        #[cfg(test)]
+        if let Ok(mut launched) = self.launched.lock() {
+            launched.push(line.to_owned());
+        }
+        #[cfg(not(test))]
+        if self.session.dry_run {
+            tracing::info!(line, "dry run: the scratchpad command was not started");
+        } else {
+            crate::events::hotkey::run_shell(mochi_hotkey::Shell::Cmd, line);
+        }
+    }
+
+    /// `toggle-scratchpad`: show it here, move it here, or hide it.
+    fn toggle_scratchpad(&mut self, name: &str) -> Response {
+        if self.core.is_paused {
+            return Response::error(PAUSED);
+        }
+        let index = match self.scratchpad_or_error(name) {
+            Ok(index) => index,
+            Err(response) => return response,
+        };
+        self.forget_closed_scratchpad(index);
+        let Some(hwnd) = self.scratchpads[index].hwnd else {
+            return self.find_or_start_scratchpad(index);
+        };
+        if self.platform.outranks_us(hwnd) {
+            return Response::error(SCRATCHPAD_ELEVATED);
+        }
+        if self.we_hid(hwnd) || !self.platform.is_on_screen(hwnd) {
+            return self.summon_scratchpad(index);
+        }
+        let info = self.platform.window_info(hwnd).ok();
+        if info.as_ref().is_some_and(|info| info.minimized) {
+            return self.summon_scratchpad(index);
+        }
+        // On screen: away when it is on the screen being looked at, over here
+        // when it is on another one.
+        let there = info
+            .and_then(|info| info.monitor)
+            .and_then(|id| self.core.monitor_idx_for_id(id.0));
+        if there.is_some_and(|there| there != self.core.focused_monitor_idx()) {
+            self.summon_scratchpad(index)
+        } else {
+            self.dismiss_scratchpad(index, true)
+        }
+    }
+
+    /// A toggle for a scratchpad that holds no window: take one that already
+    /// matches, or start the command and wait for its window.
+    fn find_or_start_scratchpad(&mut self, index: usize) -> Response {
+        // One that is already open wins over starting a second copy: the
+        // window a previous session left behind, or one the user opened.
+        let rule = self.scratchpads[index].config.rule.clone();
+        let found = self
+            .platform
+            .windows()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|info| {
+                self.scratchpad_holding(info.hwnd).is_none()
+                    && self.is_candidate(info)
+                    && rule.matches(&rule_info(info))
+            });
+        if let Some(info) = found {
+            if self.out_of_reach(&info) {
+                return Response::error(SCRATCHPAD_ELEVATED);
+            }
+            self.take_into_scratchpad(index, info.hwnd);
+            return self.summon_scratchpad(index);
+        }
+
+        let pad = &self.scratchpads[index];
+        if pad.is_waiting() {
+            tracing::info!(name = %pad.config.name, "the scratchpad command is still starting");
+            return Response::Ok;
+        }
+        let Some(line) = pad.config.command.clone() else {
+            return Response::error(format!(
+                "no window matches the scratchpad {:?} and it has no command to start one",
+                pad.config.name
+            ));
+        };
+        tracing::info!(name = %pad.config.name, line, "starting the scratchpad command");
+        self.scratchpads[index].launched = Some(std::time::Instant::now());
+        self.launch_scratchpad(&line);
+        Response::Ok
+    }
+
+    /// `scratchpad-claim`: the focused window becomes the scratchpad's.
+    fn claim_scratchpad(&mut self, name: &str) -> Response {
+        if self.core.is_paused {
+            return Response::error(PAUSED);
+        }
+        let index = match self.scratchpad_or_error(name) {
+            Ok(index) => index,
+            Err(response) => return response,
+        };
+        let Some(hwnd) = self
+            .foreground
+            .or_else(|| self.platform.foreground_window())
+        else {
+            return Response::error("no window is focused");
+        };
+        if let Some(other) = self.scratchpad_holding(hwnd) {
+            if other == index {
+                return Response::Ok;
+            }
+            return Response::error(format!(
+                "the focused window already belongs to the scratchpad {:?}",
+                self.scratchpads[other].config.name
+            ));
+        }
+        let info = match self.platform.window_info(hwnd) {
+            Ok(info) => info,
+            Err(e) => return Response::error(e),
+        };
+        if self.out_of_reach(&info) {
+            return Response::error(SCRATCHPAD_ELEVATED);
+        }
+        if let Err(reason) = is_manageable_with(&info, true)
+            && !reason.is_overridable()
+        {
+            return Response::error(format!(
+                "the focused window cannot be a scratchpad: {reason}"
+            ));
+        }
+        // The window it held until now goes back to the layout rather than
+        // staying hidden with no key left to bring it back.
+        self.forget_closed_scratchpad(index);
+        if let Some(old) = self.scratchpads[index].hwnd.take() {
+            self.give_back(old);
+        }
+        tracing::info!(%hwnd, title = %info.title, name, "claimed for a scratchpad");
+        self.take_into_scratchpad(index, hwnd);
+        self.summon_scratchpad(index)
+    }
+
+    /// `scratchpad-release`: the window goes back to the layout.
+    fn release_scratchpad(&mut self, name: &str) -> Response {
+        if self.core.is_paused {
+            return Response::error(PAUSED);
+        }
+        let index = match self.scratchpad_or_error(name) {
+            Ok(index) => index,
+            Err(response) => return response,
+        };
+        self.forget_closed_scratchpad(index);
+        let pad = &mut self.scratchpads[index];
+        pad.launched = None;
+        let Some(hwnd) = pad.hwnd.take() else {
+            return Response::error(format!(
+                "the scratchpad {:?} holds no window",
+                pad.config.name
+            ));
+        };
+        tracing::info!(%hwnd, name, "released from a scratchpad");
+        self.give_back(hwnd);
+        if self.platform.window_info(hwnd).is_ok() {
+            self.focus_hwnd(hwnd);
+            self.window_focused(hwnd);
+        }
+        Response::Ok
+    }
+
+    /// Redraws the borders and the transparency for the desktop as it is now.
+    fn draw_visuals(&mut self) {
+        if self.core.is_paused {
+            return;
+        }
+        let targets = self.visuals_targets();
+        self.visuals.update(&targets);
     }
 
     // -----------------------------------------------------------------
