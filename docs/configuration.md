@@ -106,6 +106,7 @@ anything, and it names the line and the column. Run it after every edit.
 | `border_overflow_applications` | rule array | `[]` | Applications whose own border sits outside their window rectangle. Parsed, not acted on, see below. |
 | `layered_whitelist` | rule array | `[]` | Layered windows to manage anyway. Parsed, not acted on, see below. |
 | `slow_application_identifiers` | rule array | `[]` | Applications that need an extra beat before their window is ready. |
+| `scratchpads` | array | `[]` | Windows kept out of the layout and shown by name with one key, see below. |
 | `monitors` | array | `[]` | Per monitor settings in physical order, see below. |
 | `work_area_offset` | offset object | none | Pixels taken off every monitor's work area, to leave room for something else on screen. |
 | `global_work_area_offset` | offset object | none | The other spelling the existing config format uses for the same thing. `work_area_offset` wins when both are present. |
@@ -265,6 +266,68 @@ config keeps validating.
 | `mode` | `Always`, `Never`, `OnStack` | When the bar is shown. |
 | `label` | `Process`, `Title` | What a tab is labelled with. |
 | `tabs` | object | `width`, `focused_text`, `unfocused_text`, `background`, `font_family`, `font_size`. |
+
+## scratchpads
+
+A scratchpad is one window that never takes a tile. `mochic toggle-scratchpad
+term` shows it centred on the monitor you are looking at and gives it the
+keyboard, and the same command takes it off screen again. Bound to a key it is
+a terminal, a notes window or a calculator one press away, and the layout
+underneath never moves.
+
+```json
+"scratchpads": [
+  {
+    "name": "term",
+    "match": { "kind": "Title", "id": "scratch", "matching_strategy": "Equals" },
+    "command": "wt.exe -w new --title scratch --suppressApplicationTitle",
+    "width": 0.6,
+    "height": 0.5,
+    "hide_on_focus_loss": true
+  }
+]
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `name` | string | required | What `toggle-scratchpad`, `scratchpad-claim` and `scratchpad-release` are given. Case does not matter. A second entry with the same name is dropped. |
+| `match` | rule object | required | The window that belongs to this scratchpad, written like an entry of any rule list. An array of rule objects works too, and then all of them have to match. |
+| `command` | string | none | Run through `cmd.exe` when no window matches, the way a hotkey `.shell` line is. Without it, a toggle with nothing to show is an error. |
+| `width` | number | `0.6` | Width as a fraction of the focused monitor's work area, from `0.1` to `1`. |
+| `height` | number | `0.5` | Height as a fraction of the work area, from `0.1` to `1`. |
+| `hide_on_focus_loss` | boolean | `true` | Take it off screen as soon as another application takes the focus. A dialog of the scratchpad's own program does not count. |
+
+What a toggle does:
+
+- Nothing held yet: the first open window that matches is taken out of the
+  layout and shown. With none open, `command` is started and the first window
+  that matches in the next ten seconds is taken. Pressing the key again while it
+  starts does not start a second copy.
+- Off screen: shown on the monitor you are looking at.
+- On screen, on this monitor: taken off screen, and the keyboard goes back to
+  the focused window of the layout.
+- On screen, on another monitor: moved over here rather than hidden.
+
+Match on a title or a class, never on the executable alone. `WindowsTerminal.exe`
+owns every terminal window, so a rule naming it takes whichever one opens
+first. `wt.exe --title scratch --suppressApplicationTitle` gives the new window
+a title of its own that the shell cannot change, and Mochi waits for it:
+Windows Terminal opens under its own name and only then takes the title.
+`mochic check` warns about a scratchpad that matches on the executable alone.
+
+A scratchpad stays on screen across workspace switches and is never set always
+on top, so a window you click can still cover it. It is taken off screen the
+same way a hidden workspace is, and written into the same record, so `mochic
+stop`, `mochic restore-windows` and the next start after a crash all give it
+back. After a restart it is an ordinary tiled window until the next toggle
+takes it again; no second copy is started. When the window is closed the next
+toggle starts `command` again. Its border has the `floating` colour.
+
+`scratchpad-claim <name>` makes the focused window the scratchpad's, which is
+the way to use one without a `command`. `scratchpad-release <name>` gives the
+window back to the layout. All three commands are refused while Mochi is paused
+or in game mode, and for a window that runs as administrator, which Windows does
+not let Mochi move or hide.
 
 ## monitors
 
