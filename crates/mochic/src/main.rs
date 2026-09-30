@@ -827,6 +827,54 @@ fn check_config_text(label: &str, text: &str) -> Findings {
         ));
     }
 
+    // A scratchpad the daemon drops answers every toggle with "no scratchpad
+    // is named", which points at the command and not at the file.
+    let before = found.errors.len();
+    let mut names: Vec<&str> = Vec::new();
+    for (index, pad) in config.scratchpads.iter().flatten().enumerate() {
+        if let Err(error) = pad.validate() {
+            found.errors.push(format!("scratchpads[{index}]: {error}"));
+        } else if names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(pad.name.trim()))
+        {
+            found.errors.push(format!(
+                "scratchpads[{index}]: a second scratchpad named {:?}, the daemon keeps only the first",
+                pad.name
+            ));
+        } else {
+            names.push(pad.name.trim());
+        }
+        let by_file_only = pad.rule.conditions().iter().all(|condition| {
+            matches!(
+                condition.kind,
+                mochi_core::rules::ApplicationIdentifier::Exe
+                    | mochi_core::rules::ApplicationIdentifier::Path
+            )
+        });
+        if by_file_only {
+            found.warnings.push(format!(
+                concat!(
+                    "scratchpads[{}] matches on the executable alone, so any window of that ",
+                    "program can be taken for it. A title or a class names the one window."
+                ),
+                index
+            ));
+        }
+    }
+    let broken = found.errors.len() - before;
+    if found.headline.is_none() {
+        if broken == 1 {
+            found.headline = Some(format!(
+                "1 scratchpad in {label} cannot do what it says, and the daemon would drop it"
+            ));
+        } else if broken > 1 {
+            found.headline = Some(format!(
+                "{broken} scratchpads in {label} cannot do what they say, and the daemon would drop them"
+            ));
+        }
+    }
+
     // A key the parser threw away is the quietest mistake in the file: it
     // parses, it looks applied, and it does nothing at all.
     found
@@ -1703,6 +1751,35 @@ mod tests {
         let headline = found.headline.as_deref().unwrap_or_default();
         assert!(headline.starts_with("2 rules in mochi.json"), "{headline}");
         assert!(headline.contains("would drop them"), "{headline}");
+    }
+
+    #[test]
+    fn a_scratchpad_the_daemon_would_drop_or_misread_is_reported() {
+        let text = r#"{
+  "scratchpads": [
+    { "name": "term", "match": { "kind": "Title", "id": "scratch", "matching_strategy": "Equals" } },
+    { "name": "Term", "match": { "kind": "Title", "id": "other", "matching_strategy": "Equals" } },
+    { "name": "", "match": { "kind": "Title", "id": "x", "matching_strategy": "Equals" } },
+    { "name": "notes", "match": { "kind": "Exe", "id": "notepad.exe", "matching_strategy": "Equals" } }
+  ]
+}
+"#;
+        let found = check_config_text("mochi.json", text);
+        assert_eq!(found.errors.len(), 2, "{found:?}");
+        assert!(found.errors[0].starts_with("scratchpads[1]:"), "{found:?}");
+        assert!(found.errors[1].starts_with("scratchpads[2]:"), "{found:?}");
+        let headline = found.headline.as_deref().unwrap_or_default();
+        assert!(
+            headline.starts_with("2 scratchpads in mochi.json"),
+            "{headline}"
+        );
+        assert!(
+            found
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with("scratchpads[3] matches on the executable")),
+            "{found:?}"
+        );
     }
 
     /// Whatever `RuleSets::validate` complains about has to turn up here too,
