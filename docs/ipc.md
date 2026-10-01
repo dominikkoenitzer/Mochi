@@ -191,7 +191,7 @@ shape is stable across changes to the model:
 
 ```json
 {
-  "version": "0.1.16", "dry_run": false, "paused": false,
+  "version": "0.1.17", "dry_run": false, "paused": false,
   "config_path": "C:\\Users\\you\\mochi.json",
   "app_config_path": "C:\\Users\\you\\applications.json",
   "manage_classes": [],
