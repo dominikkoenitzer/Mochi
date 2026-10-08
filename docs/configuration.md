@@ -93,7 +93,7 @@ anything, and it names the line and the column. Run it after every edit.
 | `border_width` | integer | `6` | Border thickness in physical pixels, not scaled by DPI. |
 | `border_offset` | integer | `-1` | How far the border sits outside the window frame, negative pulls it in. |
 | `border_style` | `System`, `Rounded`, `Square` | `System` | Border corner shape. |
-| `transparency` | boolean | `false` | Make unfocused windows transparent. |
+| `transparency` | boolean | `false` | Make unfocused windows transparent. Windows that present through DirectComposition (Chromium and Electron apps, UWP frames) cannot be layered without going blank and always stay opaque, with no rule needed. |
 | `transparency_alpha` | integer 0 to 255 | `200` | Opacity of unfocused windows, 255 is opaque. |
 | `transparency_ignore_rules` | rule array | `[]` | Windows that stay opaque. They still get a border. |
 | `border_colours` | object | none | Border colour per window kind, see below. |
