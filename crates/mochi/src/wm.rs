@@ -1695,12 +1695,12 @@ impl WindowManager {
             } else {
                 BorderKind::Unfocused
             };
-            // A window named by a transparency ignore rule keeps its borders
-            // but is never faded: some apps paint wrongly once they are layered.
+            // A window that cannot be layered safely, or that a transparency
+            // ignore rule names, keeps its borders but is never faded.
             if kind == BorderKind::Unfocused
                 && !platform
                     .window_info(hwnd)
-                    .is_ok_and(|info| rules.should_stay_opaque(&rule_info(&info)))
+                    .is_ok_and(|info| stays_opaque(rules, &info))
             {
                 targets.unfocused.push(hwnd);
             }
@@ -4226,7 +4226,7 @@ impl WindowManager {
         let opaque = |hwnd: Hwnd| {
             self.platform
                 .window_info(hwnd)
-                .is_ok_and(|info| self.core.rules.should_stay_opaque(&rule_info(&info)))
+                .is_ok_and(|info| stays_opaque(&self.core.rules, &info))
         };
         for hwnd in self.scratchpads.iter().filter_map(|pad| pad.hwnd) {
             if self.we_hid(hwnd) || !self.platform.is_on_screen(hwnd) {
@@ -4422,6 +4422,16 @@ fn core_window(info: &WindowInfo) -> Window {
 
 fn rule_info(info: &WindowInfo) -> RuleInfo<'_> {
     RuleInfo::new(&info.title, &info.class, &info.exe, &info.path)
+}
+
+/// `true` when the window keeps full opacity while unfocused.
+///
+/// Either it cannot be layered without losing its content, which is decided
+/// from its own style bits and class so nobody has to name such apps, or a
+/// transparency ignore rule names it.
+fn stays_opaque(rules: &mochi_core::RuleSets, info: &WindowInfo) -> bool {
+    !mochi_core::layering::can_fade(info.ex_style, &info.class)
+        || rules.should_stay_opaque(&rule_info(info))
 }
 
 fn window_ref(info: &WindowInfo) -> WindowRef {
@@ -7645,6 +7655,41 @@ alt + j : focus down
             Rect::new(7, 0, 793, 593),
             "the border was drawn around the window rect, not the visible frame"
         );
+    }
+
+    #[test]
+    fn a_window_that_cannot_be_layered_is_never_faded() {
+        // Chromium and Electron windows, and anything else presenting through
+        // DirectComposition, turn grey once layered. They keep their border
+        // and full opacity with no rule naming them; an ordinary window beside
+        // them still fades.
+        let plain = WindowInfo {
+            class: "Notepad".into(),
+            exe: "notepad.exe".into(),
+            ..window(2, "Plain")
+        };
+        let composited = WindowInfo {
+            class: "CASCADIA_HOSTING_WINDOW_CLASS".into(),
+            exe: "WindowsTerminal.exe".into(),
+            ex_style: mochi_core::layering::WS_EX_NOREDIRECTIONBITMAP,
+            ..window(3, "Composited")
+        };
+        let (mut wm, _) = manager(vec![
+            window(1, "Electron"),
+            plain,
+            composited,
+            window(4, "Focused"),
+        ]);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(4));
+
+        let targets = wm.visuals_targets();
+        assert_eq!(targets.focused, Some(Hwnd(4)));
+        assert_eq!(
+            targets.unfocused,
+            vec![Hwnd(2)],
+            "only the ordinary window may be faded"
+        );
+        assert_eq!(targets.tiled.len(), 4, "every window keeps its border");
     }
 
     /// A window that Windows reports on the second screen.
