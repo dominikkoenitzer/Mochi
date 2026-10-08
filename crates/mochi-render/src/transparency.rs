@@ -24,9 +24,11 @@
 //! - A layered window loses hardware overlay, so video and games can drop
 //!   frames.
 //!
-//! The daemon therefore keeps a `transparency_ignore` list of rules, exactly
-//! like the ignore rules for tiling, and skips those windows here. There is no
-//! way to detect the problem from the outside, so the list is the only cure.
+//! The first two are detected from the outside: such windows present through
+//! `DirectComposition`, carry `WS_EX_NOREDIRECTIONBITMAP`, and the daemon never
+//! hands them to this module (`mochi_core::layering`). For everything else it
+//! keeps a `transparency_ignore` list of rules, exactly like the ignore rules
+//! for tiling, and skips those windows too.
 
 use std::collections::{BTreeMap, BTreeSet};
 
