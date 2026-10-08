@@ -11,6 +11,7 @@
 //! - [`model`] the monitor, workspace, container and window tree
 //! - [`layout`] pure layout functions, BSP first
 //! - [`rules`] which windows to ignore, float or manage
+//! - [`layering`] which windows can be faded without breaking how they draw
 //! - [`config`] the JSON configuration file
 //! - [`animation`] easing curves and frame generation
 //! - [`ops`] every command, as methods on [`State`]
@@ -44,6 +45,7 @@ pub mod animation;
 pub mod config;
 pub mod error;
 pub mod geometry;
+pub mod layering;
 pub mod layout;
 pub mod model;
 pub mod ops;
