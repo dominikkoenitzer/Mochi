@@ -67,8 +67,11 @@ minimizing and restoring the window does. So once the displays have been still
 for three seconds, Mochi minimizes and restores every visible window of the
 `Chrome_WidgetWin_` family, managed or not, and hands the keyboard back to the
 window that had it. Windows it holds off screen at that moment get the same
-treatment the first time they are shown. A fullscreen window, a minimized one
-and everything while Mochi is paused are left alone.
+treatment the first time they are shown. A window that is minimized, and
+everything while Mochi is paused, is left alone. A window holding a whole
+screen is not: frameless applications maximized over a monitor count as
+fullscreen, and a video that drops out of fullscreen costs less than a screen
+showing nothing.
 
 ## DPI
 

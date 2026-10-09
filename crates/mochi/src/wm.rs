@@ -2311,15 +2311,15 @@ impl WindowManager {
 
     /// Whether a window on screen gets the redraw.
     ///
-    /// A window the user can see and Mochi is allowed to touch, and nothing
-    /// that minimizing would cost the user something for: a window already
-    /// minimized stays that way, and one holding a whole monitor (a video
-    /// played fullscreen) would drop out of fullscreen.
+    /// A window the user can see and Mochi is allowed to touch; one the user
+    /// minimized stays that way.
+    ///
+    /// A window holding a whole monitor is included on purpose. Frameless
+    /// applications maximized over a screen (Discord is one) are held as
+    /// fullscreen and lose their content like any other, and a video that
+    /// drops out of fullscreen costs less than a screen showing nothing.
     fn wants_redraw(&self, info: &WindowInfo) -> bool {
-        is_chromium(&info.class)
-            && !info.minimized
-            && !self.fullscreen.contains_key(&info.hwnd)
-            && info.is_manageable()
+        is_chromium(&info.class) && !info.minimized && info.is_manageable()
     }
 
     /// Minimizes `windows` and has them restored a moment later.
@@ -8684,6 +8684,28 @@ alt + j : focus down
             ],
             vec![main_screen(), portrait_screen()],
         )
+    }
+
+    #[test]
+    fn a_window_holding_a_monitor_is_redrawn_after_a_display_change() {
+        // A frameless application maximized over a whole screen is held as
+        // fullscreen, and it loses its content on a display change all the same.
+        let (mut wm, platform) = two_screens();
+        goes_fullscreen(&platform, Hwnd(1), main_screen().size);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+        assert!(wm.fullscreen.contains_key(&Hwnd(1)));
+
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        platform.shows.lock().unwrap().clear();
+        wm.on_event(Event::Redraw(Redraw::DisplaysSettled(1)));
+        assert!(
+            platform
+                .shows
+                .lock()
+                .unwrap()
+                .contains(&(Hwnd(1), ShowState::Minimize)),
+            "the window holding the monitor was left without its content"
+        );
     }
 
     #[test]
