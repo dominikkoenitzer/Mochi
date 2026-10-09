@@ -157,6 +157,25 @@ impl MonitorEventKind {
     }
 }
 
+/// The redraw that follows a display change.
+///
+/// Switching a screen on or off rebuilds the whole desktop, and Chromium and
+/// Electron windows do not reliably survive it: a few seconds later such a
+/// window shows a flat background where its content was, while the
+/// application behind it keeps running. Ending its GPU process does not always
+/// bring it back. Minimizing and restoring the window does, so Mochi does that
+/// for every one of them once the displays have settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Redraw {
+    /// The displays have been still for a while. Carries which display change
+    /// it was, so that only the last one of a burst acts.
+    DisplaysSettled(u64),
+    /// Brings back the windows one batch minimized.
+    Restore(u64),
+    /// A window that was off screen during a display change is on screen again.
+    Shown(Hwnd),
+}
+
 /// Why the daemon is shutting down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownReason {
@@ -238,6 +257,9 @@ pub enum Event {
     /// Sent by the daemon to itself a beat after the window left fullscreen,
     /// so that only that monitor is retiled and the window has settled first.
     RetileMonitor(isize),
+    /// A step of the redraw that follows a display change, sent by the daemon
+    /// to itself. See [`Redraw`].
+    Redraw(Redraw),
     /// Wind down.
     Shutdown(ShutdownReason),
 }
