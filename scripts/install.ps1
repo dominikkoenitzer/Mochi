@@ -17,7 +17,7 @@
     ever touches its own files, nothing that another program owns.
 
 .PARAMETER Version
-    Release tag to download, for example v0.1.18, or `latest` for the newest
+    Release tag to download, for example v0.1.19, or `latest` for the newest
     release. Without it the repository is built from source with cargo, or,
     when the script was downloaded on its own and has no checkout around it,
     the latest release is installed.
@@ -43,7 +43,7 @@
     .\scripts\install.ps1
 
 .EXAMPLE
-    .\scripts\install.ps1 -Version v0.1.18
+    .\scripts\install.ps1 -Version v0.1.19
 
 .EXAMPLE
     .\scripts\install.ps1 -Version latest
@@ -280,7 +280,7 @@ function Resolve-ReleaseTag {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
         return $release.tag_name
     } catch {
-        throw "could not find the latest release of $Repo ($($_.Exception.Message)). Pass a tag such as -Version v0.1.18."
+        throw "could not find the latest release of $Repo ($($_.Exception.Message)). Pass a tag such as -Version v0.1.19."
     }
 }
 
