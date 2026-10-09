@@ -57,6 +57,19 @@ creates a real top-level window that is zero sized, `WS_EX_TOOLWINDOW` and never
 given `WS_VISIBLE`. It has no pixels, no taskbar button, and Mochi's own
 `is_manageable` skips tool windows, so it cannot tile itself.
 
+## Redrawing Chromium windows after a display change
+
+Switching a screen on or off rebuilds the desktop, and Chromium and Electron
+windows (browsers, Spotify, Discord) do not reliably survive it: a few seconds
+later such a window shows a flat background where its content was, while the
+application keeps running. Ending its GPU process does not always bring it back;
+minimizing and restoring the window does. So once the displays have been still
+for three seconds, Mochi minimizes and restores every visible window of the
+`Chrome_WidgetWin_` family, managed or not, and hands the keyboard back to the
+window that had it. Windows it holds off screen at that moment get the same
+treatment the first time they are shown. A fullscreen window, a minimized one
+and everything while Mochi is paused are left alone.
+
 ## DPI
 
 `build.rs` embeds a manifest with `PerMonitorV2`. That is what makes

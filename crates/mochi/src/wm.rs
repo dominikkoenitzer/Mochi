@@ -46,7 +46,7 @@ use mochi_core::{Changes, Rect, State as CoreState};
 
 use crate::config;
 use crate::events::hotkey::{Gate, HotkeyDaemon};
-use crate::events::{Event, EventReceiver, EventSender, MonitorEventKind, WindowEventKind};
+use crate::events::{Event, EventReceiver, EventSender, MonitorEventKind, Redraw, WindowEventKind};
 use crate::ipc::Subscribers;
 use crate::platform::types::FRAME_WINDOW_CLASS;
 use crate::platform::types::Unmanageable;
@@ -64,6 +64,17 @@ const PAUSED: &str = "mochi is paused, nothing was changed";
 /// How long a `slow_application_identifiers` window is given to finish opening
 /// before the layout is applied to it a second time.
 const SLOW_APPLICATION_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long the displays have to stay unchanged before the Chromium windows
+/// are redrawn. Switching a screen on or off arrives as a burst of display
+/// changes over a second or two, and a redraw in the middle of the burst is
+/// undone by the next change.
+const DISPLAY_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long a window being redrawn stays minimized. Chromium has to see the
+/// minimize and let go of its broken surface before the restore asks it for a
+/// new one; a restore straight after the minimize can arrive before that.
+const REDRAW_MINIMIZED_FOR: std::time::Duration = std::time::Duration::from_millis(600);
 
 /// How long a scratchpad's `command` is given to open the window it is waiting
 /// for. The first matching window inside it is claimed, and a second toggle in
@@ -520,6 +531,14 @@ impl Scratchpad {
     }
 }
 
+/// One redraw in flight: the windows it minimized, and the window that held
+/// the keyboard before it started.
+#[derive(Debug, Clone)]
+struct RedrawBatch {
+    windows: Vec<Hwnd>,
+    keyboard: Option<Hwnd>,
+}
+
 /// What was focused, so a change can be announced to the subscribers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Focus {
@@ -555,6 +574,16 @@ pub struct WindowManager {
     /// nothing about these windows, so nothing goes into the crash record. It
     /// only stops touching the monitor while the window is on screen there.
     fullscreen: BTreeMap<Hwnd, usize>,
+    /// Bumped on every display change, so that only the last one of a burst
+    /// redraws the Chromium windows. See [`Redraw`].
+    display_changes: u64,
+    /// Chromium windows Mochi had off screen during a display change. Each is
+    /// owed the same redraw the moment it is shown again.
+    redraw_owed: HashSet<Hwnd>,
+    /// Redraws in flight, by batch, until their windows are restored.
+    redraws: BTreeMap<u64, RedrawBatch>,
+    /// The id the next redraw batch gets.
+    next_redraw: u64,
     /// Rules a `mochic` command added, and the workspace rules with them.
     ///
     /// Kept because a reload REPLACES the rule sets rather than merging them:
@@ -687,6 +716,10 @@ impl WindowManager {
             routed: HashSet::new(),
             minimized: HashSet::new(),
             fullscreen: BTreeMap::new(),
+            display_changes: 0,
+            redraw_owed: HashSet::new(),
+            redraws: BTreeMap::new(),
+            next_redraw: 0,
             added_rules: Vec::new(),
             added_workspace_rules: Vec::new(),
             foreground: None,
@@ -1528,6 +1561,12 @@ impl WindowManager {
             // only place the entry goes, and it goes after the fact.
             Ok(()) => {
                 record(&self.hidden).show(hwnd);
+                // Off screen while the displays changed, so it missed the
+                // redraw the windows on screen were given. A beat later, so
+                // the switch that brought it back has placed and focused it.
+                if self.redraw_owed.remove(&hwnd) {
+                    self.send_later(SLOW_APPLICATION_SETTLE, Event::Redraw(Redraw::Shown(hwnd)));
+                }
             }
             // The entry was never removed, so a window that refused to come
             // back is still named by the record and the next attempt, the
@@ -1871,6 +1910,10 @@ impl WindowManager {
                 self.retile_monitor(id);
                 Flow::Continue
             }
+            Event::Redraw(step) => {
+                self.on_redraw(step);
+                Flow::Continue
+            }
             Event::Shutdown(reason) => {
                 tracing::info!(?reason, "shutting down");
                 Flow::Stop
@@ -1930,6 +1973,7 @@ impl WindowManager {
                     // own account.
                     self.routed.remove(&hwnd);
                     self.minimized.remove(&hwnd);
+                    self.redraw_owed.remove(&hwnd);
                 }
             }
             WindowEventKind::Hidden | WindowEventKind::Cloaked => {
@@ -2185,6 +2229,155 @@ impl WindowManager {
             std::thread::sleep(SLOW_APPLICATION_SETTLE);
             let _ = tx.send(Event::RetileMonitor(id));
         });
+    }
+
+    /// Sends the loop an event after a wait, from a thread of its own.
+    ///
+    /// The loop owns every piece of state and must never sleep, the same
+    /// reason [`WindowManager::defer_retile`] gives.
+    fn send_later(&self, wait: std::time::Duration, event: Event) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(wait);
+            // The loop has ended; there is nothing left to tell.
+            let _ = tx.send(event);
+        });
+    }
+
+    /// Redraws the Chromium windows once the displays have stopped changing.
+    fn redraw_once_settled(&mut self) {
+        self.display_changes += 1;
+        let change = self.display_changes;
+        self.send_later(
+            DISPLAY_SETTLE,
+            Event::Redraw(Redraw::DisplaysSettled(change)),
+        );
+    }
+
+    fn on_redraw(&mut self, step: Redraw) {
+        match step {
+            // Another display change came after this one and has its own wait.
+            Redraw::DisplaysSettled(change) if change != self.display_changes => {}
+            Redraw::DisplaysSettled(_) => self.redraw_after_display_change(),
+            Redraw::Restore(batch) => self.finish_redraw(batch),
+            Redraw::Shown(hwnd) => {
+                // Still on screen and still worth it: the user may have moved
+                // on, minimized it or closed it in the meantime.
+                match self.platform.window_info(hwnd) {
+                    Ok(info) if self.wants_redraw(&info) => self.start_redraw(vec![hwnd]),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Minimizes and restores every Chromium window a display change may have
+    /// left without its content. See [`Redraw`].
+    ///
+    /// Every such window on the desktop, not only the managed ones: an
+    /// application Mochi leaves alone loses its content all the same. Windows
+    /// Mochi has off screen cannot be redrawn while hidden, so each is owed
+    /// the redraw for the moment it comes back.
+    fn redraw_after_display_change(&mut self) {
+        // Paused, or in game mode, which pauses: nothing on the desktop moves.
+        if self.core.is_paused {
+            return;
+        }
+        let windows = match self.platform.windows() {
+            Ok(windows) => windows,
+            Err(e) => {
+                tracing::error!(error = %e, "could not enumerate the windows to redraw");
+                return;
+            }
+        };
+        let mut now = Vec::new();
+        for info in &windows {
+            if !is_chromium(&info.class) {
+                continue;
+            }
+            if self.we_hid(info.hwnd) {
+                self.redraw_owed.insert(info.hwnd);
+            } else if self.wants_redraw(info) {
+                now.push(info.hwnd);
+            }
+        }
+        tracing::info!(
+            now = now.len(),
+            owed = self.redraw_owed.len(),
+            "redrawing Chromium windows after a display change"
+        );
+        self.start_redraw(now);
+    }
+
+    /// Whether a window on screen gets the redraw.
+    ///
+    /// A window the user can see and Mochi is allowed to touch, and nothing
+    /// that minimizing would cost the user something for: a window already
+    /// minimized stays that way, and one holding a whole monitor (a video
+    /// played fullscreen) would drop out of fullscreen.
+    fn wants_redraw(&self, info: &WindowInfo) -> bool {
+        is_chromium(&info.class)
+            && !info.minimized
+            && !self.fullscreen.contains_key(&info.hwnd)
+            && info.is_manageable()
+    }
+
+    /// Minimizes `windows` and has them restored a moment later.
+    fn start_redraw(&mut self, windows: Vec<Hwnd>) {
+        if windows.is_empty() {
+            return;
+        }
+        let keyboard = self.platform.foreground_window();
+        let mut minimized = Vec::new();
+        for hwnd in windows {
+            // Marked first. The minimize comes back as an event, and this is
+            // what tells that handler the minimize was Mochi's own, so the
+            // window keeps its place in the layout.
+            self.minimized.insert(hwnd);
+            match self.platform.show(hwnd, ShowState::Minimize) {
+                Ok(()) => minimized.push(hwnd),
+                Err(e) => {
+                    self.minimized.remove(&hwnd);
+                    tracing::debug!(%hwnd, error = %e, "could not minimize a window to redraw it");
+                }
+            }
+        }
+        if minimized.is_empty() {
+            return;
+        }
+        self.next_redraw += 1;
+        let batch = self.next_redraw;
+        self.redraws.insert(
+            batch,
+            RedrawBatch {
+                windows: minimized,
+                keyboard,
+            },
+        );
+        self.send_later(REDRAW_MINIMIZED_FOR, Event::Redraw(Redraw::Restore(batch)));
+    }
+
+    /// Restores the windows of one redraw and gives the keyboard back.
+    fn finish_redraw(&mut self, batch: u64) {
+        let Some(redraw) = self.redraws.remove(&batch) else {
+            return;
+        };
+        for &hwnd in &redraw.windows {
+            if let Err(e) = self.platform.show(hwnd, ShowState::Restore) {
+                tracing::debug!(%hwnd, error = %e, "could not restore a redrawn window");
+            }
+            // The restore's own event clears this as well. Clearing it here
+            // too means a window that refused leaves no claim behind that
+            // would make the user's next minimize of it look like Mochi's.
+            self.minimized.remove(&hwnd);
+        }
+        // A restore activates the window it restores, so the keyboard ends up
+        // on whichever came last. It goes back to where the user had it,
+        // which is often a window that was never part of the redraw at all.
+        if let Some(keyboard) = redraw.keyboard {
+            self.foreground = None;
+            self.focus_hwnd(keyboard);
+        }
     }
 
     /// Lays out the workspace on screen on one monitor, and nothing else.
@@ -2527,6 +2720,9 @@ impl WindowManager {
             count: self.core.monitors().len(),
         });
         self.retile();
+        if kind == MonitorEventKind::DisplayChange {
+            self.redraw_once_settled();
+        }
     }
 
     fn rebuild_monitors(&mut self, infos: &[MonitorInfo]) {
@@ -4410,6 +4606,12 @@ const fn window_id(hwnd: Hwnd) -> WindowId {
 /// The platform's handle for a window.
 const fn handle(id: WindowId) -> Hwnd {
     Hwnd(id.0)
+}
+
+/// Whether a window is one of the Chromium and Electron family, whose content
+/// does not reliably survive a display change. See [`Redraw`].
+fn is_chromium(class: &str) -> bool {
+    class.starts_with(mochi_core::layering::CHROMIUM_CLASS_PREFIX)
 }
 
 fn core_window(info: &WindowInfo) -> Window {
@@ -8567,6 +8769,109 @@ alt + j : focus down
                 .is_err(),
             "the monitor was retiled more than once"
         );
+    }
+
+    /// A window that is not of the Chromium family.
+    fn notepad(hwnd: isize, title: &str) -> WindowInfo {
+        WindowInfo {
+            class: "Notepad".into(),
+            exe: "notepad.exe".into(),
+            ..window(hwnd, title)
+        }
+    }
+
+    /// Waits for the step of a redraw the manager sent itself, skipping the rest.
+    fn next_redraw_step(wm: &WindowManager, wanted: fn(&Redraw) -> bool) -> Redraw {
+        loop {
+            let event = wm
+                .rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the redraw never sent its next step");
+            if let Event::Redraw(step) = event
+                && wanted(&step)
+            {
+                return step;
+            }
+        }
+    }
+
+    #[test]
+    fn a_display_change_redraws_the_chromium_windows_once_it_has_settled() {
+        let (mut wm, platform) = manager(vec![window(1, "Browser"), notepad(2, "Notes")]);
+        // Switching a screen on arrives as a burst, and only the last change
+        // of it may act.
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        platform.shows.lock().unwrap().clear();
+
+        wm.on_event(Event::Redraw(Redraw::DisplaysSettled(1)));
+        assert!(
+            platform.shows.lock().unwrap().is_empty(),
+            "an earlier change of the burst redrew"
+        );
+
+        wm.on_event(Event::Redraw(Redraw::DisplaysSettled(2)));
+        assert_eq!(
+            *platform.shows.lock().unwrap(),
+            vec![(Hwnd(1), ShowState::Minimize)],
+            "only the Chromium window is minimized"
+        );
+
+        // The minimize comes back as an event, and it is Mochi's own.
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(1));
+        assert!(
+            wm.state().is_managed(WindowId(1)),
+            "the redraw cost the window its tile"
+        );
+
+        let restore = next_redraw_step(&wm, |step| matches!(step, Redraw::Restore(_)));
+        wm.on_event(Event::Redraw(restore));
+        assert_eq!(
+            platform.shows.lock().unwrap().last(),
+            Some(&(Hwnd(1), ShowState::Restore))
+        );
+        wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(1));
+        assert!(wm.state().is_managed(WindowId(1)));
+        assert_eq!(
+            platform.focused.lock().unwrap().last(),
+            Some(&Hwnd(1)),
+            "the keyboard did not go back to the window that had it"
+        );
+    }
+
+    #[test]
+    fn a_chromium_window_off_screen_during_a_display_change_is_redrawn_when_shown() {
+        let (mut wm, platform) = manager(vec![window(1, "Browser")]);
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        platform.shows.lock().unwrap().clear();
+
+        wm.on_event(Event::Redraw(Redraw::DisplaysSettled(1)));
+        assert!(
+            platform.shows.lock().unwrap().is_empty(),
+            "a window Mochi holds off screen was minimized while hidden"
+        );
+
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+        let shown = next_redraw_step(&wm, |step| matches!(step, Redraw::Shown(_)));
+        assert_eq!(shown, Redraw::Shown(Hwnd(1)));
+        wm.on_event(Event::Redraw(shown));
+        assert_eq!(
+            *platform.shows.lock().unwrap(),
+            vec![(Hwnd(1), ShowState::Minimize)],
+            "the window was not redrawn when it came back"
+        );
+    }
+
+    #[test]
+    fn a_paused_manager_redraws_nothing_after_a_display_change() {
+        let (mut wm, platform) = manager(vec![window(1, "Browser")]);
+        wm.handle_command(Command::TogglePause);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        platform.shows.lock().unwrap().clear();
+
+        wm.on_event(Event::Redraw(Redraw::DisplaysSettled(1)));
+        assert!(platform.shows.lock().unwrap().is_empty());
     }
 
     #[test]
