@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
@@ -211,22 +212,55 @@ pub fn wait_for(limit: Duration, done: impl Fn() -> bool) -> bool {
 
 /// Runs a console program without a window and returns its exit code and
 /// whatever it said.
+///
+/// What it says goes through a file, not a pipe. `mochic start` launches the
+/// daemon with a copy of every handle mochic inherited, so a pipe would not
+/// close until Mochi exits and the setup would wait for it forever. The file
+/// is opened shareable for deletion, so it goes away even while Mochi still
+/// holds that copy.
+///
+/// It runs in its own folder, as the Start menu entry does: the daemon that
+/// `mochic start` launches inherits the folder and keeps it for its whole
+/// life, and the folder this setup was opened from may be one the user wants
+/// to delete.
 pub fn run_hidden(program: &Path, args: &[&str]) -> std::io::Result<(i32, String)> {
-    let output = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    Ok((output.status.code().unwrap_or(-1), text.trim().to_owned()))
+    let mut command = Command::new(program);
+    if let Some(dir) = program.parent().filter(|dir| dir.is_dir()) {
+        command.current_dir(dir);
+    }
+    static RUNS: AtomicU32 = AtomicU32::new(0);
+    let said = std::env::temp_dir().join(format!(
+        "mochi-setup-{}-{}.txt",
+        std::process::id(),
+        RUNS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let file = std::fs::File::create(&said)?;
+    let status = file.try_clone().and_then(|stdout| {
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(file)
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+    });
+    let text = std::fs::read(&said).unwrap_or_default();
+    let _ = std::fs::remove_file(&said);
+    let status = status?;
+    Ok((
+        status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&text).trim().to_owned(),
+    ))
 }
 
-/// Starts cmd.exe without a window and without waiting for it.
+/// Starts cmd.exe without a window and without waiting for it. It works in
+/// System32 rather than in this process's folder: a folder that is some
+/// process's working directory cannot be removed.
 pub fn spawn_cmd(raw_args: &str) -> std::io::Result<()> {
     let cmd = system32().join("cmd.exe");
     Command::new(cmd)
         .raw_arg(raw_args)
+        .current_dir(system32())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
