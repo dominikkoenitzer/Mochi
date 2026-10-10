@@ -72,6 +72,8 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Serve Mochi to an AI assistant over MCP, on stdin and stdout
+    Mcp,
     /// Pause and resume window management
     TogglePause,
     /// Hand the whole keyboard to a game, and take it back again
@@ -513,7 +515,7 @@ pub enum Cmd {
 impl Cmd {
     /// The protocol command this subcommand sends, or `None` for the ones
     /// `mochic` handles by itself (`start`, `quickstart`, `schema`,
-    /// `subscribe`).
+    /// `subscribe`, `mcp`).
     pub fn to_command(&self) -> Option<Command> {
         let command = match self {
             // These three never reach a daemon: two of them run before one
@@ -526,6 +528,10 @@ impl Cmd {
             // first and only then registers it, so answering `subscribe-pipe`
             // here would let a key register a pipe that nobody ever created.
             Cmd::Subscribe { .. } => return None,
+
+            // `mcp` is a server that runs until its client leaves, and it
+            // speaks on stdout. On a key it would block the binding forever.
+            Cmd::Mcp => return None,
 
             Cmd::Stop => Command::Stop,
             Cmd::TogglePause => Command::TogglePause,
@@ -1217,7 +1223,7 @@ mod tests {
         // `subscribe` is in the list because `mochic` creates the pipe before
         // it registers it; bound to a key it would register a pipe that does
         // not exist, which is not what typing the same words does.
-        for line in ["start", "quickstart", "schema", "subscribe bar"] {
+        for line in ["start", "quickstart", "schema", "subscribe bar", "mcp"] {
             let message = binding(line).unwrap_err();
             assert!(
                 message.contains("cannot be bound to a key"),

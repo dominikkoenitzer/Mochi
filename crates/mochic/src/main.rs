@@ -8,6 +8,7 @@
 //! The grammar itself lives in [`mochi_client::cli`], because the hotkey daemon
 //! binds keys to the same words this binary takes and the two must not drift.
 
+mod mcp;
 mod output;
 mod process;
 
@@ -117,6 +118,7 @@ fn run(cli: Cli) -> Result<()> {
             return Ok(());
         }
         Cmd::Subscribe { ref name } => return subscribe(name),
+        Cmd::Mcp => return mcp::serve(),
         _ => {}
     }
 
