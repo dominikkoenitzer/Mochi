@@ -34,12 +34,27 @@ follow along. A program that would rather own the pipe itself uses
 ```
 git clone git@github.com:dominikkoenitzer/Mochi.git
 cd Mochi
-.\scripts\install.ps1
+.\scripts\install.ps1 -SkipStart -SkipAutostart -SkipQuickstart
 ```
 
 This builds the release binaries, copies `mochi.exe` and `mochic.exe` to
-`%LOCALAPPDATA%\Programs\Mochi\bin` and puts that folder on the user PATH. Open
-a new shell afterwards so the PATH is picked up.
+`%LOCALAPPDATA%\Programs\Mochi\bin`, puts that folder on the user PATH and adds
+a Start menu shortcut. Open a new shell afterwards so the PATH is picked up.
+
+To install the latest release instead of building it, without a checkout:
+
+```
+& ([scriptblock]::Create((irm https://github.com/dominikkoenitzer/Mochi/releases/latest/download/install.ps1))) -SkipStart -SkipAutostart -SkipQuickstart
+```
+
+The scripts in steps 2 and 5 still come from the checkout.
+
+Without the switches the installer starts Mochi at once, registers it for login
+and writes a default `mochi.json` and hotkey file. `-SkipStart` and
+`-SkipAutostart` hold the first two back, because Mochi next to the window
+manager you still run means two window managers fighting over the same windows.
+`-SkipQuickstart` holds back the defaults, because the import in step 2 does not
+overwrite a `mochi.json` or hotkey file that is already there.
 
 ## 2. Import the configuration and the hotkeys
 
@@ -113,9 +128,10 @@ fires both bindings.
 
 ## 5. Autostart
 
-`scripts\autostart.ps1` registers a HKCU Run value called `Mochi` that runs
-`mochic start` through a hidden PowerShell launcher, so no console flashes at
-login.
+`scripts\autostart.ps1 -Enable` registers a HKCU Run value called `Mochi` that
+runs `mochic start` through a hidden PowerShell launcher, so no console flashes
+at login. A plain install writes the same value by itself. Step 1 held that back
+with `-SkipAutostart`, so it is done here, after the switch.
 
 If your current setup starts at login from a shortcut in the Startup folder,
 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\<name>.lnk`, the same
@@ -152,6 +168,15 @@ And to remove Mochi completely:
 .\scripts\install.ps1 -Uninstall
 ```
 
-That deletes the binaries and the PATH entry. `mochi.json`, the hotkey file and
-the log stay until they are deleted by hand. Nothing that belongs to your old
-setup is touched by the installer.
+or without a checkout:
+
+```
+& ([scriptblock]::Create((irm https://github.com/dominikkoenitzer/Mochi/releases/latest/download/install.ps1))) -Uninstall
+```
+
+That stops Mochi and removes the `Mochi` Run value, the `MochiWatchdog` task,
+the Start menu shortcut, the binaries and the PATH entry. The Run value only
+goes when it runs `mochic`, so one of that name that starts something else is
+left alone. `mochi.json`, the hotkey file and the log stay until they are
+deleted by hand. Nothing that belongs to your old setup is touched by the
+installer.
