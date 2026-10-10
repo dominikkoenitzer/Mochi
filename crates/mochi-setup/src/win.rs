@@ -402,18 +402,11 @@ pub fn delete_value(key: &str, name: &str) -> Result<(), String> {
 }
 
 /// Removes a key and everything under it; one that is not there is fine.
+/// Given a subkey name, RegDeleteTreeW removes the key itself as well.
 pub fn delete_key(key: &str) -> Result<(), String> {
     let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(key)) };
     if status == ERROR_FILE_NOT_FOUND || status == windows::Win32::Foundation::ERROR_PATH_NOT_FOUND
     {
-        return Ok(());
-    }
-    check(status, &format!("removing {key}"))?;
-    // RegDeleteTreeW empties the key but leaves the key itself.
-    let status = unsafe {
-        windows::Win32::System::Registry::RegDeleteKeyW(HKEY_CURRENT_USER, &HSTRING::from(key))
-    };
-    if status == ERROR_FILE_NOT_FOUND {
         return Ok(());
     }
     check(status, &format!("removing {key}"))
