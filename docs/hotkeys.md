@@ -107,8 +107,7 @@ alt + b                 : [console]::beep(440,200)
 
 ### Modes
 
-A `mode` block holds keys that work only while that mode is on, the way i3 and
-GlazeWM binding modes do. `mode <name>` on the right of a binding switches to
+A `mode` block holds keys that work only while that mode is on. `mode <name>` on the right of a binding switches to
 it, and `mode default` switches back to the keys outside every block:
 
 ```
