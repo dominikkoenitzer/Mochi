@@ -242,6 +242,9 @@ first `cargo` call. The first build takes a few minutes. Every one after that is
 seconds. The tests are optional and safe to run on the desktop you work in: the
 end to end tests, which drive real windows, only run when `MOCHI_E2E` is set.
 
+Both exes are self-contained: the C runtime is linked in, so they run on any
+Windows PC without installing a runtime.
+
 To install what you built:
 
 ```
