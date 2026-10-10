@@ -264,6 +264,337 @@ jobs:
       # ways a debug build does not. Every push walks that path.
       - run: cargo build --locked --release --workspace
 
+  # Mochi-Setup.exe is the download for people who never open a terminal, and
+  # nothing else here ever runs it. This job builds it the way the release
+  # does, installs with it, checks every trace the install leaves, removes it
+  # again with the copy Apps & features would run, and checks that every one
+  # of those traces is gone while the user's settings stay. A runner is the one
+  # machine where that is safe: the setup writes to the user's PATH, Start
+  # menu, login items and Apps & features, and starts Mochi on its desktop.
+  install:
+    name: setup installs and uninstalls
+    timeout-minutes: 30
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: install
+      - run: cargo build --locked --release --workspace
+
+      # The same payload and the same second build as release.yml, so the exe
+      # under test is the one a release of this commit would publish.
+      - name: Build Mochi-Setup.exe
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'dist/payload'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item 'target/release/mochi.exe' $stage
+          Copy-Item 'target/release/mochic.exe' $stage
+          $env:MOCHI_SETUP_PAYLOAD = $stage
+          cargo build --locked --release -p mochi-setup
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+          $setup = Join-Path $env:GITHUB_WORKSPACE 'dist/Mochi-Setup.exe'
+          Copy-Item 'target/release/mochi-setup.exe' $setup
+          $payload = (Get-Item "$stage/mochi.exe").Length + (Get-Item "$stage/mochic.exe").Length
+          $size = (Get-Item $setup).Length
+          if ($size -le $payload) { throw "Mochi-Setup.exe is $size bytes, no more than the $payload bytes it should carry" }
+
+          $metadata = (cargo metadata --locked --no-deps --format-version 1) -join "`n" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed with exit code $LASTEXITCODE" }
+          $package = $metadata.packages | Where-Object name -eq 'mochi-setup' | Select-Object -First 1
+          if (-not $package) { throw 'cargo metadata names no package mochi-setup' }
+          $version = $package.version
+          Write-Output "Mochi-Setup.exe $version is $size bytes and carries $payload bytes of Mochi"
+          "SETUP_EXE=$setup" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SETUP_PAYLOAD=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SETUP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Worked out here the way the setup works them out (crates/mochi-setup,
+      # plan.rs Layout::new), and checked absent, so that every check below
+      # proves the setup made the thing rather than found it.
+      - name: Nothing of Mochi on the runner yet
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:LOCALAPPDATA 'Programs\Mochi'
+          $places = [ordered]@{
+              INSTALL_ROOT     = $root
+              INSTALL_BIN      = Join-Path $root 'bin'
+              INSTALL_SETUP    = Join-Path $root 'Mochi-Setup.exe'
+              INSTALL_SHORTCUT = Join-Path ([Environment]::GetFolderPath('Programs')) 'Mochi.lnk'
+              USER_CONFIG      = Join-Path $env:USERPROFILE 'mochi.json'
+              USER_HOTKEYS     = Join-Path $env:USERPROFILE '.config\mochi\hotkeys'
+          }
+          foreach ($name in $places.Keys) {
+              Write-Output "$name = $($places[$name])"
+              "$name=$($places[$name])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          $found = @(
+              foreach ($path in $places.Values) { if (Test-Path -LiteralPath $path) { $path } }
+              if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.config\mochi\whkdrc')) { 'the legacy hotkeys file' }
+              $run = Get-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue
+              if ($run -and $null -ne $run.GetValue('Mochi')) { 'the Run value Mochi' }
+              if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Mochi') { 'the Apps & features entry' }
+              if (Test-Path 'HKCU:\Software\Mochi') { 'HKCU\Software\Mochi' }
+              if (Get-Command mochic -ErrorAction SilentlyContinue) { 'a mochic on the PATH' }
+              if (Get-Process mochi, mochic -ErrorAction SilentlyContinue) { 'a running mochi or mochic' }
+          )
+          if ($found.Count -gt 0) { throw "the runner already has Mochi on it: $($found -join '; ')" }
+          Write-Output 'no trace of Mochi before the install'
+
+      # Started by shell execution, not by `&` or Start-Process: those hand the
+      # setup this step's output pipe, the setup hands it on to the mochic it
+      # runs, and `mochic start` to the daemon, which would then hold the step
+      # open for as long as Mochi runs. Shell execution passes no handles on.
+      # The setup has no console either, so `&` would not wait for it.
+      #
+      # A quiet install exits 1 when anything went wrong, and the Mochi daemon
+      # not starting is one of those things. Every other one is a missing piece
+      # the next step checks on its own, so 1 is let through here only when no
+      # Mochi runs afterwards, as a warning: the daemon needs an interactive
+      # desktop, and should a runner image ever lack one this job still proves
+      # the install and the uninstall, which is what it is for.
+      - name: Install quietly
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+              [Security.Principal.WindowsBuiltInRole]::Administrator)
+          Write-Output "running as administrator: $elevated (an elevated setup starts Mochi through Explorer)"
+          $info = [Diagnostics.ProcessStartInfo]::new($env:SETUP_EXE, '--quiet')
+          $info.UseShellExecute = $true
+          $process = [Diagnostics.Process]::Start($info)
+          if ($null -eq $process) { throw 'Windows started no process for Mochi-Setup.exe --quiet' }
+          if (-not $process.WaitForExit(180000)) {
+              Stop-Process -Id $process.Id -Force
+              throw 'Mochi-Setup.exe --quiet was still running after 3 minutes'
+          }
+          $code = $process.ExitCode
+          if ($null -eq $code) { throw 'could not read the exit code of Mochi-Setup.exe --quiet' }
+          $running = @(Get-Process mochi -ErrorAction SilentlyContinue)
+          Write-Output "Mochi-Setup.exe --quiet exited with $code; mochi.exe processes running: $($running.Count)"
+          switch ($code) {
+              0 {
+                  if ($running.Count -eq 0) {
+                      Write-Output '::warning::the setup reported Mochi started, but no mochi.exe runs now'
+                  }
+              }
+              1 {
+                  if ($running.Count -gt 0) {
+                      throw 'Mochi-Setup.exe --quiet exited with 1 although Mochi runs, so part of the install failed'
+                  }
+                  Write-Output '::warning::Mochi did not start on this runner; the install and the uninstall are still checked'
+              }
+              default { throw "Mochi-Setup.exe --quiet exited with $code" }
+          }
+          "DAEMON_STARTED=$($running.Count -gt 0)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The names, paths and values are the ones in crates/mochi-setup:
+      # plan.rs (Layout, the RUN_ and UNINSTALL_ keys, autostart_command,
+      # uninstall_entry) and win.rs (create_shortcut).
+      - name: Check the install
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $root = $env:INSTALL_ROOT
+          $bin = $env:INSTALL_BIN
+          $mochi = Join-Path $bin 'mochi.exe'
+          $mochic = Join-Path $bin 'mochic.exe'
+          $hash = { param($path) (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash }
+          # Sorted ordinally, so the lists compared below do not depend on the
+          # runner's culture.
+          $names = {
+              param($dir)
+              $all = [string[]]@(Get-ChildItem -LiteralPath $dir -Force -Name)
+              [Array]::Sort($all, [StringComparer]::OrdinalIgnoreCase)
+              $all -join ','
+          }
+
+          # Files: exactly the two binaries in bin, the same bytes the setup
+          # was built with, and the setup's own copy beside bin.
+          if (-not (Test-Path -LiteralPath $bin -PathType Container)) { throw "the install folder $bin is missing" }
+          $inBin = & $names $bin
+          if ($inBin -ne 'mochi.exe,mochic.exe') { throw "$bin holds [$inBin], not exactly mochi.exe and mochic.exe" }
+          foreach ($name in 'mochi.exe', 'mochic.exe') {
+              if ((& $hash (Join-Path $bin $name)) -ne (& $hash (Join-Path $env:SETUP_PAYLOAD $name))) {
+                  throw "the installed $name is not the $name the setup was built with"
+              }
+          }
+          $inRoot = & $names $root
+          if ($inRoot -ne 'bin,Mochi-Setup.exe') { throw "$root holds [$inRoot], not exactly bin and Mochi-Setup.exe" }
+          if ((& $hash $env:INSTALL_SETUP) -ne (& $hash $env:SETUP_EXE)) { throw "$env:INSTALL_SETUP is not a copy of the setup that ran" }
+          Write-Output "files: $bin holds mochi.exe and mochic.exe, $root holds the setup copy"
+
+          # The user PATH, read raw: one entry, and only one, names bin.
+          $raw = (Get-Item 'HKCU:\Environment').GetValue('Path', $null, 'DoNotExpandEnvironmentNames')
+          if ($null -eq $raw) { throw 'HKCU\Environment has no Path value' }
+          $same = { param($entry) [Environment]::ExpandEnvironmentVariables($entry.Trim().Trim('"')).TrimEnd('\') -eq $bin.TrimEnd('\') }
+          $ours = @($raw -split ';' | Where-Object { & $same $_ })
+          if ($ours.Count -ne 1) { throw "the user PATH names $bin $($ours.Count) times, not once: $raw" }
+          Write-Output "PATH: the user Path names $bin"
+
+          # Login: the Run value the setup writes, word for word, as REG_SZ.
+          $run = Get-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $wanted = "powershell.exe -NoProfile -WindowStyle Hidden -Command `"Start-Process -FilePath '$($mochic.Replace("'", "''"))' -ArgumentList 'start' -WindowStyle Hidden`""
+          $value = $run.GetValue('Mochi')
+          if ($null -eq $value) { throw 'HKCU\Software\Microsoft\Windows\CurrentVersion\Run has no value Mochi' }
+          if ($value -cne $wanted) { throw "the Run value Mochi is [$value], expected [$wanted]" }
+          if ($run.GetValueKind('Mochi') -ne 'String') { throw "the Run value Mochi is $($run.GetValueKind('Mochi')), not REG_SZ" }
+          Write-Output 'Run: Mochi starts mochic at login'
+
+          # Start menu: conhost runs mochic headless, in bin.
+          if (-not (Test-Path -LiteralPath $env:INSTALL_SHORTCUT -PathType Leaf)) { throw "the Start menu entry $env:INSTALL_SHORTCUT is missing" }
+          $link = (New-Object -ComObject WScript.Shell).CreateShortcut($env:INSTALL_SHORTCUT)
+          $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+          if ($link.TargetPath -ne $conhost) { throw "the Start menu entry runs [$($link.TargetPath)], not $conhost" }
+          if ($link.Arguments -cne "--headless `"$mochic`" start") { throw "the Start menu entry passes [$($link.Arguments)], not --headless `"$mochic`" start" }
+          if ($link.WorkingDirectory -ne $bin) { throw "the Start menu entry starts in [$($link.WorkingDirectory)], not $bin" }
+          Write-Output "Start menu: $env:INSTALL_SHORTCUT starts mochic"
+
+          # Apps & features: every value the setup writes, with its kind.
+          $entryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Mochi'
+          if (-not (Test-Path $entryPath)) { throw 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Mochi is missing' }
+          $entry = Get-Item $entryPath
+          $bytes = (Get-Item $mochi).Length + (Get-Item $mochic).Length + (Get-Item $env:SETUP_EXE).Length
+          $expected = [ordered]@{
+              DisplayName          = 'String', 'Mochi'
+              Publisher            = 'String', 'Mochi'
+              DisplayVersion       = 'String', $env:SETUP_VERSION
+              DisplayIcon          = 'String', "$mochi,0"
+              InstallLocation      = 'String', $root
+              UninstallString      = 'String', "`"$env:INSTALL_SETUP`" --uninstall"
+              QuietUninstallString = 'String', "`"$env:INSTALL_SETUP`" --uninstall --quiet"
+              NoModify             = 'DWord', 1
+              NoRepair             = 'DWord', 1
+              EstimatedSize        = 'DWord', [int][Math]::Ceiling($bytes / 1024)
+          }
+          foreach ($name in $expected.Keys) {
+              $kind, $want = $expected[$name]
+              $have = $entry.GetValue($name)
+              if ($null -eq $have) { throw "the Apps & features entry has no $name" }
+              if ($entry.GetValueKind($name) -ne $kind) { throw "the Apps & features $name is $($entry.GetValueKind($name)), not $kind" }
+              if ("$have" -cne "$want") { throw "the Apps & features $name is [$have], expected [$want]" }
+          }
+          Write-Output "Apps & features: Mochi $env:SETUP_VERSION, removed by $env:INSTALL_SETUP"
+
+          # The record of where this install lives, which a later setup reads.
+          $state = Get-Item 'HKCU:\Software\Mochi' -ErrorAction SilentlyContinue
+          if ($null -eq $state -or $state.GetValue('InstallRoot') -ne $root) { throw "HKCU\Software\Mochi does not record InstallRoot $root" }
+          Write-Output "state: HKCU\Software\Mochi records $root"
+
+          # Settings: the setup runs mochic quickstart when there are none.
+          # Their hashes are what the uninstall must leave untouched.
+          foreach ($file in $env:USER_CONFIG, $env:USER_HOTKEYS) {
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "the setup wrote no $file" }
+          }
+          "CONFIG_HASH=$(& $hash $env:USER_CONFIG)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HOTKEYS_HASH=$(& $hash $env:USER_HOTKEYS)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "settings: $env:USER_CONFIG and $env:USER_HOTKEYS written"
+
+      # This step's own PATH was fixed when the job started, before the
+      # install, so it cannot see the new entry. A new shell is given the PATH
+      # Windows builds at logon, machine part then user part, read from the
+      # registry, and has to find mochic by name in it.
+      - name: A new shell finds mochic
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $mochic = Join-Path $env:INSTALL_BIN 'mochic.exe'
+          if (@($env:Path -split ';' | Where-Object { $_.TrimEnd('\') -eq $env:INSTALL_BIN }).Count -gt 0) {
+              throw "this step's PATH already names $env:INSTALL_BIN, so it proves nothing about the registry"
+          }
+          $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+          # An empty folder, because cmd looks in the current one first.
+          $empty = Join-Path $env:RUNNER_TEMP 'new-shell'
+          New-Item -ItemType Directory -Force -Path $empty | Out-Null
+          Set-Location $empty
+
+          $where = @(cmd.exe /d /c 'where mochic' 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "a new cmd finds no mochic on the registry PATH: $($where -join ' ')" }
+          if ("$($where[0])".Trim() -ne $mochic) { throw "a new cmd finds mochic at [$($where[0])] first, not $mochic" }
+          $output = (cmd.exe /d /c 'mochic --version' 2>&1) -join ' '
+          if ($LASTEXITCODE -ne 0) { throw "mochic --version in a new cmd exited with $LASTEXITCODE`: $output" }
+          if ($output -notmatch '(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?)' -or $Matches[1] -ne $env:SETUP_VERSION) {
+              throw "mochic --version in a new cmd said [$output], expected version $env:SETUP_VERSION"
+          }
+          Write-Output "a new cmd runs $mochic by name: $output"
+
+      # Run exactly as Apps & features would: the QuietUninstallString from
+      # the entry, which names the setup's copy in the install folder. That
+      # copy cannot delete itself; a hidden cmd removes it and the folder a
+      # moment after it exits (plan.rs cleanup_after_exit), so the folder is
+      # waited for. The uninstall stops a running Mochi first.
+      - name: Uninstall quietly with the installed copy
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $command = (Get-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Mochi').GetValue('QuietUninstallString')
+          if ("$command" -notmatch '^"([^"]+)"\s+(.+)$') { throw "cannot read the QuietUninstallString [$command]" }
+          $exe, $arguments = $Matches[1], $Matches[2]
+          if ($exe -ne $env:INSTALL_SETUP) { throw "the QuietUninstallString runs $exe, not the installed copy $env:INSTALL_SETUP" }
+          Write-Output "running $command (Mochi was running: $env:DAEMON_STARTED)"
+          $info = [Diagnostics.ProcessStartInfo]::new($exe, $arguments)
+          $info.UseShellExecute = $true
+          $process = [Diagnostics.Process]::Start($info)
+          if ($null -eq $process) { throw "Windows started no process for $command" }
+          if (-not $process.WaitForExit(180000)) {
+              Stop-Process -Id $process.Id -Force
+              throw "$command was still running after 3 minutes"
+          }
+          $code = $process.ExitCode
+          if ($null -eq $code) { throw "could not read the exit code of $command" }
+          if ($code -ne 0) { throw "$command exited with $code" }
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path -LiteralPath $env:INSTALL_ROOT) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          Write-Output "the uninstall exited with 0"
+
+      - name: Check the uninstall
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $bin = $env:INSTALL_BIN
+          $left = @(
+              foreach ($path in (Join-Path $bin 'mochi.exe'), (Join-Path $bin 'mochic.exe'), $bin, $env:INSTALL_SETUP, $env:INSTALL_ROOT, $env:INSTALL_SHORTCUT) {
+                  if (Test-Path -LiteralPath $path) { $path }
+              }
+              $raw = (Get-Item 'HKCU:\Environment').GetValue('Path', $null, 'DoNotExpandEnvironmentNames')
+              $same = { param($entry) [Environment]::ExpandEnvironmentVariables($entry.Trim().Trim('"')).TrimEnd('\') -eq $bin.TrimEnd('\') }
+              if ($null -ne $raw -and @($raw -split ';' | Where-Object { & $same $_ }).Count -gt 0) { "the user PATH entry $bin" }
+              if ($null -ne (Get-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').GetValue('Mochi')) { 'the Run value Mochi' }
+              if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Mochi') { 'the Apps & features entry Uninstall\Mochi' }
+              if (Test-Path 'HKCU:\Software\Mochi') { 'HKCU\Software\Mochi' }
+              foreach ($process in @(Get-Process mochi, mochic -ErrorAction SilentlyContinue)) { "a running $($process.Name).exe (pid $($process.Id))" }
+          )
+          if ($left.Count -gt 0) { throw "the uninstall left behind: $($left -join '; ')" }
+          Write-Output 'files, PATH entry, Run value, Start menu entry, Apps & features entry and state key are gone, and no Mochi runs'
+
+          # What the user wrote stays: the uninstall says so and must mean it.
+          foreach ($pair in @($env:USER_CONFIG, $env:CONFIG_HASH), @($env:USER_HOTKEYS, $env:HOTKEYS_HASH)) {
+              $file, $before = $pair
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "the uninstall deleted $file" }
+              if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash -ne $before) { throw "the uninstall changed $file" }
+          }
+          Write-Output "settings kept: $env:USER_CONFIG and $env:USER_HOTKEYS are unchanged"
+
+      # Whatever failed above, no Mochi outlives the job's steps.
+      - name: Stop any Mochi left running
+        if: always()
+        shell: pwsh
+        run: |
+          $left = @(Get-Process mochi, mochic -ErrorAction SilentlyContinue)
+          $left | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Output "stopped $($left.Count) mochi or mochic process(es)"
+
   schema:
     name: schema is current
     timeout-minutes: 30
