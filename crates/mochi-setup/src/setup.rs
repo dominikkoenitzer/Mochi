@@ -116,9 +116,10 @@ fn install(options: Options, layout: &Layout) -> i32 {
     let current = std::env::current_exe().ok();
     note(keep_setup_copy(layout, current.as_deref()));
     // An older install in a folder the user named would come first on the
-    // PATH and answer to mochic in place of this one.
-    if let Some(bin) = other_bin(layout) {
-        note(remove_from_path(&bin));
+    // PATH and answer to mochic in place of this one, and once the record
+    // below names this folder nothing would find it again.
+    for problem in remove_other_install(layout) {
+        note(Err(problem));
     }
     note(add_to_path(&layout.bin));
     note(quickstart(layout));
@@ -201,14 +202,8 @@ fn uninstall(options: Options, layout: &Layout) -> i32 {
     }
     note(remove_file(&layout.shortcut));
     note(remove_from_path(&layout.bin));
-    // An install scripts\install.ps1 made in a folder the user named: its
-    // binaries and PATH entry go, the folder itself stays, as the script does.
-    if let Some(bin) = other_bin(layout) {
-        for name in plan::BINARIES {
-            note(remove_file(&bin.join(name)));
-        }
-        let _ = std::fs::remove_dir(&bin);
-        note(remove_from_path(&bin));
+    for problem in remove_other_install(layout) {
+        note(Err(problem));
     }
     note(win::delete_key(plan::UNINSTALL_KEY));
     note(win::delete_value(plan::STATE_KEY, "InstallRoot"));
@@ -466,6 +461,22 @@ fn start_mochi(layout: &Layout) -> Result<(), String> {
         Ok((_, said)) => Err(said),
         Err(e) => Err(format!("starting Mochi: {e}")),
     }
+}
+
+/// An install scripts\install.ps1 made in a folder the user named: its
+/// binaries, its bin folder when that is empty, and its PATH entry go. The
+/// folder itself stays, as the script leaves it.
+fn remove_other_install(layout: &Layout) -> Vec<String> {
+    let Some(bin) = other_bin(layout) else {
+        return Vec::new();
+    };
+    let mut problems: Vec<String> = plan::BINARIES
+        .iter()
+        .filter_map(|name| remove_file(&bin.join(name)).err())
+        .collect();
+    let _ = std::fs::remove_dir(&bin);
+    problems.extend(remove_from_path(&bin).err());
+    problems
 }
 
 /// The bin folder of an install recorded somewhere other than this one.
