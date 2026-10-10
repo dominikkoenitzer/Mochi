@@ -51,7 +51,7 @@
     .\scripts\autostart.ps1 -Enable
 
 .EXAMPLE
-    .\scripts\autostart.ps1 -DisableStartupItem myoldwm
+    .\scripts\autostart.ps1 -DisableStartupItem OldManager
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
