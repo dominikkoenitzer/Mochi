@@ -355,10 +355,10 @@ jobs:
       #
       # A quiet install exits 1 when anything went wrong, and the Mochi daemon
       # not starting is one of those things. Every other one is a missing piece
-      # the next step checks on its own, so 1 is let through here only when no
-      # Mochi runs afterwards, as a warning: the daemon needs an interactive
-      # desktop, and should a runner image ever lack one this job still proves
-      # the install and the uninstall, which is what it is for.
+      # the next step checks on its own, so 1 is let through here as a warning:
+      # the daemon needs an interactive desktop, and should a runner image ever
+      # lack one this job still proves the install and the uninstall, which is
+      # what it is for.
       - name: Install quietly
         shell: pwsh
         run: |
@@ -386,10 +386,7 @@ jobs:
                   }
               }
               1 {
-                  if ($running.Count -gt 0) {
-                      throw 'Mochi-Setup.exe --quiet exited with 1 although Mochi runs, so part of the install failed'
-                  }
-                  Write-Output '::warning::Mochi did not start on this runner; the install and the uninstall are still checked'
+                  Write-Output "::warning::Mochi-Setup.exe --quiet exited with 1, so Mochi did not start, or not within the time the setup waits (mochi.exe processes now: $($running.Count)). The next step checks every other part of the install on its own."
               }
               default { throw "Mochi-Setup.exe --quiet exited with $code" }
           }
