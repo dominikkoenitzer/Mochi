@@ -66,6 +66,15 @@ pub struct Visuals {
     /// Windows this pass has faded, mirrored into `hidden` so a crash undoes
     /// them; kept here so the next pass knows what to un-mirror.
     faded: BTreeSet<Hwnd>,
+    /// Every pass handed to [`Visuals::update`], recorded in tests only. A
+    /// test desktop has no border manager, so this is the only way to see
+    /// what the borders were told.
+    #[cfg(test)]
+    pub(crate) drawn: Vec<VisualsTargets>,
+    /// Every border move asked for through [`Visuals::follow_window`],
+    /// recorded in tests only.
+    #[cfg(test)]
+    pub(crate) followed: Vec<(Hwnd, Rect)>,
 }
 
 impl Visuals {
@@ -83,6 +92,10 @@ impl Visuals {
             animator: None,
             animation: AnimationConfig::default(),
             faded: BTreeSet::new(),
+            #[cfg(test)]
+            drawn: Vec::new(),
+            #[cfg(test)]
+            followed: Vec::new(),
         }
     }
 
@@ -259,6 +272,8 @@ impl Visuals {
     /// [`BorderManager::update`]'s `focused` slot; `targets.unfocused` is
     /// exactly the set transparency should fade.
     pub fn update(&mut self, targets: &VisualsTargets) {
+        #[cfg(test)]
+        self.drawn.push(targets.clone());
         if let Ok(guard) = self.borders.lock()
             && let Some(manager) = guard.as_ref()
         {
@@ -293,6 +308,30 @@ impl Visuals {
                 .filter(|&target| manager.is_faded(handle(target)))
                 .collect();
             self.sync_fade_record(now);
+        }
+    }
+
+    /// Moves the border of one window that moved by itself, keeping the kind
+    /// the last [`Visuals::update`] gave it.
+    ///
+    /// For windows whose border is drawn where the window really is rather
+    /// than where a layout put it: floating windows and scratchpads. A user
+    /// dragging one, or the application moving itself, goes past every layout
+    /// pass, so without this the frame stayed where the window used to be.
+    /// A window that has no border is left alone, and one that did not move
+    /// sends nothing.
+    pub fn follow_window(&mut self, target: Hwnd, rect: Rect) {
+        #[cfg(test)]
+        self.followed.push((target, rect));
+        if let Ok(guard) = self.borders.lock()
+            && let Some(manager) = guard.as_ref()
+            && let Err(e) = manager.follow_frame(&[FrameUpdate {
+                handle: handle(target),
+                rect,
+                finished: true,
+            }])
+        {
+            tracing::error!(error = %e, "could not move a border after its window");
         }
     }
 

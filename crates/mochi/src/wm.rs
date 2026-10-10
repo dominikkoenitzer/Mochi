@@ -1955,7 +1955,10 @@ impl WindowManager {
     /// Where window events become tree updates.
     fn on_window_event(&mut self, kind: WindowEventKind, hwnd: Hwnd) {
         match kind {
-            WindowEventKind::LocationChange => self.follow_external_maximize(hwnd),
+            WindowEventKind::LocationChange => {
+                self.follow_external_maximize(hwnd);
+                self.follow_floating_move(hwnd);
+            }
             WindowEventKind::Destroyed => {
                 self.scratchpad_window_closed(hwnd);
                 if self.lives_in_the_tray(hwnd) {
@@ -2102,6 +2105,43 @@ impl WindowManager {
                 self.apply_changes(changes);
             }
             Err(e) => tracing::debug!(%hwnd, error = %e, "could not follow the maximize"),
+        }
+    }
+
+    /// Takes the border along when a floating window or a scratchpad moves.
+    ///
+    /// A tile's border is drawn on the tile, and only a layout moves that.
+    /// A floating window or a scratchpad gets its border from its own frame,
+    /// read when the borders are drawn, and nothing drew them again when such
+    /// a window moved: dropping a floating window returns before any layout,
+    /// and an application moving its own window raises nothing but location
+    /// changes. The border stayed where the window had been.
+    ///
+    /// On the flood path, so the model is asked first, and only a window that
+    /// floats on a workspace being shown is read from the desktop.
+    fn follow_floating_move(&mut self, hwnd: Hwnd) {
+        if self.core.is_paused {
+            return;
+        }
+        let id = window_id(hwnd);
+        let floats_on_screen = self.scratchpad_holding(hwnd).is_some()
+            || self
+                .core
+                .locate_window(id)
+                .is_some_and(|(monitor, workspace)| {
+                    self.core
+                        .monitors()
+                        .get(monitor)
+                        .is_some_and(|display| display.focused_workspace_idx() == workspace)
+                        && self.core.workspace(monitor, workspace).is_ok_and(|target| {
+                            target.floating_windows().position(|w| w.id == id).is_some()
+                        })
+                });
+        if !floats_on_screen || self.we_hid(hwnd) || self.fullscreen.contains_key(&hwnd) {
+            return;
+        }
+        if let Ok(info) = self.platform.window_info(hwnd) {
+            self.visuals.follow_window(hwnd, info.visible_frame());
         }
     }
 
@@ -2506,6 +2546,13 @@ impl WindowManager {
                 changes.focus = None;
                 changes.warp_mouse_to = None;
                 self.apply_changes(changes);
+                // A click on another window of the same workspace moves the
+                // model's focus and nothing else: nothing to retile, show or
+                // hide, and the focus was just taken out above. That leaves a
+                // change set `apply_changes` returns on straight away, so the
+                // borders were never told and the focused one stayed on the
+                // window the user had just left.
+                self.draw_visuals();
             }
             Err(e) => tracing::debug!(%hwnd, error = %e, "could not follow the foreground"),
         }
@@ -4938,6 +4985,21 @@ mod tests {
             self.history.lock().unwrap().clear();
         }
 
+        /// The window moved without Mochi: the application placed it itself,
+        /// or the user dragged it.
+        fn moves_by_itself(&self, hwnd: Hwnd, rect: Rect) {
+            if let Some(w) = self
+                .windows
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|w| w.hwnd == hwnd)
+            {
+                w.rect = rect;
+                w.frame = rect;
+            }
+        }
+
         /// The last rectangle one window was moved to, in any batch.
         fn rect_of(&self, hwnd: Hwnd) -> Option<Rect> {
             self.history
@@ -5553,6 +5615,80 @@ mod tests {
             wm.state().workspace(0, 0).unwrap().floating_windows().len(),
             1,
             "the one that floated was pulled back into the layout"
+        );
+    }
+
+    /// The last pass the borders were told about.
+    fn last_drawn(wm: &WindowManager) -> crate::visuals::VisualsTargets {
+        wm.visuals
+            .drawn
+            .last()
+            .cloned()
+            .expect("the borders were never drawn")
+    }
+
+    #[test]
+    fn a_click_on_another_tile_moves_the_focused_border_onto_it() {
+        use mochi_render::BorderKind;
+
+        // A click hands the foreground over and Mochi hears about it after
+        // the fact. Nothing is retiled, shown or hidden, so once the focus
+        // Windows already made is taken out the change set is empty, and the
+        // borders were never told: the focused one stayed on the window the
+        // user had just left.
+        let (mut wm, _platform) =
+            manager_focused_on(vec![window(1, "one"), window(2, "two")], Hwnd(1));
+        wm.visuals.drawn.clear();
+
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+
+        let drawn = last_drawn(&wm);
+        assert_eq!(
+            drawn.focused,
+            Some(Hwnd(2)),
+            "the focused border stayed behind"
+        );
+        let kind_of = |hwnd: Hwnd| drawn.tiled.iter().find(|e| e.0 == hwnd).map(|e| e.2);
+        assert_eq!(kind_of(Hwnd(2)), Some(BorderKind::Single));
+        assert_eq!(kind_of(Hwnd(1)), Some(BorderKind::Unfocused));
+    }
+
+    #[test]
+    fn a_floating_window_that_moves_takes_its_border_along() {
+        // Floating borders are drawn on the window's own frame, read when the
+        // borders are drawn. A drag ends before any layout for a floating
+        // window, and an application moving itself raises only location
+        // changes, so the border was left where the window used to be.
+        let (mut wm, platform) =
+            manager_focused_on(vec![window(1, "one"), window(2, "two")], Hwnd(2));
+        assert!(wm.handle_command(Command::ToggleFloat).0.is_ok());
+        assert_eq!(last_drawn(&wm).focused, Some(Hwnd(2)));
+
+        let moved = Rect::new(300, 200, 1100, 800);
+        platform.moves_by_itself(Hwnd(2), moved);
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(2));
+
+        assert_eq!(
+            wm.visuals.followed,
+            vec![(Hwnd(2), moved)],
+            "the border did not follow the floating window"
+        );
+    }
+
+    #[test]
+    fn a_tile_that_is_pushed_around_keeps_its_border_on_the_tile() {
+        // The other half of the rule: a tiled window's border marks its tile,
+        // which only a layout moves, and the drop snaps the window back.
+        let (mut wm, platform) =
+            manager_focused_on(vec![window(1, "one"), window(2, "two")], Hwnd(1));
+
+        platform.moves_by_itself(Hwnd(1), Rect::new(5, 5, 400, 300));
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(1));
+
+        assert!(
+            wm.visuals.followed.is_empty(),
+            "a tile's border was moved off its tile: {:?}",
+            wm.visuals.followed
         );
     }
 
