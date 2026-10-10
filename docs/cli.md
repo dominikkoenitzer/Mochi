@@ -13,6 +13,10 @@ implementation name in the file. Each of those is called out where it appears.
 
 The groups below follow the order of the hotkey file.
 
+Scripts and other programs can give `state`, `query`, `check`, `schema`,
+`doctor`, `why` and `hotkeys` the `--json` flag and read one JSON document
+instead of text. [json-output.md](json-output.md) lists every field.
+
 ## Focus
 
 | Command | Arguments | Does |
@@ -93,10 +97,10 @@ A scratchpad is a window kept out of the layout and shown with one command. The
 
 | Command | Arguments | Does |
 |---|---|---|
-| `state` | none | Print the whole daemon state as JSON. |
+| `state` | `--json` | Print the whole daemon state as JSON. `--json` makes a failure come out as JSON too. |
 | `why` | `--json` | Explain what Mochi makes of the window in front and what to do about it: whether it is being tiled and where, or the reason it is being left alone and the command that would change that. The one thing to run when a window is not tiling and it is not obvious why. `--json` prints the document the paragraph is made of. |
 | `doctor` | `--json` | Check the daemon's picture of the desktop against the real one. Each finding names a window and says what is wrong the way you would see it on screen, for example a tile reserved for a window that is not there. `--json` prints the raw findings document. |
-| `query` | target | Print one value. Targets: `focused-monitor-index`, `focused-workspace-index`, `focused-container-index`, `focused-window-index` (the index inside the focused container), `focused-workspace-name`, `monitor-count`, `window-count`, `paused`, `dry-run`, `config-path`, `version`. |
+| `query` | target, `--json` | Print one value. Targets: `focused-monitor-index`, `focused-workspace-index`, `focused-container-index`, `focused-window-index` (the index inside the focused container), `focused-workspace-name`, `monitor-count`, `window-count`, `paused`, `dry-run`, `config-path`, `version`. `--json` prints the value in a document with the target and the `mochic` version. |
 | `subscribe` | name | Create a pipe of that name, register it, and print every event to stdout as one JSON line until Ctrl-C. The one command to watch what the daemon is doing. |
 | `subscribe-pipe` | name | Send every event to a named pipe the subscriber created itself, for a bar or a service that owns its own pipe. |
 | `unsubscribe-pipe` | name | Stop sending events to that pipe. |
@@ -128,8 +132,8 @@ in [hotkeys.md](hotkeys.md).
 | Command | Arguments | Does |
 |---|---|---|
 | `quickstart` | none | Write a default `mochi.json` and a default hotkey file, each only when there is none. |
-| `check` | `[PATH]` | Read a configuration file and say what is wrong with it, without a daemon and without applying anything. No path means the file the daemon would load. Reports a parse failure with its line, column and the offending text; every rule that cannot do what it says, with its list, its line and the compiler's complaint; every top level key that parses and is then ignored; and, when the file names an `app_specific_configuration_path`, the same for that file, whose problems are warnings because the daemon carries on past them. Exits 0 when the file is usable, 1 when it is not; warnings do not fail. It reads the hotkey file at the same time and reports how many bindings it found, every line that did not parse, and every line that starts with a Mochi command but does not parse as one, because the daemon hands those to the shell and they then fail silently on every key press. Hand it an `applications.json` and it checks that instead. |
-| `schema` | `[-o PATH]` | Print the JSON schema of the config file, or write it to `PATH` in UTF-8. |
+| `check` | `[PATH]`, `--json` | Read a configuration file and say what is wrong with it, without a daemon and without applying anything. No path means the file the daemon would load. Reports a parse failure with its line, column and the offending text; every rule that cannot do what it says, with its list, its line and the compiler's complaint; every top level key that parses and is then ignored; and, when the file names an `app_specific_configuration_path`, the same for that file, whose problems are warnings because the daemon carries on past them. Exits 0 when the file is usable, 1 when it is not; warnings do not fail. It reads the hotkey file at the same time and reports how many bindings it found, every line that did not parse, and every line that starts with a Mochi command but does not parse as one, because the daemon hands those to the shell and they then fail silently on every key press. Hand it an `applications.json` and it checks that instead. `--json` prints the findings as one document, with the same exit code. |
+| `schema` | `[-o PATH]`, `--json` | Print the JSON schema of the config file, or write it to `PATH` in UTF-8. With `-o`, `--json` prints the path written as a document instead of `wrote PATH`. |
 | `focus-follows-mouse` | `enable` \| `disable` | Focus whatever the cursor moves over. |
 | `mouse-follows-focus` | `enable` \| `disable` | Warp the cursor to a newly focused window. |
 | `window-container-behaviour` | `create` \| `append` | Whether a new window gets a container of its own or stacks onto the focused one. |
@@ -180,4 +184,4 @@ in `mochi.json`. [configuration.md](configuration.md) lists all ten.
 |---|---|
 | `0` | The daemon accepted the command. |
 | `1` | The daemon answered with an error, or was not reachable. The message goes to stderr. |
-| `2` | The command line itself was wrong: an unknown command, a missing argument, a value outside the list. This one comes from the argument parser before anything is sent, so the message is a usage hint rather than an answer from the daemon. |
+| `2` | The command line itself was wrong: an unknown command, a missing argument, a value outside the list. This one comes from the argument parser before anything is sent, so the message is a usage hint rather than an answer from the daemon. With `--json` on the line, the hint comes out as an error document with the code `usage`. |

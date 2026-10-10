@@ -172,8 +172,10 @@ it, in words rather than in the terms the log is written in. Every answer it can
 give names either a fix or the reason there is nothing to fix.
 
 Config keys are in [docs/configuration.md](docs/configuration.md), commands in
-[docs/cli.md](docs/cli.md), keys in [docs/hotkeys.md](docs/hotkeys.md). The log
-is `%LOCALAPPDATA%\mochi\mochi.log`.
+[docs/cli.md](docs/cli.md), keys in [docs/hotkeys.md](docs/hotkeys.md). Scripts
+can ask `mochic` for JSON instead of text, as
+[docs/json-output.md](docs/json-output.md) describes. The log is
+`%LOCALAPPDATA%\mochi\mochi.log`.
 
 ## Importing an existing setup
 
