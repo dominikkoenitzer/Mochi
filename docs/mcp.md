@@ -156,7 +156,8 @@ container, and to its place when the container is a stack.
 | `sent` | array of strings | The commands sent. |
 
 Mochi has no command that focuses one floating window. For a floating window
-the tool shows its workspace and then answers with an error that says so.
+that does not have the focus already, the tool shows its workspace and then
+answers with an error that says so.
 
 ### move_window_to_workspace
 
@@ -263,11 +264,11 @@ Mochi is not running. Start it from the Start menu, or run `mochic start` in a t
 | When | The tool answers |
 |---|---|
 | Mochi is not running. | The message above. |
-| Mochi refuses a command. | An error that names the command and carries Mochi's message. |
+| Mochi refuses a command, for example while it is paused. | An error that names the command and carries Mochi's message. |
 | A window id names no window Mochi manages, for example one that has closed. | An error that says so and asks for `get_state` again. |
 | Both or neither of `workspace` and `workspace_name` are given, or of `workspace` and `name`. | An error that says which to give. |
 | `why_not_tiled` is asked about an unmanaged window that is not in front. | An error: bring the window to the front and call again without `window`. |
-| `focus_window` is given a floating window. | Its workspace is shown, then an error says that Mochi has no command that focuses one floating window. |
+| `focus_window` is given a floating window that does not have the focus. | Its workspace is shown, then an error says that Mochi has no command that focuses one floating window. |
 | A monocle, a maximized window or a floating window keeps the focus from reaching the window. | An error that says so and points to `get_state`. |
 | `check_config` finds no configuration path at all. | An error, where `mochic check --json` prints one with the code `config`. |
 
