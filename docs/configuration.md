@@ -32,7 +32,7 @@ into `%USERPROFILE%\mochi.json` and change one thing at a time:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/schema.json",
+  "$schema": "https://get-mochi.vercel.app/schema.json",
   "default_workspace_padding": 10,
   "default_container_padding": 10,
   "border": true,
