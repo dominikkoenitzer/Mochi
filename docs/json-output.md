@@ -61,15 +61,120 @@ failure come out as an error document. The top level fields:
 | `focused_window` | number or null | Handle of the focused managed window. |
 | `foreground_window` | number or null | Handle of the window in front, managed or not. |
 | `window_count` | number | Number of managed windows. |
-| `monitors` | array | One object per monitor, with its workspaces, their containers and the windows in each. |
-| `settings` | object | The visual settings in force. |
-| `behaviour` | object | The behaviour settings in force, such as `window_hiding_behaviour` and `focus_follows_mouse`. |
-| `rules` | number | Number of window rules loaded. |
+| `monitors` | array of monitors | One per monitor, in index order. See below. |
+| `settings` | object | The border, transparency and animation settings in force. See below. |
+| `behaviour` | object | The behaviour settings in force. See below. |
+| `rules` | number | Number of window rules loaded, across every rule list. |
 | `subscribers` | array of strings | The pipes that receive notifications. |
-| `fullscreen` | array | One object per fullscreen window: `window` (handle), `monitor` (index), `frozen` (boolean). |
+| `fullscreen` | array | One object per fullscreen window: `window` (number, its handle), `monitor` (number, the monitor it holds) and `frozen` (boolean, true while the window is on screen and so holds its monitor). |
 
-The nested fields follow the daemon's model and are best read from a live
-document.
+A window handle is a number here, the `HWND` value. `why` and `doctor` write
+handles as hex strings instead.
+
+#### Monitor
+
+| Field | Type | Meaning |
+|---|---|---|
+| `index` | number | Zero-based monitor index, as the commands take it. |
+| `id` | number | The `HMONITOR` handle. |
+| `name` | string | The friendly name, for example `DISPLAY1`. |
+| `device` | string | The GDI device name, for example `\\.\DISPLAY1`. |
+| `device_id` | string | The display's model name. Two panels of the same model have the same one. |
+| `size` | rect | The whole display, in virtual desktop coordinates. |
+| `work_area` | rect | The part of `size` the taskbar does not cover. |
+| `dpi` | number | The display's DPI. 96 is 100 percent scaling. |
+| `scale` | number | `dpi` divided by 96. |
+| `focused_workspace` | number | Index of the workspace shown on this monitor. |
+| `last_focused_workspace` | number or null | The workspace shown before it, which `focus-last-workspace` goes back to. |
+| `workspaces` | array of workspaces | Every workspace of this monitor, in index order. |
+
+#### Workspace
+
+| Field | Type | Meaning |
+|---|---|---|
+| `index` | number | Zero-based workspace index on its monitor. |
+| `name` | string | The name from the configuration, or the index plus one when it has none. |
+| `layout` | string | The layout in use: `BSP`, `Columns`, `Rows`, `VerticalStack`, `HorizontalStack`, `UltrawideVerticalStack` or `Grid`. |
+| `flip` | object | `horizontal` and `vertical`, both booleans: whether the layout is mirrored along that axis. |
+| `tile` | boolean | False when tiling is off for this workspace. |
+| `monocle` | boolean | True while one container fills the workspace. |
+| `maximized` | boolean | True while one window is maximized over it. |
+| `visible` | boolean | True for the workspace its monitor is showing. |
+| `work_area` | rect | The area this workspace tiles into. |
+| `workspace_padding` | number | Outer padding in logical pixels. |
+| `container_padding` | number | Padding between containers in logical pixels. |
+| `focused_container` | number | Index of the focused container. |
+| `focused_window` | number or null | Handle of the focused window. |
+| `containers` | array of containers | The tiled containers, in order. |
+| `monocle_container` | container or null | The container in monocle, which is not in `containers` while it is. |
+| `maximized_window` | window or null | The maximized window. |
+| `floating_windows` | array of windows | The floating windows. Their `rect` is null. |
+
+#### Container
+
+| Field | Type | Meaning |
+|---|---|---|
+| `index` | number | Zero-based container index on its workspace. |
+| `rect` | rect or null | The tile the last layout gave it. |
+| `focused_window` | number or null | Handle of the window it is showing. |
+| `stack` | boolean | True when it holds more than one window. |
+| `windows` | array of windows | Its windows. A stack shows one and hides the rest. |
+
+#### Window
+
+| Field | Type | Meaning |
+|---|---|---|
+| `hwnd` | number | The window handle. |
+| `title` | string | The title. |
+| `exe` | string | The executable name. |
+| `class` | string | The window class. |
+| `path` | string | The full path of the executable. |
+| `rect` | rect or null | Where Mochi says it belongs: its container's tile, shared by every window of a stack. Null for a floating window. |
+| `actual_rect` | rect or null | Where it really is on screen. Null when it could not be read. |
+| `visible` | boolean | True when its container is showing it. |
+| `on_screen` | boolean or null | What the desktop says: false when it is cloaked or hidden. Null when it could not be read. |
+
+When `rect` and `actual_rect` differ, the window is not where Mochi thinks it
+is.
+
+#### Rect
+
+`left`, `top`, `right`, `bottom`, `width` and `height`, all numbers, in
+physical pixels.
+
+#### Settings
+
+| Field | Type | Meaning |
+|---|---|---|
+| `transparency` | boolean | Unfocused windows are faded. |
+| `transparency_alpha` | number | The alpha unfocused windows get, 0 to 255. |
+| `border` | boolean | A border is drawn around the focused window. |
+| `border_width` | number | Border thickness in physical pixels, not scaled by DPI. |
+| `border_offset` | number | How far the border sits outside the frame. Negative pulls it inwards. |
+| `border_style` | string | `system`, `rounded` or `square`. |
+| `border_colours` | object | `single`, `stack`, `monocle`, `floating` and `unfocused`, each a `#rrggbb` string, or null when neither the file nor a command set it, and the border draws its own default. |
+| `animation` | boolean | Move and resize animations are on. |
+| `animation_duration` | number | Animation length in milliseconds. |
+| `animation_fps` | number | Animation frame rate. |
+| `animation_style` | string | The easing curve, spelled as `animation-style` takes it, for example `linear` or `ease-in-out-cubic`. |
+
+#### Behaviour
+
+These values are spelled the way `mochi.json` spells them, not the way the
+command line does.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `window_hiding_behaviour` | string | `Hide`, `Minimize` or `Cloak`. |
+| `cross_monitor_move_behaviour` | string | `Swap`, `Insert` or `NoOp`. |
+| `unmanaged_window_operation_behaviour` | string | `Op` or `NoOp`. |
+| `window_container_behaviour` | string | `Create` or `Append`. |
+| `focus_follows_mouse` | string or null | `Windows` or `Mochi`, or null when it is off. |
+| `mouse_follows_focus` | boolean | The cursor moves to a newly focused window. |
+| `float_override` | boolean | Every new window floats. |
+| `resize_delta` | number | How many pixels one `resize-axis` step moves a boundary. |
+| `default_workspace_padding` | number | Outer padding of a workspace that sets none, in logical pixels. |
+| `default_container_padding` | number | Container padding of a workspace that sets none, in logical pixels. |
 
 ### query
 
@@ -178,7 +283,7 @@ Fields marked "sometimes" are only there when they apply.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `hwnd` | string | The handle of the window in front. |
+| `hwnd` | string | The handle of the window in front, in hex, for example `0x1a2b`. |
 | `title` | string | Its title. |
 | `exe` | string | Its executable name. |
 | `class` | string | Its window class. |
@@ -186,10 +291,40 @@ Fields marked "sometimes" are only there when they apply.
 | `monitor` | number, sometimes | The monitor it is on, when managed. |
 | `workspace` | number, sometimes | The workspace it is on, when managed. |
 | `fullscreen_monitor` | number, sometimes | The monitor it holds fullscreen, when it does. |
-| `reason` | string, sometimes | Why it is left alone, when not managed: `scratchpad`, `paused`, `manage-class`, `rule`, `unknown`, or the reason the window itself cannot be tiled. |
+| `reason` | string, sometimes | Why it is left alone, when not managed. One of the values below. |
 | `scratchpad` | string, sometimes | The scratchpad that holds it, when `reason` is `scratchpad`. |
-| `overridable` | boolean, sometimes | Whether a `manage-rule` could change that, when the reason is the window itself. |
-| `hotkeys_blocked` | boolean, sometimes | True when the window runs with more rights than Mochi, so no hotkey works while it has the focus. |
+| `overridable` | boolean, sometimes | Only with a reason from the second table: whether a `manage_rules` entry or `manage-rule` may overrule it. |
+| `hotkeys_blocked` | boolean, sometimes | Only there when true: the window runs with more rights than Mochi, so no hotkey works while it has the focus. |
+
+The daemon asks in this order and gives the first reason that holds.
+
+| `reason` | Meaning |
+|---|---|
+| `scratchpad` | A scratchpad holds the window. |
+| `paused` | Management is paused. |
+| `manage-class` | The daemon was started with `--manage-class` and the window's class is not one of them. |
+| `rule` | A rule in the configuration ignores it. |
+| `unknown` | Nothing rules it out. It has only just appeared, or an earlier attempt to manage it failed. |
+
+Or the window itself is not something Mochi tiles. These come before `rule`
+and `unknown`. A `manage_rules` entry overrules the ones marked overridable,
+and when one does, `why` goes on to `rule` or `unknown`.
+
+| `reason` | `overridable` | Meaning |
+|---|---|---|
+| `not visible` | false | The window is not visible. |
+| `cloaked` | false | Windows is hiding it: another virtual desktop, a suspended app, or another program cloaked it. |
+| `child window` | false | It is not a top-level window. |
+| `tool window` | true | A tool window that does not ask for a taskbar button. |
+| `no-activate window` | true | It refuses to be activated, like an overlay or an on-screen keyboard. |
+| `owned window` | true | A dialog, palette or popup owned by another window. |
+| `no title` | true | It has no title and asks for no taskbar button. |
+| `too small` | false | It is too small in at least one direction. |
+| `shell class` | false | Its class belongs to the Windows shell. |
+| `shell process` | false | Its process belongs to the Windows shell. |
+| `elevated, out of reach` | false | It runs as administrator and Mochi does not, so Windows refuses every call against it. |
+| `always on top` | true | An always-on-top overlay that does not ask for a taskbar button. |
+| `click-through overlay` | true | Mouse input falls straight through it. |
 
 ### hotkeys
 
