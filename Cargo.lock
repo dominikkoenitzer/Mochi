@@ -378,6 +378,7 @@ dependencies = [
  "mochi-client",
  "mochi-core",
  "mochi-hotkey",
+ "serde",
  "serde_json",
  "winresource",
 ]

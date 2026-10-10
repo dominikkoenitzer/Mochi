@@ -59,12 +59,18 @@ pub enum Cmd {
     Check {
         /// File to check. Defaults to the one the daemon would load.
         path: Option<PathBuf>,
+        /// Print the findings as one JSON document instead of a report
+        #[arg(long)]
+        json: bool,
     },
     /// Print the JSON schema of the configuration file
     Schema {
         /// Write the schema to this file, in UTF-8, instead of to stdout
         #[arg(long, short)]
         output: Option<std::path::PathBuf>,
+        /// Answer in JSON only, also when the schema goes to a file or fails
+        #[arg(long)]
+        json: bool,
     },
     /// Pause and resume window management
     TogglePause,
@@ -79,12 +85,19 @@ pub enum Cmd {
 
     // --- introspection ---------------------------------------------------
     /// Print the daemon state as pretty JSON
-    State,
+    State {
+        /// Report a failure as JSON too. The state is JSON either way.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a single value from the daemon
     Query {
         /// What to ask for
         #[arg(value_enum)]
         target: QueryTarget,
+        /// Print the value in a JSON document instead of on its own
+        #[arg(long)]
+        json: bool,
     },
     /// Check the daemon's picture of the desktop against the real one
     Doctor {
@@ -520,8 +533,8 @@ impl Cmd {
             Cmd::ReloadConfiguration => Command::ReloadConfiguration,
             Cmd::RestoreWindows => Command::RestoreWindows,
             Cmd::Retile => Command::Retile,
-            Cmd::State => Command::State,
-            Cmd::Query { target } => Command::Query { target: *target },
+            Cmd::State { json: _ } => Command::State,
+            Cmd::Query { target, json: _ } => Command::Query { target: *target },
             // Table or raw JSON is a decision `mochic` makes on its own, the
             // daemon answers the same document either way.
             Cmd::Hotkeys { json: _ } => Command::Hotkeys,
