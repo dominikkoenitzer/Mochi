@@ -104,9 +104,11 @@ pub fn asks_for_quiet(args: impl IntoIterator<Item = OsString>) -> bool {
 
 /// The bin folder of an install scripts\install.ps1 recorded in a folder
 /// other than this one, or None when the record names this one or nothing.
+/// A relative record is ignored: it would resolve against whatever folder
+/// this setup happened to start in.
 pub fn other_bin(recorded: Option<&str>, layout: &Layout) -> Option<PathBuf> {
     let root = PathBuf::from(recorded.map(str::trim).filter(|text| !text.is_empty())?);
-    (!same_path(&root, &layout.root)).then(|| root.join("bin"))
+    (root.is_absolute() && !same_path(&root, &layout.root)).then(|| root.join("bin"))
 }
 
 /// Expands %NAME% the way Windows does for a REG_EXPAND_SZ value: a name
@@ -416,6 +418,7 @@ mod tests {
         assert_eq!(other_bin(Some("  "), &l), None);
         let same = l.root.display().to_string().to_lowercase() + "\\";
         assert_eq!(other_bin(Some(&same), &l), None);
+        assert_eq!(other_bin(Some("tools"), &l), None);
         assert_eq!(
             other_bin(Some(r"D:\Apps\Mochi"), &l),
             Some(PathBuf::from(r"D:\Apps\Mochi\bin"))
