@@ -90,6 +90,25 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Options, S
     Ok(options)
 }
 
+/// Whether the arguments ask for no dialogs, even when one of them is
+/// unknown: a scripted install must not stop at a dialog nobody sees.
+pub fn asks_for_quiet(args: impl IntoIterator<Item = OsString>) -> bool {
+    args.into_iter().any(|arg| {
+        let text = arg.to_string_lossy().to_ascii_lowercase();
+        matches!(
+            text.trim_start_matches(['-', '/']),
+            "quiet" | "q" | "s" | "silent"
+        )
+    })
+}
+
+/// The bin folder of an install scripts\install.ps1 recorded in a folder
+/// other than this one, or None when the record names this one or nothing.
+pub fn other_bin(recorded: Option<&str>, layout: &Layout) -> Option<PathBuf> {
+    let root = PathBuf::from(recorded.map(str::trim).filter(|text| !text.is_empty())?);
+    (!same_path(&root, &layout.root)).then(|| root.join("bin"))
+}
+
 /// Expands %NAME% the way Windows does for a REG_EXPAND_SZ value: a name
 /// with no variable behind it stays as it was written.
 pub fn expand_vars(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
@@ -380,6 +399,27 @@ mod tests {
             })
         );
         assert!(parse(&["--frobnicate"]).is_err());
+    }
+
+    #[test]
+    fn quiet_is_seen_even_beside_a_typo() {
+        let quiet = |args: &[&str]| asks_for_quiet(args.iter().map(OsString::from));
+        assert!(quiet(&["--quiet", "--frobnicate"]));
+        assert!(quiet(&["/S"]));
+        assert!(!quiet(&["--frobnicate"]));
+    }
+
+    #[test]
+    fn another_recorded_install_is_found_only_elsewhere() {
+        let l = layout();
+        assert_eq!(other_bin(None, &l), None);
+        assert_eq!(other_bin(Some("  "), &l), None);
+        let same = l.root.display().to_string().to_lowercase() + "\\";
+        assert_eq!(other_bin(Some(&same), &l), None);
+        assert_eq!(
+            other_bin(Some(r"D:\Apps\Mochi"), &l),
+            Some(PathBuf::from(r"D:\Apps\Mochi\bin"))
+        );
     }
 
     #[test]

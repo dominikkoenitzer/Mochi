@@ -35,7 +35,9 @@ pub fn run() -> i32 {
     let options = match plan::parse_args(std::env::args_os().skip(1)) {
         Ok(options) => options,
         Err(message) => {
-            win::tell("Mochi Setup", &message, true);
+            if !plan::asks_for_quiet(std::env::args_os().skip(1)) {
+                win::tell("Mochi Setup cannot run like this", &message, true);
+            }
             return 2;
         }
     };
@@ -113,6 +115,11 @@ fn install(options: Options, layout: &Layout) -> i32 {
     };
     let current = std::env::current_exe().ok();
     note(keep_setup_copy(layout, current.as_deref()));
+    // An older install in a folder the user named would come first on the
+    // PATH and answer to mochic in place of this one.
+    if let Some(bin) = other_bin(layout) {
+        note(remove_from_path(&bin));
+    }
     note(add_to_path(&layout.bin));
     note(quickstart(layout));
     note(win::write_text(
@@ -193,6 +200,15 @@ fn uninstall(options: Options, layout: &Layout) -> i32 {
     }
     note(remove_file(&layout.shortcut));
     note(remove_from_path(&layout.bin));
+    // An install scripts\install.ps1 made in a folder the user named: its
+    // binaries and PATH entry go, the folder itself stays, as the script does.
+    if let Some(bin) = other_bin(layout) {
+        for name in plan::BINARIES {
+            note(remove_file(&bin.join(name)));
+        }
+        let _ = std::fs::remove_dir(&bin);
+        note(remove_from_path(&bin));
+    }
     note(win::delete_key(plan::UNINSTALL_KEY));
     note(win::delete_value(plan::STATE_KEY, "InstallRoot"));
     if win::key_is_empty(plan::STATE_KEY) {
@@ -442,4 +458,10 @@ fn start_mochi(layout: &Layout) -> Result<(), String> {
         Ok((_, said)) => Err(said),
         Err(e) => Err(format!("starting Mochi: {e}")),
     }
+}
+
+/// The bin folder of an install recorded somewhere other than this one.
+fn other_bin(layout: &Layout) -> Option<PathBuf> {
+    let (recorded, _) = win::read_text(plan::STATE_KEY, "InstallRoot").ok()??;
+    plan::other_bin(Some(&recorded), layout)
 }
