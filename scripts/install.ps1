@@ -897,6 +897,19 @@ function Uninstall-Mochi {
         }
     }
 
+    # What Mochi-Setup.exe adds on top: its own copy, which Apps & features
+    # runs to uninstall, and that Apps & features entry.
+    $setupCopy = Join-Path $InstallRoot 'Mochi-Setup.exe'
+    if ((Test-Path -LiteralPath $setupCopy) -and $PSCmdlet.ShouldProcess($setupCopy, 'remove')) {
+        Remove-Item -LiteralPath $setupCopy -Force
+        Write-Detail 'removed Mochi-Setup.exe'
+    }
+    $appsEntry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Mochi'
+    if ((Test-Path -LiteralPath $appsEntry) -and $PSCmdlet.ShouldProcess($appsEntry, 'remove')) {
+        Remove-Item -LiteralPath $appsEntry -Recurse -Force
+        Write-Detail 'removed the Apps & features entry'
+    }
+
     if ($SkipPath) {
         Write-Step 'user PATH left alone (-SkipPath)'
     } else {
