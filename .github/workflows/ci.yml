@@ -334,7 +334,20 @@ jobs:
               Write-Output "$name = $($places[$name])"
               "$name=$($places[$name])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
+          # The user PATH as it is now, raw, so the uninstall can be held to
+          # putting it back.
+          $environment = Get-Item 'HKCU:\Environment'
+          $path = $environment.GetValue('Path', $null, 'DoNotExpandEnvironmentNames')
+          $kind = if ($null -eq $path) { 'None' } else { $environment.GetValueKind('Path') }
+          Write-Output "user Path ($kind) = $path"
+          "USER_PATH_BEFORE=$path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "USER_PATH_KIND_BEFORE=$kind" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $bin = $places.INSTALL_BIN
           $found = @(
+              if ($null -ne $path -and @($path -split ';' | Where-Object {
+                  [Environment]::ExpandEnvironmentVariables($_.Trim().Trim('"')).TrimEnd('\') -eq $bin }).Count -gt 0) {
+                  "the user PATH entry $bin"
+              }
               foreach ($path in $places.Values) { if (Test-Path -LiteralPath $path) { $path } }
               if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.config\mochi\whkdrc')) { 'the legacy hotkeys file' }
               $run = Get-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -ErrorAction SilentlyContinue
@@ -347,11 +360,12 @@ jobs:
           if ($found.Count -gt 0) { throw "the runner already has Mochi on it: $($found -join '; ')" }
           Write-Output 'no trace of Mochi before the install'
 
-      # Started by shell execution, not by `&` or Start-Process: those hand the
-      # setup this step's output pipe, the setup hands it on to the mochic it
-      # runs, and `mochic start` to the daemon, which would then hold the step
-      # open for as long as Mochi runs. Shell execution passes no handles on.
-      # The setup has no console either, so `&` would not wait for it.
+      # Started by shell execution, not by `&` or Start-Process: those can hand
+      # the setup this step's output pipe, the setup hands what it inherited on
+      # to the mochic it runs, and `mochic start` on to the daemon, which would
+      # then hold the step open for as long as Mochi runs. Shell execution
+      # passes no handles on. The setup has no console either, so `&` would
+      # not wait for it.
       #
       # A quiet install exits 1 when anything went wrong, and the Mochi daemon
       # not starting is one of those things. Every other one is a missing piece
@@ -453,6 +467,8 @@ jobs:
           if ($link.TargetPath -ne $conhost) { throw "the Start menu entry runs [$($link.TargetPath)], not $conhost" }
           if ($link.Arguments -cne "--headless `"$mochic`" start") { throw "the Start menu entry passes [$($link.Arguments)], not --headless `"$mochic`" start" }
           if ($link.WorkingDirectory -ne $bin) { throw "the Start menu entry starts in [$($link.WorkingDirectory)], not $bin" }
+          if ($link.IconLocation -ne "$mochi,0") { throw "the Start menu entry shows the icon [$($link.IconLocation)], not $mochi,0" }
+          if ($link.Description -cne 'Start Mochi') { throw "the Start menu entry is described as [$($link.Description)], not Start Mochi" }
           Write-Output "Start menu: $env:INSTALL_SHORTCUT starts mochic"
 
           # Apps & features: every value the setup writes, with its kind.
@@ -483,7 +499,8 @@ jobs:
 
           # The record of where this install lives, which a later setup reads.
           $state = Get-Item 'HKCU:\Software\Mochi' -ErrorAction SilentlyContinue
-          if ($null -eq $state -or $state.GetValue('InstallRoot') -ne $root) { throw "HKCU\Software\Mochi does not record InstallRoot $root" }
+          if ($null -eq $state -or $state.GetValue('InstallRoot') -cne $root) { throw "HKCU\Software\Mochi does not record InstallRoot $root" }
+          if ($state.GetValueKind('InstallRoot') -ne 'String') { throw "HKCU\Software\Mochi InstallRoot is $($state.GetValueKind('InstallRoot')), not REG_SZ" }
           Write-Output "state: HKCU\Software\Mochi records $root"
 
           # Settings: the setup runs mochic quickstart when there are none.
@@ -574,6 +591,24 @@ jobs:
           )
           if ($left.Count -gt 0) { throw "the uninstall left behind: $($left -join '; ')" }
           Write-Output 'files, PATH entry, Run value, Start menu entry, Apps & features entry and state key are gone, and no Mochi runs'
+
+          # The rest of the user PATH is as it was, and of the same kind. The
+          # one difference allowed is a trailing ';' the install appended to
+          # and the uninstall then dropped along with the entry (plan.rs
+          # path_with and path_without).
+          $environment = Get-Item 'HKCU:\Environment'
+          # An empty value comes back from GITHUB_ENV as no variable at all.
+          $before = "$env:USER_PATH_BEFORE"
+          if ($env:USER_PATH_KIND_BEFORE -eq 'None') {
+              if (-not [string]::IsNullOrEmpty($raw)) { throw "the user had no Path value, and the uninstall left [$raw]" }
+          } else {
+              if ($null -eq $raw) { throw 'the uninstall deleted the user Path value' }
+              $kind = $environment.GetValueKind('Path')
+              if ($kind -ne $env:USER_PATH_KIND_BEFORE) { throw "the user Path value is now $kind, it was $env:USER_PATH_KIND_BEFORE" }
+              $trimmed = if ($before.EndsWith(';')) { $before.Substring(0, $before.Length - 1) } else { $before }
+              if ($raw -cne $before -and $raw -cne $trimmed) { throw "the user PATH is now [$raw], it was [$before]" }
+          }
+          Write-Output 'the rest of the user PATH is as it was before the install'
 
           # What the user wrote stays: the uninstall says so and must mean it.
           foreach ($pair in @($env:USER_CONFIG, $env:CONFIG_HASH), @($env:USER_HOTKEYS, $env:HOTKEYS_HASH)) {
