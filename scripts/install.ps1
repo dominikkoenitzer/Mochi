@@ -3,18 +3,28 @@
     Installs Mochi for the current user. No admin rights needed.
 
 .DESCRIPTION
-    By default the script builds the release binaries from this repository and
-    copies mochi.exe and mochic.exe to %LOCALAPPDATA%\Programs\Mochi\bin. With
-    -Version it downloads that release from GitHub instead and verifies the
-    SHA256 file that ships with it.
+    Without a checkout, for example run as
+        irm https://github.com/dominikkoenitzer/Mochi/releases/latest/download/install.ps1 | iex
+    it downloads the latest release from GitHub and verifies the SHA256 file
+    that ships with it. From a checkout it builds the release binaries with
+    cargo instead. Either way mochi.exe and mochic.exe end up in
+    %LOCALAPPDATA%\Programs\Mochi\bin.
 
     The install directory is added to the user PATH when it is missing, and
     `mochic quickstart` runs when there is no %USERPROFILE%\mochi.json or no
     hotkey file in %USERPROFILE%\.config\mochi yet. It writes whichever of the
     two is missing and never overwrites one that is there.
 
+    Then it registers the HKCU Run value Mochi that scripts\autostart.ps1
+    -Enable writes, adds Mochi to the Start menu and starts it. A shell running
+    as administrator starts it through Explorer, so Mochi itself never runs
+    elevated.
+
     The script is idempotent: running it twice leaves the same result. It only
     ever touches its own files, nothing that another program owns.
+
+    Switches need the script as a script block when it comes from the web:
+        & ([scriptblock]::Create((irm <url>))) -Uninstall
 
 .PARAMETER Version
     Release tag to download, for example v0.1.20, or `latest` for the newest
@@ -34,10 +44,17 @@
 .PARAMETER SkipQuickstart
     Do not create a default mochi.json or hotkey file.
 
+.PARAMETER SkipAutostart
+    Do not register the Run value that starts Mochi at login.
+
+.PARAMETER SkipStart
+    Do not start Mochi at the end.
+
 .PARAMETER Uninstall
-    Remove the binaries, the <InstallRoot>\bin directory Mochi created, and the
-    PATH entry unless -SkipPath is given. <InstallRoot> itself is left alone,
-    it is a directory you named and it may be older than Mochi.
+    Stop Mochi, remove its Run value, the MochiWatchdog task, the Start menu
+    shortcut, the binaries, the <InstallRoot>\bin directory Mochi created, and
+    the PATH entry unless -SkipPath is given. <InstallRoot> itself is left
+    alone, it is a directory you named and it may be older than Mochi.
 
 .EXAMPLE
     .\scripts\install.ps1
@@ -51,6 +68,14 @@
 .EXAMPLE
     .\scripts\install.ps1 -Uninstall
 #>
+
+# Everything runs inside this script block. `irm ... | iex` runs a script in
+# the caller's own scope with no $PSCmdlet, so a top level param block would
+# overwrite the caller's variables of the same name, ShouldProcess would fail,
+# and strict mode and Stop would stay behind in the user's shell. A script
+# block invoked with & gets a scope of its own; @args hands it the switches
+# when the script is run as a file.
+& {
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string] $Version,
@@ -58,31 +83,38 @@ param(
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\Mochi'),
     [switch] $SkipPath,
     [switch] $SkipQuickstart,
+    [switch] $SkipAutostart,
+    [switch] $SkipStart,
     [switch] $Uninstall
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 redraws the progress bar for every chunk a download
+# receives, which makes a few megabytes take minutes.
+$ProgressPreference = 'SilentlyContinue'
 
-$script:BinDir = Join-Path $InstallRoot 'bin'
-$script:Binaries = @('mochi.exe', 'mochic.exe')
-$script:SourceDir = $null
-$script:ConfigPath = Join-Path $env:USERPROFILE 'mochi.json'
-$script:HotkeyDir = Join-Path $env:USERPROFILE '.config\mochi'
-$script:HotkeyPath = Join-Path $script:HotkeyDir 'hotkeys'
-$script:LegacyHotkeyPath = Join-Path $script:HotkeyDir 'whkdrc'
-$script:LogPath = Join-Path $env:LOCALAPPDATA 'mochi\mochi.log'
-$script:EnvKey = 'HKCU:\Environment'
-$script:EnvValueName = 'Path'
-$script:TempWork = $null
+$BinDir = Join-Path $InstallRoot 'bin'
+$Binaries = @('mochi.exe', 'mochic.exe')
+$ConfigPath = Join-Path $env:USERPROFILE 'mochi.json'
+$HotkeyDir = Join-Path $env:USERPROFILE '.config\mochi'
+$HotkeyPath = Join-Path $HotkeyDir 'hotkeys'
+$LegacyHotkeyPath = Join-Path $HotkeyDir 'whkdrc'
+$LogPath = Join-Path $env:LOCALAPPDATA 'mochi\mochi.log'
+$EnvKey = 'HKCU:\Environment'
+$EnvValueName = 'Path'
+# What the acquisition step fetched, filled in by the functions below. A
+# table rather than separate variables, because a function can change an
+# entry of a table it can see but cannot assign a variable of this scope.
+$acquired = @{ SourceDir = $null; TempWork = $null }
 
 # Mochi reads either name from that directory, so a summary that always
 # printed the first one would point at a file that is not there.
 function Get-HotkeyPath {
-    if ((-not (Test-Path -LiteralPath $script:HotkeyPath)) -and (Test-Path -LiteralPath $script:LegacyHotkeyPath)) {
-        return $script:LegacyHotkeyPath
+    if ((-not (Test-Path -LiteralPath $HotkeyPath)) -and (Test-Path -LiteralPath $LegacyHotkeyPath)) {
+        return $LegacyHotkeyPath
     }
-    return $script:HotkeyPath
+    return $HotkeyPath
 }
 
 function Write-Step {
@@ -103,9 +135,9 @@ function Write-Detail {
 # do. Reading raw and writing back with the kind the value already had leaves
 # everything we did not come for exactly as it was.
 function Get-UserPathRaw {
-    $key = Get-Item -LiteralPath $script:EnvKey -ErrorAction SilentlyContinue
+    $key = Get-Item -LiteralPath $EnvKey -ErrorAction SilentlyContinue
     if ($null -eq $key) { return '' }
-    $raw = $key.GetValue($script:EnvValueName, '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $raw = $key.GetValue($EnvValueName, '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
     if ($null -eq $raw) { return '' }
     return [string] $raw
 }
@@ -113,10 +145,10 @@ function Get-UserPathRaw {
 # REG_EXPAND_SZ is what Windows itself writes, so it is also the kind to create
 # the value with when there is none yet.
 function Get-UserPathKind {
-    $key = Get-Item -LiteralPath $script:EnvKey -ErrorAction SilentlyContinue
+    $key = Get-Item -LiteralPath $EnvKey -ErrorAction SilentlyContinue
     if ($null -eq $key) { return 'ExpandString' }
-    if (@($key.GetValueNames()) -notcontains $script:EnvValueName) { return 'ExpandString' }
-    $kind = [string] $key.GetValueKind($script:EnvValueName)
+    if (@($key.GetValueNames()) -notcontains $EnvValueName) { return 'ExpandString' }
+    $kind = [string] $key.GetValueKind($EnvValueName)
     if ($kind -eq 'ExpandString') { return 'ExpandString' }
     return 'String'
 }
@@ -145,7 +177,7 @@ function Set-UserPathRaw {
         [Parameter(Mandatory)][AllowEmptyString()][string] $Value,
         [Parameter(Mandatory)][string] $Kind
     )
-    New-ItemProperty -Path $script:EnvKey -Name $script:EnvValueName -Value $Value -PropertyType $Kind -Force | Out-Null
+    New-ItemProperty -Path $EnvKey -Name $EnvValueName -Value $Value -PropertyType $Kind -Force | Out-Null
     Publish-EnvironmentChange
 }
 
@@ -238,16 +270,42 @@ function Update-UserPath {
     }
 }
 
-function Get-RepoRoot {
+# The checkout this script sits in, or $null. Run through `irm | iex` there is
+# no script file at all and $PSScriptRoot is empty, which Split-Path refuses.
+function Find-RepoRoot {
+    if ([string]::IsNullOrEmpty($PSScriptRoot)) { return $null }
     $root = Split-Path -Parent $PSScriptRoot
-    if (-not (Test-Path -LiteralPath (Join-Path $root 'Cargo.toml'))) {
-        throw "no Cargo.toml above $PSScriptRoot, run this from a checkout or pass -Version"
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'Cargo.toml'))) { return $null }
+    return $root
+}
+
+function Get-RepoRoot {
+    $root = Find-RepoRoot
+    if (-not $root) {
+        throw "no Cargo.toml above the script, run this from a checkout or pass -Version"
     }
     return $root
 }
 
+# A native command run with its stderr redirected turns every stderr line into
+# an error record under Windows PowerShell 5.1, and Stop makes that fatal. The
+# GitHub CLI writes to stderr whenever it is not signed in, which is exactly
+# the case the plain download below exists for.
+function Invoke-Quietly {
+    param([Parameter(Mandatory)][scriptblock] $Command)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        return (& $Command)
+    } catch {
+        return $null
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
 # The acquisition functions print progress, so they hand the result over in
-# $script:SourceDir instead of returning it.
+# $acquired.SourceDir instead of returning it.
 function Invoke-CargoBuild {
     $root = Get-RepoRoot
     Write-Step "building release binaries in $root"
@@ -261,7 +319,7 @@ function Invoke-CargoBuild {
     } finally {
         Pop-Location
     }
-    $script:SourceDir = Join-Path $root 'target\release'
+    $acquired.SourceDir = Join-Path $root 'target\release'
 }
 
 # `latest` is resolved to the newest published release tag here, so every
@@ -273,8 +331,8 @@ function Resolve-ReleaseTag {
     if ($Tag -ne 'latest') { return $Tag }
     $gh = (Get-Command gh -ErrorAction SilentlyContinue)
     if ($gh) {
-        $found = & $gh.Source release view --repo $Repo --json tagName --jq .tagName 2>$null
-        if ($LASTEXITCODE -eq 0 -and $found) { return $found.Trim() }
+        $found = Invoke-Quietly { & $gh.Source release view --repo $Repo --json tagName --jq .tagName 2>$null }
+        if ($LASTEXITCODE -eq 0 -and $found) { return "$found".Trim() }
     }
     try {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
@@ -302,54 +360,73 @@ function Save-ReleaseAsset {
         throw ("Mochi has no release build for $env:PROCESSOR_ARCHITECTURE yet. " +
                'Build it from source instead: run this script with no -Version.')
     }
-    $name = "Mochi-$Tag-x86_64-pc-windows-msvc"
+    # Releases from now on carry a zip whose name does not change between
+    # versions, so that a releases/latest/download link always works. Older
+    # releases carry the version in the name; -Version on one of those still
+    # finds it.
+    $names = @('Mochi-x86_64-pc-windows-msvc', "Mochi-$Tag-x86_64-pc-windows-msvc")
     $base = "https://github.com/$Repo/releases/download/$Tag"
     $work = Join-Path $env:TEMP "mochi-install-$Tag"
-    $zip = Join-Path $work "$name.zip"
-    $sum = "$zip.sha256"
 
-    Write-Step "downloading $name.zip from $Repo"
+    Write-Step "downloading release $Tag from $Repo"
 
     # A download is megabytes on disk and a request to GitHub, so it is an
     # action, not a preparation: -WhatIf and a declined -Confirm stop here
     # rather than after the bytes have already landed in %TEMP%.
-    if (-not $PSCmdlet.ShouldProcess("$name.zip from $Repo", 'download and extract')) {
+    if (-not $PSCmdlet.ShouldProcess("$Tag from $Repo", 'download and extract')) {
         Write-Detail 'skipped, nothing was downloaded'
-        $script:SourceDir = $null
+        $acquired.SourceDir = $null
         return
     }
 
     New-Item -ItemType Directory -Force -Path $work | Out-Null
 
-    # The GitHub CLI is used when it is there because it carries credentials,
-    # GitHub answers 404 rather than 403, so the plain download looks like a
-    # missing file. The GitHub CLI carries the credentials that make it visible,
-    # so it goes first whenever it is installed and signed in.
+    # For a private fork GitHub answers 404 rather than 403, so the plain
+    # download looks like a missing file. The GitHub CLI carries the
+    # credentials that make it visible, so it goes first when it is installed.
+    # Installed is not signed in, though: when it fails, the plain download
+    # still gets its turn instead of the install stopping there.
     $gh = (Get-Command gh -ErrorAction SilentlyContinue)
-    $haveSum = $true
-    if ($gh) {
-        Write-Detail "using $($gh.Source)"
-        & $gh.Source release download $Tag --repo $Repo --pattern "$name.zip*" --dir $work --clobber
-        if ($LASTEXITCODE -ne 0) {
-            throw "gh release download failed with exit code $LASTEXITCODE. Is $Tag published, and are you signed in with ``gh auth login``?"
+    $zip = $null
+    $sum = $null
+    $haveSum = $false
+    $failures = @()
+    foreach ($name in $names) {
+        $candidate = Join-Path $work "$name.zip"
+        $candidateSum = "$candidate.sha256"
+        if ($gh) {
+            [void] (Invoke-Quietly { & $gh.Source release download $Tag --repo $Repo --pattern "$name.zip*" --dir $work --clobber 2>$null })
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $candidate)) {
+                Write-Detail "$name.zip, using $($gh.Source)"
+                $zip = $candidate
+                $sum = $candidateSum
+                $haveSum = Test-Path -LiteralPath $candidateSum
+                break
+            }
         }
-        $haveSum = Test-Path -LiteralPath $sum
-        if (-not $haveSum) {
-            Write-Detail 'no SHA256 file published for this release, skipping the checksum'
-        }
-    } else {
         try {
-            Invoke-WebRequest -Uri "$base/$name.zip" -OutFile $zip -UseBasicParsing
+            Invoke-WebRequest -Uri "$base/$name.zip" -OutFile $candidate -UseBasicParsing
         } catch {
-            throw "could not download $name.zip from $Repo ($($_.Exception.Message)). Check the tag exists, or build from source by leaving -Version off."
+            $failures += "$name.zip: $($_.Exception.Message)"
+            continue
         }
-
+        Write-Detail "$name.zip"
+        $zip = $candidate
+        $sum = $candidateSum
         try {
             Invoke-WebRequest -Uri "$base/$name.zip.sha256" -OutFile $sum -UseBasicParsing
+            $haveSum = $true
         } catch {
-            Write-Detail 'no SHA256 file published for this release, skipping the checksum'
             $haveSum = $false
         }
+        break
+    }
+    if (-not $zip) {
+        throw ("could not download release $Tag from $Repo. Check the tag exists, or build from source by leaving -Version off.`n" +
+               ($failures -join "`n"))
+    }
+    if (-not $haveSum) {
+        Write-Detail 'no SHA256 file published for this release, skipping the checksum'
     }
 
     if ($haveSum) {
@@ -364,23 +441,23 @@ function Save-ReleaseAsset {
     $extract = Join-Path $work 'extract'
     if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
     Expand-Archive -Path $zip -DestinationPath $extract -Force
-    $script:SourceDir = $extract
-    $script:TempWork = $work
+    $acquired.SourceDir = $extract
+    $acquired.TempWork = $work
 }
 
 # The archive and what came out of it are ours and are of no use once the
 # binaries are copied, so a real run does not leave them behind in %TEMP%.
 function Remove-TempWork {
-    if (-not $script:TempWork) { return }
-    if (Test-Path -LiteralPath $script:TempWork) {
+    if (-not $acquired.TempWork) { return }
+    if (Test-Path -LiteralPath $acquired.TempWork) {
         try {
-            Remove-Item -LiteralPath $script:TempWork -Recurse -Force
-            Write-Detail "cleaned up $script:TempWork"
+            Remove-Item -LiteralPath $acquired.TempWork -Recurse -Force
+            Write-Detail "cleaned up $($acquired.TempWork)"
         } catch {
-            Write-Detail "could not clean up $script:TempWork ($($_.Exception.Message))"
+            Write-Detail "could not clean up $($acquired.TempWork) ($($_.Exception.Message))"
         }
     }
-    $script:TempWork = $null
+    $acquired.TempWork = $null
 }
 
 # Where an install went, so that an uninstall can find it.
@@ -390,15 +467,15 @@ function Remove-TempWork {
 # later ran -Uninstall got "mochi.exe was not there", "user PATH is already
 # clean" and a tidy summary, having removed nothing at all, with the binaries
 # and the PATH entry still live.
-$script:StateKey = 'HKCU:\Software\Mochi'
+$StateKey = 'HKCU:\Software\Mochi'
 
 function Save-InstallRoot {
     param([Parameter(Mandatory)] [string] $Root)
     try {
-        if (-not (Test-Path $script:StateKey)) {
-            New-Item -Path $script:StateKey -Force | Out-Null
+        if (-not (Test-Path $StateKey)) {
+            New-Item -Path $StateKey -Force | Out-Null
         }
-        New-ItemProperty -Path $script:StateKey -Name 'InstallRoot' -Value $Root `
+        New-ItemProperty -Path $StateKey -Name 'InstallRoot' -Value $Root `
             -PropertyType String -Force | Out-Null
     } catch {
         # Not fatal: the install itself worked, only the uninstall hint is lost.
@@ -408,7 +485,7 @@ function Save-InstallRoot {
 
 function Get-RecordedInstallRoot {
     try {
-        $value = (Get-ItemProperty -Path $script:StateKey -Name 'InstallRoot' -ErrorAction Stop).InstallRoot
+        $value = (Get-ItemProperty -Path $StateKey -Name 'InstallRoot' -ErrorAction Stop).InstallRoot
         if ([string]::IsNullOrWhiteSpace($value)) { return $null }
         return $value
     } catch {
@@ -418,20 +495,243 @@ function Get-RecordedInstallRoot {
 
 function Clear-InstallRoot {
     try {
-        Remove-ItemProperty -Path $script:StateKey -Name 'InstallRoot' -ErrorAction Stop
-        $key = Get-Item -Path $script:StateKey -ErrorAction Stop
+        Remove-ItemProperty -Path $StateKey -Name 'InstallRoot' -ErrorAction Stop
+        $key = Get-Item -Path $StateKey -ErrorAction Stop
         if ($key.ValueCount -eq 0 -and $key.SubKeyCount -eq 0) {
-            Remove-Item -Path $script:StateKey -Force
+            Remove-Item -Path $StateKey -Force
         }
     } catch {
         # Nothing recorded, or already gone.
     }
 }
 
+$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$RunValue = 'Mochi'
+$WatchdogTask = 'MochiWatchdog'
+
+function Get-ShortcutPath {
+    $programs = [Environment]::GetFolderPath('Programs')
+    if ([string]::IsNullOrWhiteSpace($programs)) {
+        $programs = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+    }
+    return (Join-Path $programs 'Mochi.lnk')
+}
+
+# The same command scripts\autostart.ps1 -Enable writes, so that script reports
+# it as already registered and its -Disable removes it.
+function Get-AutostartCommand {
+    param([Parameter(Mandatory)][string] $Mochic)
+    $quoted = $Mochic.Replace("'", "''")
+    $inner = "Start-Process -FilePath '$quoted' -ArgumentList 'start' -WindowStyle Hidden"
+    return "powershell.exe -NoProfile -WindowStyle Hidden -Command `"$inner`""
+}
+
+function Test-MochiCommand {
+    param([AllowEmptyString()][string] $Value)
+    return [regex]::IsMatch("$Value", '\bmochic(\.exe)?\b',
+        [Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant')
+}
+
+function Get-MochiRunValue {
+    $item = Get-ItemProperty -Path $RunKey -Name $RunValue -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return $null }
+    return $item.$RunValue
+}
+
+function Register-Autostart {
+    param([Parameter(Mandatory)][string] $Mochic)
+    $command = Get-AutostartCommand -Mochic $Mochic
+    $current = Get-MochiRunValue
+    if (($null -ne $current) -and -not (Test-MochiCommand -Value "$current")) {
+        # Somebody else's value under the same name is not ours to replace.
+        Write-Detail "$RunKey\$RunValue belongs to something else, left alone"
+        Write-Detail 'scripts\autostart.ps1 -Enable backs it up and registers Mochi'
+        return
+    }
+    if ("$current" -eq $command) {
+        Write-Detail 'already registered'
+        return
+    }
+    if ($PSCmdlet.ShouldProcess("$RunKey\$RunValue", 'set')) {
+        New-ItemProperty -Path $RunKey -Name $RunValue -Value $command -PropertyType String -Force | Out-Null
+        Write-Detail "registered $RunKey\$RunValue"
+    }
+}
+
+function Unregister-Autostart {
+    $current = Get-MochiRunValue
+    if ($null -eq $current) {
+        Write-Detail 'no Run value'
+    } elseif (-not (Test-MochiCommand -Value "$current")) {
+        Write-Detail "$RunKey\$RunValue does not run mochic, left alone"
+    } elseif ($PSCmdlet.ShouldProcess("$RunKey\$RunValue", 'remove')) {
+        Remove-ItemProperty -Path $RunKey -Name $RunValue
+        Write-Detail "removed $RunKey\$RunValue"
+        # scripts\autostart.ps1 -Enable backs up a value it replaced under this
+        # name. It goes back exactly as it was, under its own registry kind.
+        $backup = "RunBackup_$RunValue"
+        $saved = Get-ItemProperty -Path $StateKey -Name $backup -ErrorAction SilentlyContinue
+        if ($null -ne $saved) {
+            $kind = 'String'
+            $recorded = Get-ItemProperty -Path $StateKey -Name "${backup}_Kind" -ErrorAction SilentlyContinue
+            if (($null -ne $recorded) -and ($recorded."${backup}_Kind" -eq 'ExpandString')) { $kind = 'ExpandString' }
+            New-ItemProperty -Path $RunKey -Name $RunValue -Value $saved.$backup -PropertyType $kind -Force | Out-Null
+            Remove-ItemProperty -Path $StateKey -Name $backup
+            Remove-ItemProperty -Path $StateKey -Name "${backup}_Kind" -ErrorAction SilentlyContinue
+            Write-Detail 'the Run value that was there before Mochi is back'
+        }
+    }
+
+    # The watchdog scripts\autostart.ps1 -Watchdog registers. Left behind, it
+    # would try to start a deleted mochic every five minutes.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        schtasks /query /tn $WatchdogTask 2>$null | Out-Null
+        $haveTask = ($LASTEXITCODE -eq 0)
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($haveTask -and $PSCmdlet.ShouldProcess($WatchdogTask, 'remove the scheduled task')) {
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $out = schtasks /delete /tn $WatchdogTask /f 2>&1
+        } finally {
+            $ErrorActionPreference = $previous
+        }
+        if ($LASTEXITCODE -eq 0) {
+            Write-Detail "removed the $WatchdogTask task"
+        } else {
+            Write-Detail "could not remove the $WatchdogTask task: $out"
+        }
+    }
+}
+
+# conhost --headless gives mochic a console nobody sees. A shortcut that named
+# mochic.exe or powershell.exe directly would open a terminal window on every
+# click, because both are console programs.
+function New-StartMenuShortcut {
+    param([Parameter(Mandatory)][string] $Mochic)
+    $path = Get-ShortcutPath
+    if (-not $PSCmdlet.ShouldProcess($path, 'create shortcut')) { return }
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $link = $shell.CreateShortcut($path)
+        $link.TargetPath = Join-Path $env:SystemRoot 'System32\conhost.exe'
+        $link.Arguments = "--headless `"$Mochic`" start"
+        $link.WorkingDirectory = Split-Path -Parent $Mochic
+        $link.IconLocation = "$(Join-Path (Split-Path -Parent $Mochic) 'mochi.exe'),0"
+        $link.Description = 'Start Mochi'
+        $link.Save()
+        Write-Detail $path
+    } catch {
+        Write-Detail "could not create $path ($($_.Exception.Message))"
+    }
+}
+
+function Remove-StartMenuShortcut {
+    $path = Get-ShortcutPath
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Detail 'no Start menu shortcut'
+        return
+    }
+    if ($PSCmdlet.ShouldProcess($path, 'remove')) {
+        Remove-Item -LiteralPath $path -Force
+        Write-Detail "removed $path"
+    }
+}
+
+# By the token: an elevated shell hands its token to every child it starts,
+# and Mochi must not run elevated.
+function Test-Elevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Write-WayOut {
+    Write-Detail 'Pause            turns tiling off and on (alt + f12 without a Pause key)'
+    Write-Detail 'alt + shift + e  stops Mochi and puts every window back'
+}
+
+function Start-Mochi {
+    param([Parameter(Mandatory)][string] $Mochic)
+    if (-not $PSCmdlet.ShouldProcess('Mochi', 'start')) { return }
+    if (Test-Elevated) {
+        # Explorer runs at the user's normal rights whatever this shell runs
+        # at, so a program it opens does too.
+        $shortcut = Get-ShortcutPath
+        if (-not (Test-Path -LiteralPath $shortcut)) {
+            Write-Detail 'this shell runs as administrator and there is no shortcut to start Mochi through'
+            Write-Detail 'start it from a normal PowerShell with: mochic start'
+            return
+        }
+        Write-Detail 'this shell runs as administrator, so Mochi is started through Explorer without it'
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList "`"$shortcut`""
+        for ($i = 0; $i -lt 50; $i++) {
+            if (Get-Process -Name mochi -ErrorAction SilentlyContinue) {
+                Write-Detail 'Mochi is running'
+                return
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        Write-Detail 'Mochi did not come up within 10 seconds, start it from the Start menu'
+        Write-Detail "if it still does not start, run mochic check and read $LogPath"
+        return
+    }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Mochic start 2>&1
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    foreach ($line in @($output)) {
+        if ("$line".Trim()) { Write-Detail "$line" }
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Detail "Mochi did not start, run mochic check and read $LogPath"
+    }
+}
+
+# Asked to stop, not killed: a stop puts back every window Mochi was hiding.
+function Stop-Mochi {
+    $running = @(Get-Process -Name mochi -ErrorAction SilentlyContinue)
+    if ($running.Count -eq 0) {
+        Write-Detail 'Mochi is not running'
+        return
+    }
+    if (-not $PSCmdlet.ShouldProcess('Mochi', 'stop')) { return }
+    $mochic = Join-Path $BinDir 'mochic.exe'
+    if (-not (Test-Path -LiteralPath $mochic)) {
+        $found = Get-Command mochic -ErrorAction SilentlyContinue
+        if ($found) { $mochic = $found.Source } else { $mochic = $null }
+    }
+    if (-not $mochic) {
+        throw 'Mochi is running and there is no mochic to stop it with. Press alt + shift + e, then run this again.'
+    }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $mochic stop 2>&1 | Out-Null
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    for ($i = 0; $i -lt 50; $i++) {
+        if (-not (Get-Process -Name mochi -ErrorAction SilentlyContinue)) {
+            Write-Detail 'stopped, every window is back'
+            return
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    throw 'Mochi did not stop within 10 seconds. Press alt + shift + e, then run this again.'
+}
+
 function Install-Mochi {
     if ($Version) {
         Save-ReleaseAsset -Tag $Version
-    } elseif (-not (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'Cargo.toml'))) {
+    } elseif (-not (Find-RepoRoot)) {
         # Downloaded on its own rather than run from a checkout: there is
         # nothing to build, so take the newest release instead of failing.
         Write-Detail 'no checkout around this script, installing the latest release'
@@ -439,7 +739,7 @@ function Install-Mochi {
     } else {
         Invoke-CargoBuild
     }
-    $source = $script:SourceDir
+    $source = $acquired.SourceDir
 
     # Nothing was acquired, because the download was declined or dry run. There
     # is nothing to check for and nothing to copy, and pretending otherwise is
@@ -451,16 +751,16 @@ function Install-Mochi {
         return
     }
 
-    foreach ($binary in $script:Binaries) {
+    foreach ($binary in $Binaries) {
         if (-not (Test-Path -LiteralPath (Join-Path $source $binary))) {
             throw "$binary not found in $source"
         }
     }
 
-    Write-Step "installing to $script:BinDir"
-    if (-not (Test-Path -LiteralPath $script:BinDir)) {
-        if ($PSCmdlet.ShouldProcess($script:BinDir, 'create directory')) {
-            New-Item -ItemType Directory -Force -Path $script:BinDir | Out-Null
+    Write-Step "installing to $BinDir"
+    if (-not (Test-Path -LiteralPath $BinDir)) {
+        if ($PSCmdlet.ShouldProcess($BinDir, 'create directory')) {
+            New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
         }
     }
     # Whether the copies actually happened is the only thing that says the rest
@@ -478,9 +778,9 @@ function Install-Mochi {
     }
 
     $copied = $true
-    foreach ($binary in $script:Binaries) {
-        if ($PSCmdlet.ShouldProcess($binary, "copy to $script:BinDir")) {
-            Copy-Item -LiteralPath (Join-Path $source $binary) -Destination $script:BinDir -Force
+    foreach ($binary in $Binaries) {
+        if ($PSCmdlet.ShouldProcess($binary, "copy to $BinDir")) {
+            Copy-Item -LiteralPath (Join-Path $source $binary) -Destination $BinDir -Force
             Write-Detail $binary
         } else {
             $copied = $false
@@ -490,8 +790,8 @@ function Install-Mochi {
     if (-not $copied) {
         Write-Detail 'skipped, the binaries were not copied'
     } else {
-        foreach ($binary in $script:Binaries) {
-            $path = Join-Path $script:BinDir $binary
+        foreach ($binary in $Binaries) {
+            $path = Join-Path $BinDir $binary
             # Windows PowerShell 5.1 turns a native command writing to stderr
             # into a NativeCommandError, which $ErrorActionPreference = 'Stop'
             # makes terminating: one informational line from the binary would
@@ -523,34 +823,34 @@ function Install-Mochi {
         Write-Step 'user PATH left alone (-SkipPath)'
     } else {
         Write-Step 'user PATH'
-        Update-UserPath -Directory $script:BinDir
+        Update-UserPath -Directory $BinDir
     }
-    if (Test-PathEntry -Entries (Get-UserPathEntries -Raw (Get-UserPathRaw)) -Directory $script:BinDir) {
-        $env:Path = "$env:Path;$script:BinDir"
+    if (Test-PathEntry -Entries (Get-UserPathEntries -Raw (Get-UserPathRaw)) -Directory $BinDir) {
+        $env:Path = "$env:Path;$BinDir"
     }
 
     # Mochi reads hotkeys or whkdrc from that directory and quickstart leaves
     # either name alone, so either one means the hotkeys are there already.
-    $haveHotkeys = (Test-Path -LiteralPath $script:HotkeyPath) -or (Test-Path -LiteralPath $script:LegacyHotkeyPath)
+    $haveHotkeys = (Test-Path -LiteralPath $HotkeyPath) -or (Test-Path -LiteralPath $LegacyHotkeyPath)
 
     if (-not $copied) {
         Write-Step 'configuration left alone'
         Write-Detail 'the binaries were not copied, so mochic quickstart was not run'
     } elseif ($SkipQuickstart) {
         Write-Step 'configuration left alone (-SkipQuickstart)'
-    } elseif ((Test-Path -LiteralPath $script:ConfigPath) -and $haveHotkeys) {
-        Write-Step "configuration is already there: $script:ConfigPath"
+    } elseif ((Test-Path -LiteralPath $ConfigPath) -and $haveHotkeys) {
+        Write-Step "configuration is already there: $ConfigPath"
         Write-Detail "hotkeys are already there: $(Get-HotkeyPath)"
     } else {
         Write-Step 'creating a default configuration and hotkey file with mochic quickstart'
-        if ($PSCmdlet.ShouldProcess("$script:ConfigPath and $script:HotkeyPath", 'mochic quickstart')) {
+        if ($PSCmdlet.ShouldProcess("$ConfigPath and $HotkeyPath", 'mochic quickstart')) {
             try {
-                & (Join-Path $script:BinDir 'mochic.exe') quickstart
+                & (Join-Path $BinDir 'mochic.exe') quickstart
                 if ($LASTEXITCODE -ne 0) { throw "mochic quickstart exited with $LASTEXITCODE" }
             } catch {
                 Write-Detail "quickstart failed: $($_.Exception.Message)"
-                Write-Detail "write $script:ConfigPath by hand, see docs/configuration.md"
-                Write-Detail "and $script:HotkeyPath, see docs/hotkeys.md"
+                Write-Detail "write $ConfigPath by hand, see docs/configuration.md"
+                Write-Detail "and $HotkeyPath, see docs/hotkeys.md"
             }
         }
     }
@@ -559,33 +859,62 @@ function Install-Mochi {
     # have written: a dry run and a quickstart that failed both end here too.
     if (-not $copied) {
         Write-Step 'nothing was installed'
-        Write-Detail "binaries   would go to $script:BinDir"
-        Write-Detail 'autostart  scripts\autostart.ps1 -Enable, after a real run'
+        Write-Detail "binaries   would go to $BinDir"
         return
     }
 
     Save-InstallRoot -Root $InstallRoot
 
-    Write-Step 'done'
-    Write-Detail "binaries   $script:BinDir"
-    if (Test-Path -LiteralPath $script:ConfigPath) {
-        Write-Detail "config     $script:ConfigPath"
+    $mochic = Join-Path $BinDir 'mochic.exe'
+    if ($SkipAutostart) {
+        Write-Step 'start at login left alone (-SkipAutostart)'
     } else {
-        Write-Detail "config     not written, see docs/configuration.md for $script:ConfigPath"
+        Write-Step 'start at login'
+        Register-Autostart -Mochic $mochic
     }
-    if ((Test-Path -LiteralPath $script:HotkeyPath) -or (Test-Path -LiteralPath $script:LegacyHotkeyPath)) {
+    Write-Step 'Start menu shortcut'
+    New-StartMenuShortcut -Mochic $mochic
+
+    Write-Step 'done'
+    Write-Detail "binaries   $BinDir"
+    if (Test-Path -LiteralPath $ConfigPath) {
+        Write-Detail "config     $ConfigPath"
+    } else {
+        Write-Detail "config     not written, see docs/configuration.md for $ConfigPath"
+    }
+    if ((Test-Path -LiteralPath $HotkeyPath) -or (Test-Path -LiteralPath $LegacyHotkeyPath)) {
         Write-Detail "hotkeys    $(Get-HotkeyPath)"
     } else {
-        Write-Detail "hotkeys    not written, see docs/hotkeys.md for $script:HotkeyPath"
+        Write-Detail "hotkeys    not written, see docs/hotkeys.md for $HotkeyPath"
     }
-    Write-Detail "log        $script:LogPath"
-    Write-Detail 'autostart  scripts\autostart.ps1 -Enable'
+    Write-Detail "log        $LogPath"
+    Write-Detail "uninstall  & ([scriptblock]::Create((irm https://github.com/$Repo/releases/latest/download/install.ps1))) -Uninstall"
+
+    Write-Step 'the way out, before Mochi rearranges your windows'
+    Write-WayOut
+    if ($SkipStart) {
+        Write-Step 'not started (-SkipStart), start it from the Start menu or with: mochic start'
+    } else {
+        Write-Step 'starting Mochi'
+        Start-Mochi -Mochic $mochic
+    }
 }
 
 function Uninstall-Mochi {
-    Write-Step "removing binaries from $script:BinDir"
-    foreach ($binary in $script:Binaries) {
-        $path = Join-Path $script:BinDir $binary
+    # First, while mochic is still there to ask, and before the files go: a
+    # running mochi.exe cannot be deleted.
+    Write-Step 'stopping Mochi'
+    Stop-Mochi
+
+    Write-Step 'start at login'
+    Unregister-Autostart
+
+    Write-Step 'Start menu shortcut'
+    Remove-StartMenuShortcut
+
+    Write-Step "removing binaries from $BinDir"
+    foreach ($binary in $Binaries) {
+        $path = Join-Path $BinDir $binary
         if (Test-Path -LiteralPath $path) {
             if ($PSCmdlet.ShouldProcess($path, 'remove')) {
                 Remove-Item -LiteralPath $path -Force
@@ -599,7 +928,7 @@ function Uninstall-Mochi {
     # Only bin, and only when the loop above left it empty. <InstallRoot> is a
     # directory the user named and may have had long before Mochi: -InstallRoot
     # C:\Tools must not turn an uninstall into deleting C:\Tools.
-    $dir = $script:BinDir
+    $dir = $BinDir
     if ((Test-Path $dir) -and -not (Get-ChildItem -LiteralPath $dir -Force)) {
         if ($PSCmdlet.ShouldProcess($dir, 'remove empty directory')) {
             Remove-Item -LiteralPath $dir -Force
@@ -610,14 +939,13 @@ function Uninstall-Mochi {
         Write-Step 'user PATH left alone (-SkipPath)'
     } else {
         Write-Step 'user PATH'
-        Update-UserPath -Directory $script:BinDir -Remove
+        Update-UserPath -Directory $BinDir -Remove
     }
 
     Write-Step 'left in place on purpose'
-    Write-Detail "config     $script:ConfigPath"
+    Write-Detail "config     $ConfigPath"
     Write-Detail "hotkeys    $(Get-HotkeyPath)"
-    Write-Detail "log        $script:LogPath"
-    Write-Detail 'autostart  remove it with scripts\autostart.ps1 -Disable'
+    Write-Detail "log        $LogPath"
 }
 
 if ($Uninstall) {
@@ -627,7 +955,7 @@ if ($Uninstall) {
         if ($recorded -and $recorded -ne $InstallRoot) {
             Write-Step "using the recorded install location $recorded"
             $InstallRoot = $recorded
-            $script:BinDir = Join-Path $InstallRoot 'bin'
+            $BinDir = Join-Path $InstallRoot 'bin'
         }
     }
     Uninstall-Mochi
@@ -635,3 +963,4 @@ if ($Uninstall) {
 } else {
     Install-Mochi
 }
+} @args
