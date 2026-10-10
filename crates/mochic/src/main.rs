@@ -329,7 +329,7 @@ fn quickstart() -> Result<()> {
         .map(PathBuf::from)
         .context("USERPROFILE is not set")?;
 
-    write_unless_present(&profile.join("mochi.json"), DEFAULT_CONFIG)?;
+    write_unless_present(&profile.join("mochi.json"), &default_config())?;
 
     // The hotkey directory may already hold a file under the name a standalone
     // hotkey daemon uses, which is one of the names Mochi reads. Writing the
@@ -363,17 +363,24 @@ fn write_unless_present(path: &std::path::Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where Mochi is published. Every address the client writes out starts here.
+const SITE: &str = "https://get-mochi.vercel.app";
+
 /// The stub configuration `quickstart` writes.
 ///
 /// Kept minimal on purpose: `mochi-core` owns the schema and fills this in.
-const DEFAULT_CONFIG: &str = r#"{
-  "$schema": "https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/schema.json",
+fn default_config() -> String {
+    format!(
+        r#"{{
+  "$schema": "{SITE}/schema.json",
   "window_hiding_behaviour": "Cloak",
   "default_workspace_padding": 10,
   "default_container_padding": 10,
   "monitors": []
+}}
+"#
+    )
 }
-"#;
 
 /// How often a subscription checks that the daemon is still there.
 ///
@@ -1725,15 +1732,16 @@ mod tests {
 
     #[test]
     fn the_quickstart_stub_is_valid_json() {
-        let value: serde_json::Value = serde_json::from_str(DEFAULT_CONFIG).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&default_config()).unwrap();
         assert!(value.is_object());
+        assert_eq!(value["$schema"], "https://get-mochi.vercel.app/schema.json");
     }
 
     // --- check ----------------------------------------------------------
 
     #[test]
     fn a_good_file_is_usable_and_says_what_it_read() {
-        let found = check_config_text("mochi.json", DEFAULT_CONFIG);
+        let found = check_config_text("mochi.json", &default_config());
         assert!(found.errors.is_empty(), "{:?}", found.errors);
         assert!(found.warnings.is_empty(), "{:?}", found.warnings);
         assert!(
@@ -1975,7 +1983,7 @@ mod tests {
     fn an_application_rules_file_is_recognised_for_what_it_is() {
         let apps = r#"{ "Zoom": { "ignore": [{ "kind": "Exe", "id": "Zoom.exe" }] } }"#;
         assert!(looks_like_app_rules(apps));
-        assert!(!looks_like_app_rules(DEFAULT_CONFIG));
+        assert!(!looks_like_app_rules(&default_config()));
         // An empty object is neither, and is a configuration by default.
         assert!(!looks_like_app_rules("{}"));
         assert!(!looks_like_app_rules(
