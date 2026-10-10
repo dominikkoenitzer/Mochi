@@ -187,6 +187,40 @@ can ask `mochic` for JSON instead of text, as
 [docs/json-output.md](docs/json-output.md) describes. The log is
 `%LOCALAPPDATA%\mochi\mochi.log`.
 
+## Use it with an AI assistant
+
+`mochic mcp` is an MCP server. An AI assistant that speaks MCP can use it to
+see your monitors, workspaces and windows and to arrange them, through the same
+local pipe `mochic` uses. Add it to the client's MCP configuration with the full
+path to `mochic.exe`:
+
+```json
+{
+  "mcpServers": {
+    "mochi": {
+      "command": "C:\\Users\\you\\AppData\\Local\\Programs\\Mochi\\bin\\mochic.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Replace `you` with your Windows user name. With it, an assistant can:
+
+- read the state: every monitor, workspace and window, and which one has the
+  focus;
+- say why a window is or is not tiled;
+- list the hotkeys, and check `mochi.json` for errors even when Mochi will not
+  start;
+- focus a window, move one to another workspace, switch workspaces and set the
+  layout;
+- float a window or put it in monocle, retile, pause and resume tiling, and
+  reload the configuration.
+
+Nothing leaves the computer. The server makes no network connection, needs no
+account and sends no telemetry. No tool can stop Mochi, close a window or write
+a file. Every tool and what it answers is in [docs/mcp.md](docs/mcp.md).
+
 ## Importing an existing setup
 
 Config keys, command names and the hotkey file format follow the common tiling
