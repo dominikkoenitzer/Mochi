@@ -525,43 +525,32 @@ struct CheckRun {
 /// Reads the configuration, says what is wrong with it, and answers with the
 /// exit code the shell should see.
 fn check(explicit: Option<&Path>, json: bool) -> std::process::ExitCode {
+    if json {
+        return match check_document(explicit) {
+            Ok(out) => {
+                let usable = out.usable;
+                output::print(&out);
+                if usable {
+                    std::process::ExitCode::SUCCESS
+                } else {
+                    std::process::ExitCode::FAILURE
+                }
+            }
+            Err(failure) => {
+                output::print(&failure);
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+
     let (path, source) = match resolve_config_path(explicit) {
         Ok(pair) => pair,
         Err(e) => {
-            if json {
-                output::print(&ErrorOutput::new(ErrorCode::Config, format!("{e:#}")));
-            } else {
-                eprintln!("mochic: {e:#}");
-            }
+            eprintln!("mochic: {e:#}");
             return std::process::ExitCode::FAILURE;
         }
     };
     let run = check_run(&path, source);
-
-    if json {
-        let kind = if run.app_rules {
-            CheckKind::AppRules
-        } else {
-            CheckKind::Config
-        };
-        let out = CheckOutput::new(
-            run.label,
-            run.source,
-            kind,
-            run.unreadable,
-            run.found.headline,
-            run.found.errors,
-            run.found.warnings,
-            run.found.notes,
-        );
-        let usable = out.usable;
-        output::print(&out);
-        return if usable {
-            std::process::ExitCode::SUCCESS
-        } else {
-            std::process::ExitCode::FAILURE
-        };
-    }
 
     let label = run.label;
     println!("checking {label}\n  ({})", run.source);
@@ -582,6 +571,29 @@ fn check(explicit: Option<&Path>, json: bool) -> std::process::ExitCode {
         println!("  this is an application rules file, not a mochi.json");
     }
     report(&label, run.found)
+}
+
+/// The document `check --json` prints, or the error document when there is no
+/// configuration path at all. `mochic mcp` answers with the same one.
+fn check_document(explicit: Option<&Path>) -> std::result::Result<CheckOutput, ErrorOutput> {
+    let (path, source) = resolve_config_path(explicit)
+        .map_err(|e| ErrorOutput::new(ErrorCode::Config, format!("{e:#}")))?;
+    let run = check_run(&path, source);
+    let kind = if run.app_rules {
+        CheckKind::AppRules
+    } else {
+        CheckKind::Config
+    };
+    Ok(CheckOutput::new(
+        run.label,
+        run.source,
+        kind,
+        run.unreadable,
+        run.found.headline,
+        run.found.errors,
+        run.found.warnings,
+        run.found.notes,
+    ))
 }
 
 /// Checks the configuration at `path` and everything it points at, and prints
