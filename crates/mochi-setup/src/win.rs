@@ -159,6 +159,16 @@ pub fn is_elevated() -> bool {
 
 /// Whether a mochi.exe runs in this logon session.
 pub fn mochi_running() -> bool {
+    running(&["mochi.exe"])
+}
+
+/// Whether a mochi.exe or a mochic.exe runs in this logon session. Either one
+/// holds its file open, so neither can be replaced while it runs.
+pub fn any_mochi_running() -> bool {
+    running(&["mochi.exe", "mochic.exe"])
+}
+
+fn running(names: &[&str]) -> bool {
     unsafe {
         let mut session = 0;
         if ProcessIdToSessionId(GetCurrentProcessId(), &mut session).is_err() {
@@ -180,7 +190,7 @@ pub fn mochi_running() -> bool {
                 .position(|&c| c == 0)
                 .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
-            if name.eq_ignore_ascii_case("mochi.exe") {
+            if names.iter().any(|wanted| name.eq_ignore_ascii_case(wanted)) {
                 let mut theirs = 0;
                 if ProcessIdToSessionId(entry.th32ProcessID, &mut theirs).is_ok()
                     && theirs == session

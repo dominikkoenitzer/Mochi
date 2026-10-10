@@ -93,7 +93,7 @@ fn install(options: Options, layout: &Layout) -> i32 {
 
     // A running mochi.exe cannot be replaced, and asking it to stop puts
     // every window it was hiding back first.
-    if let Err(message) = stop_mochi(layout, Some(&payload)) {
+    if let Err(message) = stop_mochi(layout, Some(&payload), "open Mochi-Setup.exe again") {
         return fail(options, "Mochi is still running", &message);
     }
     if let Err(message) = put_binaries(&layout.bin, &payload) {
@@ -183,7 +183,7 @@ fn uninstall(options: Options, layout: &Layout) -> i32 {
     // Mochi whose files are about to go.
     note(unregister_autostart());
     remove_watchdog();
-    if let Err(message) = stop_mochi(layout, payload().as_ref()) {
+    if let Err(message) = stop_mochi(layout, payload().as_ref(), "uninstall Mochi again") {
         return fail(options, "Mochi is still running", &message);
     }
     note(remove_file(&layout.shortcut));
@@ -232,10 +232,29 @@ fn uninstall(options: Options, layout: &Layout) -> i32 {
 /// Asks a running Mochi to stop and waits until it has. The installed mochic
 /// speaks the running daemon's protocol best; the one inside this setup is
 /// the fallback when there is none.
-fn stop_mochi(layout: &Layout, payload: Option<&Payload>) -> Result<(), String> {
-    if !win::mochi_running() {
-        return Ok(());
+fn stop_mochi(layout: &Layout, payload: Option<&Payload>, retry: &str) -> Result<(), String> {
+    let mut temp = None;
+    if win::mochi_running() {
+        temp = ask_to_stop(layout, payload);
     }
+    // A mochic that was talking to the daemon, a subscriber or the watchdog's
+    // start, notices a moment later that it is gone. Its file cannot be
+    // replaced before it has.
+    let stopped = win::wait_for(Duration::from_secs(10), || !win::any_mochi_running());
+    if let Some(dir) = temp {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    if stopped {
+        Ok(())
+    } else {
+        Err(format!(
+            "Press alt + shift + e to stop it, close anything else that uses mochic, then {retry}."
+        ))
+    }
+}
+
+/// Sends the stop and returns the temporary folder it used, if any.
+fn ask_to_stop(layout: &Layout, payload: Option<&Payload>) -> Option<PathBuf> {
     let mut temp = None;
     let mochic = if layout.mochic().is_file() {
         layout.mochic()
@@ -253,15 +272,7 @@ fn stop_mochi(layout: &Layout, payload: Option<&Payload>) -> Result<(), String> 
         PathBuf::new()
     };
     let _ = win::run_hidden(&mochic, &["stop"]);
-    let stopped = win::wait_for(Duration::from_secs(10), || !win::mochi_running());
-    if let Some(dir) = temp {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-    if stopped {
-        Ok(())
-    } else {
-        Err("Press alt + shift + e to stop it, then open Mochi Setup again.".into())
-    }
+    temp
 }
 
 /// Both files are written next to their places first and only then moved
