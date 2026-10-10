@@ -104,6 +104,7 @@ A scratchpad is a window kept out of the layout and shown with one command. The
 | `subscribe` | name | Create a pipe of that name, register it, and print every event to stdout as one JSON line until Ctrl-C. The one command to watch what the daemon is doing. |
 | `subscribe-pipe` | name | Send every event to a named pipe the subscriber created itself, for a bar or a service that owns its own pipe. |
 | `unsubscribe-pipe` | name | Stop sending events to that pipe. |
+| `mcp` | none | Run an MCP server on stdin and stdout, for an AI assistant. An MCP client starts it with the full path to `mochic.exe` and the argument `mcp`, and it runs until the client goes away. Stdout carries only the protocol. It reaches the daemon over the same pipe as every other command, and no tool it offers can stop Mochi, close a window or write a file. [mcp.md](mcp.md) lists every tool. |
 
 ## Control
 
