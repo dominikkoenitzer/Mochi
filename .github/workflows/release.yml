@@ -81,6 +81,11 @@ jobs:
       - name: Build
         run: cargo build --locked --release --workspace
 
+      # The zip and its checksum carry no version in their name. The one line
+      # install fetches releases/latest/download/<name>, and that only works
+      # when every release ships the same name. The version is on the release
+      # and in `mochi --version`. The workflow artifact keeps it in its name so
+      # branch builds stay apart.
       - name: Stage binaries
         shell: pwsh
         run: |
@@ -94,12 +99,14 @@ jobs:
                   $tag = "${{ github.ref_name }}-$("${{ github.sha }}".Substring(0, 7))"
               }
           }
-          $name = "Mochi-$tag-$env:TARGET"
+          $artifact = "Mochi-$tag-$env:TARGET"
+          $name = "Mochi-$env:TARGET"
           $stage = Join-Path $env:GITHUB_WORKSPACE "dist/$name"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target/release/mochi.exe" $stage
           Copy-Item "target/release/mochic.exe" $stage
           $forward = $stage.Replace('\', '/')
+          "ARTIFACT_NAME=$artifact" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "PACKAGE_NAME=$name" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "STAGE_DIR=$forward" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -157,6 +164,8 @@ jobs:
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           $zip = "dist/$env:PACKAGE_NAME.zip"
+          # The contents, not the folder: install.ps1 expects the binaries at
+          # the root of the zip.
           Compress-Archive -Path "$env:STAGE_DIR/*" -DestinationPath $zip -Force
           $hash = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
           # LF, not CRLF: `sha256sum -c` takes the whole rest of the line as
@@ -171,13 +180,15 @@ jobs:
       - name: Upload the zip as a workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.PACKAGE_NAME }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: |
             dist/${{ env.PACKAGE_NAME }}.zip
             dist/${{ env.PACKAGE_NAME }}.zip.sha256
           if-no-files-found: error
           retention-days: 14
 
+      # install.ps1 rides along so that releases/latest/download/install.ps1
+      # is always the installer that matches the newest zip.
       - name: Publish release
         if: github.ref_type == 'tag' || inputs.tag != ''
         uses: softprops/action-gh-release@v3
@@ -188,3 +199,4 @@ jobs:
           files: |
             dist/${{ env.PACKAGE_NAME }}.zip
             dist/${{ env.PACKAGE_NAME }}.zip.sha256
+            scripts/install.ps1
