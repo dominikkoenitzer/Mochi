@@ -33,8 +33,8 @@ now and at every login. The PowerShell line and the zip are under
 - Ignores, floats, manages or places windows by rules on their exe, class,
   title or path.
 - Draws window borders and nothing else on screen, and can fade unfocused
-  windows and animate moves. Every visual setting has a command that takes
-  effect at once.
+  windows and animate moves. Commands turn borders, transparency and
+  animations on and off at once, without a reload.
 - Binds its own keys, with binding modes, a pause key and a game mode that
   gives a game every key.
 
@@ -114,9 +114,9 @@ To update, download and open `Mochi-Setup.exe` again. It stops the running
 Mochi first and leaves your settings and hotkeys alone.
 
 To remove Mochi, open Settings, Apps, Installed apps, and uninstall Mochi. It
-stops Mochi, which puts every window back, then removes the login start, the
-watchdog task if there is one, the Start menu entry, the program files, the
-PATH entry and the Apps & features entry. Your settings, hotkeys and log stay.
+removes the login start and the watchdog task if there is one, stops Mochi,
+which puts every window back, and then removes the Start menu entry, the
+program files, the PATH entry and the Apps & features entry. Your settings, hotkeys and log stay.
 To remove those too, delete `%USERPROFILE%\mochi.json`,
 `%USERPROFILE%\.config\mochi` and `%LOCALAPPDATA%\mochi` afterwards.
 
@@ -126,7 +126,8 @@ To remove those too, delete `%USERPROFILE%\mochi.json`,
 
 `Mochi-Setup.exe --quiet` installs without asking, and
 `Mochi-Setup.exe --uninstall --quiet` removes Mochi the same way. Both exit with
-0 when everything worked.
+0 when everything worked. Setup is a windowed program, so a script that needs
+the exit code starts it with `Start-Process -Wait -PassThru`.
 
 ### PowerShell
 
@@ -141,7 +142,8 @@ It works in Windows PowerShell 5.1 and PowerShell 7. It downloads the
 [latest release](https://github.com/dominikkoenitzer/Mochi/releases/latest),
 checks its SHA256 and installs the same way Setup does: the same folder, PATH
 entry, default files, login start and Start menu entry, and then it starts
-Mochi right away, which tiles every window on screen.
+Mochi right away, which tiles every window on screen. It adds no Apps & features
+entry; `-Uninstall` below removes what it installed.
 
 The same line in this form takes switches:
 
@@ -226,16 +228,16 @@ The full reference is [docs/hotkeys.md](docs/hotkeys.md).
 
 ## Running it from a terminal
 
-Look before you leap. A dry run reads the desktop and writes nothing at all: no
+Look before you leap. A dry run reads the desktop and changes nothing on it: no
 window is moved, cloaked, focused or closed, it takes no control pipe and it
 binds no keys, so it is safe to run while another window manager, or another
-Mochi, is managing the screen.
+Mochi, is managing the screen. It only writes its log.
 
 ```
 mochi --dry-run
 ```
 
-Every line it prints starting `dry-run:` is something it would have done. When
+Every line it prints with `dry-run:` in it is something it would have done. When
 that looks right, start it for real, and stop it when you want your desktop
 back:
 
@@ -266,13 +268,15 @@ It explains what Mochi makes of the window in front and what can be done about
 it, in plain words. Every answer names either a fix or the reason there is
 nothing to fix.
 
-The log is `%LOCALAPPDATA%\mochi\mochi.log`.
+The log is in `%LOCALAPPDATA%\mochi`, one `mochi.log.<date>` file per day, and
+the last 14 days are kept.
 
 ## Importing an existing setup
 
 Config keys, command names and the hotkey file format follow the common tiling
 window manager conventions, so an existing JSON config and hotkey file carry over
-with a rename. `.\scripts\import-config.ps1` shows the diff and `-Apply` writes
+with a rename. Given the old config file, the old hotkey file and the old
+command name, `scripts\import-config.ps1` shows the diff, and `-Apply` writes
 the new files next to the old ones. Nothing the old setup owns is changed, and
 two commands switch back at any time.
 
@@ -316,7 +320,7 @@ cargo build --release --locked
 `rust-toolchain.toml` selects the stable toolchain with rustfmt and clippy, and
 rustup fetches it on the first `cargo` call. The oldest Rust that builds Mochi
 is 1.96, the `rust-version` in `Cargo.toml`. The first build takes a few
-minutes. Every one after that is seconds.
+minutes.
 
 Both exes are self-contained: the C runtime is linked in, so they run on any
 Windows PC without installing a runtime.
