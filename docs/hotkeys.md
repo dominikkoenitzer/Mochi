@@ -107,8 +107,9 @@ alt + b                 : [console]::beep(440,200)
 
 ### Modes
 
-A `mode` block holds keys that work only while that mode is on. `mode <name>` on the right of a binding switches to
-it, and `mode default` switches back to the keys outside every block:
+A `mode` block holds keys that work only while that mode is on. `mode <name>`
+on the right of a binding switches to it, and `mode default` switches back to
+the keys outside every block:
 
 ```
 alt + shift + s         : mode resize
