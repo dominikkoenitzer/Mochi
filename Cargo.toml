@@ -8,6 +8,7 @@ members = [
     "crates/mochic",
     "crates/mochi-testbed",
     "crates/mochi-render",
+    "crates/mochi-setup",
 ]
 
 [workspace.package]
