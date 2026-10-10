@@ -81,7 +81,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Options, S
             "quiet" | "q" | "s" | "silent" => options.quiet = true,
             _ => {
                 return Err(format!(
-                    "unknown option {}\n\n{USAGE}",
+                    "Unknown option: {}\n\nUse: {USAGE}",
                     arg.to_string_lossy()
                 ));
             }

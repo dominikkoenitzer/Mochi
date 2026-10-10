@@ -164,6 +164,7 @@ fn install(options: Options, layout: &Layout) -> i32 {
         }
         Err(message) => {
             problems.push(message);
+            problems.push("Open Mochi from the Start menu to try again.".into());
             win::tell(
                 "Mochi is installed but did not start",
                 &problems.join("\n"),
@@ -328,7 +329,8 @@ fn put_binaries(bin: &Path, payload: &Payload) -> Result<(), String> {
 fn keep_setup_copy(layout: &Layout, current: Option<&Path>) -> Result<(), String> {
     let Some(current) = current else {
         return Err(
-            "Setup could not find its own file, so Apps & features cannot remove Mochi.".into(),
+            "Setup could not find its own file, so Mochi cannot be removed from Settings, Apps."
+                .into(),
         );
     };
     if plan::same_path(current, &layout.setup_copy) {
@@ -446,11 +448,17 @@ fn start_mochi(layout: &Layout) -> Result<(), String> {
     if win::is_elevated() {
         // Mochi must not inherit administrator rights, and Explorer opens the
         // Start menu entry at the user's normal ones.
+        if !layout.shortcut.is_file() {
+            return Err(
+                "Setup runs as administrator and has no Start menu entry to start Mochi through."
+                    .into(),
+            );
+        }
         win::open_with_explorer(&layout.shortcut).map_err(|e| format!("starting Mochi: {e}"))?;
         return if win::wait_for(Duration::from_secs(10), win::mochi_running) {
             Ok(())
         } else {
-            Err("Mochi did not come up within 10 seconds. Open Mochi from the Start menu.".into())
+            Err("Mochi did not come up within 10 seconds.".into())
         };
     }
     match win::run_hidden(&layout.mochic(), &["start"]) {

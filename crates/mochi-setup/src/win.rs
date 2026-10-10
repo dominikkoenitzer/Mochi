@@ -36,7 +36,7 @@ use windows::Win32::UI::Shell::{
     FOLDERID_Programs, IShellLinkW, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellLink,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_BROADCAST, IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_OKCANCEL, MessageBoxW,
+    HWND_BROADCAST, IDCANCEL, IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_OKCANCEL, MessageBoxW,
     SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
 use windows_core::{HSTRING, Interface, PCWSTR};
@@ -45,7 +45,7 @@ use crate::plan::RegValue;
 
 /// Console programs started from here would each open a console window.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const TITLE: &str = "Mochi";
+const TITLE: &str = "Mochi Setup";
 const ID_ACCEPT: i32 = 100;
 
 fn wide(text: &str) -> Vec<u16> {
@@ -65,7 +65,7 @@ pub fn ask(instruction: &str, content: &str, accept: &str) -> bool {
             pszButtonText: PCWSTR(accept_w.as_ptr()),
         },
         TASKDIALOG_BUTTON {
-            nButtonID: 2,
+            nButtonID: IDCANCEL.0,
             pszButtonText: PCWSTR(cancel_w.as_ptr()),
         },
     ];
