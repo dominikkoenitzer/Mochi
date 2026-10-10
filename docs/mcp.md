@@ -1,9 +1,9 @@
 # MCP server
 
 `mochic mcp` lets an AI assistant see and arrange your windows. It is an MCP
-server on stdin and stdout, the stdio transport, and it reaches the daemon over
-the same local named pipe every other `mochic` command uses. An MCP client
-starts it and talks to it; there is no reason to run it by hand.
+server on stdin and stdout, the stdio transport. It reaches the daemon over the
+same local named pipe as every other `mochic` command. An MCP client starts it
+and talks to it; there is no reason to run it by hand.
 
 ## Setup
 
@@ -32,7 +32,7 @@ terminal does not.
 
 The server starts whether Mochi is running or not, and runs until the client
 goes away. Stdout carries only the protocol. Everything else the server has to
-say goes to stderr, which most clients keep in their log.
+say goes to stderr.
 
 ## What it can and cannot do
 
@@ -55,8 +55,8 @@ Monitor and workspace indexes are zero-based, as in the state document and on
 the command line.
 
 The server tells its client the same when it connects: call `get_state` first,
-use the `hwnd` numbers as window ids, and count monitors and workspaces from
-zero.
+use the `hwnd` numbers as window ids, count monitors and workspaces from zero,
+and read the state again after a change.
 
 ## Tools
 
@@ -85,7 +85,15 @@ their own, and every one of those has these two fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `ok` | boolean | Always true. A failure is a tool error instead, see [Errors](#errors). |
-| `sent` | array of strings | The commands the tool sent to the daemon, in order. |
+| `sent` | array of strings | The commands the tool sent to the daemon, in order, by name and without their arguments, for example `focus-workspace` or `cycle-focus`. |
+
+`move_window_to_workspace`, `toggle_float` and `toggle_monocle` take an
+optional `window`. Given one, the tool first focuses it the way `focus_window`
+does, which shows its workspace, and then acts on it. Without one, it acts on
+the focused window.
+
+Tool calls run one at a time, so another call cannot move the focus between
+those two steps.
 
 ### get_state
 
@@ -101,7 +109,8 @@ window, and whether management is paused. Every field is in
 |---|---|---|
 | `window` | number, optional | The window to explain. Without it, the window in front. |
 
-Answers with the document `mochic why --json` prints: `hwnd` as a hex string,
+Answers with a document shaped like the one `mochic why --json` prints: `hwnd`
+as a hex string,
 `title`, `exe`, `class`, `managed`, `monitor` and `workspace` when it is
 managed, `reason` when it is not, and the other fields when they apply. Every
 field and every reason is in [json-output.md](json-output.md#why).
@@ -156,9 +165,9 @@ the tool shows its workspace and then answers with an error that says so.
 | `window` | number, optional | The window to move. Without it, the focused window. |
 | `workspace` | number | The workspace index on the window's monitor, zero-based. |
 | `workspace_name` | string | The workspace with that name, on any monitor. |
-| `follow` | boolean, optional | False by default: the focus stays where it is. True: the view follows the window. |
+| `follow` | boolean, optional | False by default: the screen stays as it is. True: the view follows the window to its new workspace. |
 
-Give `workspace` or `workspace_name`.
+Give `workspace` or `workspace_name`, not both.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -174,10 +183,11 @@ Give `workspace` or `workspace_name`.
 |---|---|---|
 | `workspace` | number | The workspace index, zero-based. |
 | `monitor` | number, optional | The monitor of that workspace. Without it, the focused monitor. |
-| `name` | string | The workspace with that name. |
+| `name` | string | The workspace with that name, on whichever monitor it is. |
 
-Give `workspace`, with `monitor` when it is on another monitor, or `name`.
-Answers with `ok` and `sent`.
+Give `workspace`, with `monitor` when it is on another monitor, or `name`, not
+both. A name already says which monitor, so `name` takes no `monitor`. Answers
+with `ok` and `sent`.
 
 ### set_layout
 
@@ -185,8 +195,9 @@ Answers with `ok` and `sent`.
 |---|---|---|
 | `layout` | string | `bsp`, `columns`, `rows`, `vertical-stack`, `horizontal-stack`, `ultrawide-vertical-stack` or `grid`. |
 
-Sets the layout of the focused workspace. Answers with `ok`, `layout` (the
-layout set) and `sent`.
+Sets the layout of the focused workspace. To change another workspace, switch
+to it first. Answers with `ok`, `layout` (the layout set, spelled as given, for
+example `vertical-stack`) and `sent`.
 
 ### toggle_float
 
@@ -225,8 +236,8 @@ is paused, Mochi leaves every window where it is.
 
 ### resume_tiling
 
-No arguments. Resumes window management, which puts every window back in its
-tile. Answers like `pause_tiling`, with `paused` false; `changed` is false when
+No arguments. Resumes window management and retiles. Answers like
+`pause_tiling`, with `paused` false; `changed` is false when
 management was not paused.
 
 ### reload_config
@@ -252,6 +263,13 @@ Mochi is not running. Start it from the Start menu, or run `mochic start` in a t
 | When | The tool answers |
 |---|---|
 | Mochi is not running. | The message above. |
-| Mochi refuses a command. | An error with Mochi's message. |
+| Mochi refuses a command. | An error that names the command and carries Mochi's message. |
+| A window id names no window Mochi manages, for example one that has closed. | An error that says so and asks for `get_state` again. |
+| Both or neither of `workspace` and `workspace_name` are given, or of `workspace` and `name`. | An error that says which to give. |
 | `why_not_tiled` is asked about an unmanaged window that is not in front. | An error: bring the window to the front and call again without `window`. |
-| `focus_window` is given a floating window. | Its workspace is shown, then an error says that Mochi cannot focus one floating window. |
+| `focus_window` is given a floating window. | Its workspace is shown, then an error says that Mochi has no command that focuses one floating window. |
+| A monocle, a maximized window or a floating window keeps the focus from reaching the window. | An error that says so and points to `get_state`. |
+| `check_config` finds no configuration path at all. | An error, where `mochic check --json` prints one with the code `config`. |
+
+A tool that fails after it has sent commands ends its message with
+`(already sent: ...)` and their names, so the client knows what has changed.
