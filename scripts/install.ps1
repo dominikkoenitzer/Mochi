@@ -338,7 +338,7 @@ function Resolve-ReleaseTag {
         $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
         return $release.tag_name
     } catch {
-        throw "could not find the latest release of $Repo ($($_.Exception.Message)). Pass a tag such as -Version v0.1.20."
+        throw "could not find the latest Mochi release ($($_.Exception.Message)). Pass a tag such as -Version v0.1.20."
     }
 }
 
@@ -368,12 +368,12 @@ function Save-ReleaseAsset {
     $base = "https://github.com/$Repo/releases/download/$Tag"
     $work = Join-Path $env:TEMP "mochi-install-$Tag"
 
-    Write-Step "downloading release $Tag from $Repo"
+    Write-Step "downloading Mochi $Tag"
 
     # A download is megabytes on disk and a request to GitHub, so it is an
     # action, not a preparation: -WhatIf and a declined -Confirm stop here
     # rather than after the bytes have already landed in %TEMP%.
-    if (-not $PSCmdlet.ShouldProcess("$Tag from $Repo", 'download and extract')) {
+    if (-not $PSCmdlet.ShouldProcess("Mochi $Tag", 'download and extract')) {
         Write-Detail 'skipped, nothing was downloaded'
         $acquired.SourceDir = $null
         return
@@ -422,7 +422,7 @@ function Save-ReleaseAsset {
         break
     }
     if (-not $zip) {
-        throw ("could not download release $Tag from $Repo. Check the tag exists, or build from source by leaving -Version off.`n" +
+        throw ("could not download Mochi $Tag. Check the tag exists, or build from source by leaving -Version off.`n" +
                ($failures -join "`n"))
     }
     if (-not $haveSum) {
