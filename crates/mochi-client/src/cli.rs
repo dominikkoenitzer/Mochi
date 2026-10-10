@@ -47,7 +47,7 @@ pub enum Cmd {
         /// Start the daemon with no keys bound
         #[arg(long, conflicts_with = "hotkeys")]
         no_hotkeys: bool,
-        /// Start the daemon in dry-run mode, which moves nothing
+        /// Run a dry run in this terminal until Ctrl-C; it moves nothing
         #[arg(long)]
         dry_run: bool,
     },

@@ -110,7 +110,7 @@ A scratchpad is a window kept out of the layout and shown with one command. The
 
 | Command | Arguments | Does |
 |---|---|---|
-| `start` | `--config PATH`, `--hotkeys PATH`, `--no-hotkeys`, `--dry-run` | Start the daemon, hotkeys and all. Every switch is handed straight to `mochi`; they mean what the table under "Daemon switches" says. |
+| `start` | `--config PATH`, `--hotkeys PATH`, `--no-hotkeys`, `--dry-run` | Start the daemon, hotkeys and all. Every switch is handed straight to `mochi`; they mean what the table under "Daemon switches" says. With `--dry-run` nothing is started in the background: the dry run runs in this terminal, prints what it would do, and ends with Ctrl-C or when the terminal closes. |
 | `stop` | none | Put back every window Mochi took off screen, clear the transparency it set, then exit. Windows keep the size and place of their last tile. |
 | `toggle-pause` | none | Stop and resume management without exiting. |
 | `retile` | none | Recompute and apply every layout. |

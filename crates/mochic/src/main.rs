@@ -344,27 +344,19 @@ fn start(
     no_hotkeys: bool,
     dry_run: bool,
 ) -> Result<()> {
-    if mochi_client::is_running() {
-        println!("mochi is already running");
-    } else {
-        let mut args = Vec::new();
-        if dry_run {
-            args.push("--dry-run".to_owned());
-        }
-        if let Some(path) = config {
-            args.push("--config".to_owned());
-            args.push(path.display().to_string());
-        }
-        if let Some(path) = hotkeys {
-            args.push("--hotkeys".to_owned());
-            args.push(path.display().to_string());
-        }
-        if no_hotkeys {
-            args.push("--no-hotkeys".to_owned());
-        }
-        process::start_daemon(&args)?;
+    let mut args = Vec::new();
+    if let Some(path) = config {
+        args.push("--config".to_owned());
+        args.push(path.display().to_string());
     }
-    Ok(())
+    if let Some(path) = hotkeys {
+        args.push("--hotkeys".to_owned());
+        args.push(path.display().to_string());
+    }
+    if no_hotkeys {
+        args.push("--no-hotkeys".to_owned());
+    }
+    process::start(&process::System, &args, dry_run)
 }
 
 fn quickstart() -> Result<()> {
