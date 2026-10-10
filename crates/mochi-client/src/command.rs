@@ -261,7 +261,8 @@ pub enum Command {
     ToggleGameMode,
     /// Re-read the configuration file.
     ReloadConfiguration,
-    /// Show every window Mochi is hiding, without stopping.
+    /// Put back every window that is off screen with nothing in the daemon
+    /// state to explain it. Hidden workspaces stay hidden.
     RestoreWindows,
     /// Recompute and re-apply every layout.
     Retile,

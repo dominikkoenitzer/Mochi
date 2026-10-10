@@ -51,7 +51,7 @@ pub enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Stop the daemon and restore all windows
+    /// Stop the daemon and put back every window it took off screen
     Stop,
     /// Write a starting mochi.json and hotkey file, if there is none
     Quickstart,
@@ -80,7 +80,7 @@ pub enum Cmd {
     ToggleGameMode,
     /// Re-read the configuration file and the hotkey file
     ReloadConfiguration,
-    /// Show every window Mochi is hiding, without stopping it
+    /// Put back windows left off screen that no workspace accounts for
     RestoreWindows,
     /// Recompute and re-apply every layout
     Retile,

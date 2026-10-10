@@ -247,11 +247,12 @@ mochic stop
 ```
 
 `mochic stop` puts every window it was hiding back on screen, takes the borders
-down, restores transparency and unbinds the keys, so stopping Mochi leaves the
-desktop the way it found it. Nothing is left behind even if it is killed
+down, restores transparency and unbinds the keys. The windows keep the size and
+place of their last tile. Nothing is left off screen even if Mochi is killed
 outright: every window taken off screen is written down first, and the next
 start puts back anything the record still owes. While it is running,
-`mochic restore-windows` does the same on demand.
+`mochic restore-windows` puts back any window that is off screen with nothing
+in Mochi's state to explain it; the windows of hidden workspaces stay hidden.
 
 Mochi runs as a normal user and wants no admin rights. Windows therefore will
 not let it move a window that belongs to a program running as administrator. It
