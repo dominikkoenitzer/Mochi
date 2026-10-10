@@ -241,8 +241,17 @@ cargo test --workspace
 
 `rust-toolchain.toml` pins the toolchain, so rustup fetches the right one on the
 first `cargo` call. The first build takes a few minutes. Every one after that is
-seconds. The tests are optional and safe to run on the desktop you work in: the
-end to end tests, which drive real windows, only run when `MOCHI_E2E` is set.
+seconds. The tests are optional, and `cargo test --workspace` does touch the
+desktop you work in. The `mochi-testbed` tests open real windows and try to move
+the focus between them. The `mochi` tests start the built `mochi.exe --dry-run`
+for about ten seconds and install global keyboard and window event hooks. None
+of that waits for an environment variable. Only the end to end tests, which
+drive real windows through the daemon, wait for `MOCHI_E2E`. To run just the
+tests that touch no window, leave those two crates out:
+
+```
+cargo test --locked -p mochi-core -p mochi-hotkey -p mochi-render -p mochi-client -p mochic
+```
 
 Both exes are self-contained: the C runtime is linked in, so they run on any
 Windows PC without installing a runtime.
