@@ -264,18 +264,28 @@ fn stop_mochi(layout: &Layout, payload: Option<&Payload>) -> Result<(), String> 
     }
 }
 
-/// Each file is written next to its place and then moved over the old one,
-/// so a failed write never leaves half a program behind.
+/// Both files are written next to their places first and only then moved
+/// over the old ones, so a full disk never leaves a new mochi.exe beside an
+/// old mochic.exe.
 fn put_binaries(bin: &Path, payload: &Payload) -> Result<(), String> {
     std::fs::create_dir_all(bin).map_err(|e| format!("creating {}: {e}", bin.display()))?;
-    for (name, bytes) in [("mochi.exe", payload.mochi), ("mochic.exe", payload.mochic)] {
-        let target = bin.join(name);
-        let staged = bin.join(format!("{name}.new"));
-        let result =
-            std::fs::write(&staged, bytes).and_then(|()| std::fs::rename(&staged, &target));
-        if let Err(e) = result {
-            let _ = std::fs::remove_file(&staged);
-            return Err(format!("writing {}: {e}", target.display()));
+    let files = [("mochi.exe", payload.mochi), ("mochic.exe", payload.mochic)];
+    let staged = |name: &str| bin.join(format!("{name}.new"));
+    let clean_up = || {
+        for (name, _) in files {
+            let _ = std::fs::remove_file(staged(name));
+        }
+    };
+    for (name, bytes) in files {
+        if let Err(e) = std::fs::write(staged(name), bytes) {
+            clean_up();
+            return Err(format!("writing {}: {e}", bin.join(name).display()));
+        }
+    }
+    for (name, _) in files {
+        if let Err(e) = std::fs::rename(staged(name), bin.join(name)) {
+            clean_up();
+            return Err(format!("replacing {}: {e}", bin.join(name).display()));
         }
     }
     Ok(())
