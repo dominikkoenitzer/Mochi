@@ -44,7 +44,7 @@ a Start menu shortcut. Open a new shell afterwards so the PATH is picked up.
 To install the latest release instead of building it, without a checkout:
 
 ```
-& ([scriptblock]::Create((irm https://github.com/dominikkoenitzer/Mochi/releases/latest/download/install.ps1))) -SkipStart -SkipAutostart -SkipQuickstart
+& ([scriptblock]::Create((irm https://get-mochi.vercel.app/install.ps1))) -SkipStart -SkipAutostart -SkipQuickstart
 ```
 
 The scripts in steps 2 and 5 still come from the checkout.
@@ -171,7 +171,7 @@ And to remove Mochi completely:
 or without a checkout:
 
 ```
-& ([scriptblock]::Create((irm https://github.com/dominikkoenitzer/Mochi/releases/latest/download/install.ps1))) -Uninstall
+& ([scriptblock]::Create((irm https://get-mochi.vercel.app/install.ps1))) -Uninstall
 ```
 
 That stops Mochi and removes the `Mochi` Run value, the `MochiWatchdog` task,
