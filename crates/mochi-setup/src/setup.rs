@@ -42,9 +42,9 @@ pub fn run() -> i32 {
         }
     };
     // A second double click while the first setup is busy: that one is
-    // already on screen.
+    // already on screen. A script, though, must not read this as done.
     if !win::first_instance() {
-        return 0;
+        return i32::from(options.quiet);
     }
     let Some(layout) = layout() else {
         return fail(
