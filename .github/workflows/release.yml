@@ -158,6 +158,31 @@ jobs:
         shell: bash
         run: ./target/release/mochic.exe schema > "$STAGE_DIR/mochi.schema.json"
 
+      # The download for everyone who has never opened a terminal: one exe
+      # that carries the two binaries checked above and installs them on a
+      # double click. It is built after them because it embeds those very
+      # files; without MOCHI_SETUP_PAYLOAD the build makes a setup that only
+      # says it has nothing inside. Like the zip, its name carries no version,
+      # so releases/latest/download/Mochi-Setup.exe always works.
+      - name: Build Mochi-Setup.exe
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $env:MOCHI_SETUP_PAYLOAD = $env:STAGE_DIR
+          cargo build --locked --release -p mochi-setup
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+          $setup = 'dist/Mochi-Setup.exe'
+          Copy-Item 'target/release/mochi-setup.exe' $setup
+          # A setup no bigger than what it should carry was built without it.
+          $payload = (Get-Item "$env:STAGE_DIR/mochi.exe").Length + (Get-Item "$env:STAGE_DIR/mochic.exe").Length
+          $size = (Get-Item $setup).Length
+          if ($size -le $payload) { throw "Mochi-Setup.exe is $size bytes, no more than the $payload bytes it should carry" }
+          Write-Output "Mochi-Setup.exe is $size bytes and carries $payload bytes of Mochi"
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $setup).Hash.ToLower()
+          [System.IO.File]::WriteAllText("$env:GITHUB_WORKSPACE/$setup.sha256", "$hash  Mochi-Setup.exe`n", [System.Text.UTF8Encoding]::new($false))
+          Get-Content "$setup.sha256"
+
       - name: Package
         shell: pwsh
         run: |
@@ -184,6 +209,8 @@ jobs:
           path: |
             dist/${{ env.PACKAGE_NAME }}.zip
             dist/${{ env.PACKAGE_NAME }}.zip.sha256
+            dist/Mochi-Setup.exe
+            dist/Mochi-Setup.exe.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -197,6 +224,8 @@ jobs:
           name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
           files: |
+            dist/Mochi-Setup.exe
+            dist/Mochi-Setup.exe.sha256
             dist/${{ env.PACKAGE_NAME }}.zip
             dist/${{ env.PACKAGE_NAME }}.zip.sha256
             scripts/install.ps1
