@@ -832,3 +832,815 @@ pub fn serve() -> Result<()> {
         Ok(())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    use tokio::io::{
+        AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf, WriteHalf,
+    };
+
+    /// A daemon that answers from a script and remembers what it was sent.
+    #[derive(Default)]
+    struct Fake {
+        stopped: bool,
+        /// Successive answers to `state`; the last one repeats.
+        states: Mutex<VecDeque<Value>>,
+        paused: bool,
+        why: Value,
+        /// A command the daemon refuses, by its wire name, and with what.
+        refuse: Option<(&'static str, &'static str)>,
+        sent: Mutex<Vec<Command>>,
+    }
+
+    impl Fake {
+        fn with_states(states: impl IntoIterator<Item = Value>) -> Self {
+            Fake {
+                states: Mutex::new(states.into_iter().collect()),
+                why: json!({
+                    "hwnd": "0x99",
+                    "title": "Overlay",
+                    "exe": "overlay.exe",
+                    "class": "O",
+                    "managed": false,
+                    "reason": "tool window",
+                    "overridable": true,
+                }),
+                ..Fake::default()
+            }
+        }
+
+        fn sent(&self) -> Vec<Command> {
+            self.sent.lock().unwrap().clone()
+        }
+    }
+
+    impl Daemon for Fake {
+        fn send(&self, command: &Command) -> mochi_client::Result<Response> {
+            if self.stopped {
+                return Err(mochi_client::Error::NotRunning);
+            }
+            self.sent.lock().unwrap().push(command.clone());
+            if let Some((name, message)) = self.refuse
+                && command.name() == name
+            {
+                return Err(mochi_client::Error::Daemon(message.to_owned()));
+            }
+            Ok(match command {
+                Command::State => {
+                    let mut states = self.states.lock().unwrap();
+                    let state = if states.len() > 1 {
+                        states.pop_front().unwrap()
+                    } else {
+                        states.front().cloned().unwrap_or_default()
+                    };
+                    Response::State { state }
+                }
+                Command::Query {
+                    target: QueryTarget::Paused,
+                } => Response::Query {
+                    answer: json!(self.paused),
+                },
+                Command::Why => Response::Why {
+                    why: self.why.clone(),
+                },
+                Command::Hotkeys => Response::Hotkeys {
+                    hotkeys: json!({
+                        "path": null,
+                        "gate": "all",
+                        "errors": [],
+                        "bindings": [{ "keys": "alt + h", "command": "focus left" }],
+                    }),
+                },
+                _ => Response::Ok,
+            })
+        }
+    }
+
+    fn window(hwnd: u64, title: &str) -> Value {
+        json!({ "hwnd": hwnd, "title": title, "exe": format!("{title}.exe"), "class": "C" })
+    }
+
+    fn container(windows: &[Value], showing: u64) -> Value {
+        json!({ "windows": windows, "focused_window": showing, "stack": windows.len() > 1 })
+    }
+
+    /// Two monitors. Monitor 0 has workspace 0 with three containers, the
+    /// third a stack of 0x30 and 0x31, and workspace 1 with a floating 0x40.
+    /// Monitor 1 shows workspace 0 with 0x50 in monocle.
+    fn desktop(focused_monitor: u64, shown: u64, focused_container: u64, focused: u64) -> Value {
+        json!({
+            "paused": false,
+            "focused_monitor": focused_monitor,
+            "focused_window": focused,
+            "foreground_window": 0x99,
+            "monitors": [
+                {
+                    "focused_workspace": shown,
+                    "workspaces": [
+                        {
+                            "name": "1",
+                            "layout": "BSP",
+                            "focused_container": focused_container,
+                            "containers": [
+                                container(&[window(0x10, "editor")], 0x10),
+                                container(&[window(0x20, "browser")], 0x20),
+                                container(&[window(0x30, "chat"), window(0x31, "mail")], 0x30),
+                            ],
+                            "monocle_container": null,
+                            "maximized_window": null,
+                            "floating_windows": [],
+                        },
+                        {
+                            "name": "2",
+                            "layout": "Columns",
+                            "focused_container": 0,
+                            "containers": [],
+                            "monocle_container": null,
+                            "maximized_window": null,
+                            "floating_windows": [window(0x40, "calculator")],
+                        },
+                    ],
+                },
+                {
+                    "focused_workspace": 0,
+                    "workspaces": [
+                        {
+                            "name": "3",
+                            "layout": "Rows",
+                            "focused_container": 0,
+                            "containers": [],
+                            "monocle_container": container(&[window(0x50, "player")], 0x50),
+                            "maximized_window": null,
+                            "floating_windows": [],
+                        },
+                    ],
+                },
+            ],
+        })
+    }
+
+    fn checker() -> Arc<Checker> {
+        Arc::new(|path: Option<PathBuf>| match path {
+            Some(p) if p.to_string_lossy().contains("missing") => {
+                Err(format!("{} does not exist", p.display()))
+            }
+            p => Ok(json!({
+                "version": "0.1.0",
+                "path": p.map_or_else(
+                    || "C:\\Users\\you\\mochi.json".to_owned(),
+                    |p| p.display().to_string(),
+                ),
+                "source": "the default path",
+                "kind": "config",
+                "usable": true,
+                "headline": null,
+                "errors": [],
+                "warnings": [],
+                "notes": [],
+            })),
+        })
+    }
+
+    fn next() -> Command {
+        Command::CycleFocus {
+            direction: CycleDirection::Next,
+        }
+    }
+
+    // The tools, one at a time
+    // ------------------------
+
+    #[test]
+    fn a_window_is_found_wherever_the_state_keeps_it() {
+        let state = desktop(0, 0, 0, 0x10);
+        let at = |hwnd| locate(&state, hwnd).map(|(place, _)| place);
+        assert_eq!(
+            at(0x31),
+            Some(Place {
+                monitor: 0,
+                workspace: 0,
+                spot: Spot::Tiled {
+                    container: 2,
+                    position: 1,
+                    stacked: true,
+                },
+            })
+        );
+        assert_eq!(at(0x40).unwrap().spot, Spot::Floating);
+        assert_eq!(
+            at(0x50),
+            Some(Place {
+                monitor: 1,
+                workspace: 0,
+                spot: Spot::Monocle,
+            })
+        );
+        assert_eq!(at(0x77), None);
+    }
+
+    #[test]
+    fn focusing_a_window_in_view_steps_along_the_ring() {
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10), desktop(0, 0, 1, 0x20)]);
+        let answer = focus_window(&fake, &FocusParams { window: 0x20 }).unwrap();
+        assert_eq!(fake.sent(), [Command::State, next(), Command::State]);
+        assert_eq!(
+            answer,
+            json!({
+                "ok": true,
+                "window": 0x20,
+                "monitor": 0,
+                "workspace": 0,
+                "sent": ["cycle-focus"],
+            })
+        );
+    }
+
+    #[test]
+    fn focusing_a_window_in_a_stack_picks_its_place_in_the_stack() {
+        let fake = Fake::with_states([desktop(0, 0, 1, 0x20), desktop(0, 0, 2, 0x31)]);
+        focus_window(&fake, &FocusParams { window: 0x31 }).unwrap();
+        assert_eq!(
+            fake.sent(),
+            [
+                Command::State,
+                next(),
+                Command::FocusStackWindow { index: 1 },
+                Command::State,
+            ]
+        );
+    }
+
+    #[test]
+    fn focusing_a_window_elsewhere_switches_monitor_and_workspace_first() {
+        // The focus is on monitor 1, and monitor 0 shows workspace 1. 0x10 is
+        // on monitor 0, workspace 0, which remembers its third container as
+        // focused, so the ring wraps once.
+        let fake = Fake::with_states([
+            desktop(1, 1, 2, 0x50),
+            desktop(0, 0, 2, 0x30),
+            desktop(0, 0, 0, 0x10),
+        ]);
+        focus_window(&fake, &FocusParams { window: 0x10 }).unwrap();
+        assert_eq!(
+            fake.sent(),
+            [
+                Command::State,
+                Command::FocusMonitor { index: 0 },
+                Command::FocusWorkspace { index: 0 },
+                Command::State,
+                next(),
+                Command::State,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_monitor_that_already_shows_the_workspace_keeps_it() {
+        let fake = Fake::with_states([desktop(1, 0, 0, 0x50), desktop(0, 0, 0, 0x10)]);
+        focus_window(&fake, &FocusParams { window: 0x10 }).unwrap();
+        assert_eq!(
+            fake.sent(),
+            [
+                Command::State,
+                Command::FocusMonitor { index: 0 },
+                Command::State,
+                Command::State,
+            ]
+        );
+    }
+
+    #[test]
+    fn the_ring_is_walked_the_short_way_round() {
+        let fake = Fake::with_states([desktop(0, 0, 2, 0x30), desktop(0, 0, 1, 0x20)]);
+        focus_window(&fake, &FocusParams { window: 0x20 }).unwrap();
+        assert_eq!(
+            fake.sent(),
+            [
+                Command::State,
+                Command::CycleFocus {
+                    direction: CycleDirection::Previous,
+                },
+                Command::State,
+            ]
+        );
+    }
+
+    #[test]
+    fn the_focused_window_needs_no_command() {
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10)]);
+        let answer = focus_window(&fake, &FocusParams { window: 0x10 }).unwrap();
+        assert_eq!(fake.sent(), [Command::State]);
+        assert_eq!(answer["sent"], json!([]));
+    }
+
+    #[test]
+    fn a_floating_window_is_shown_and_the_limit_is_said() {
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10), desktop(0, 1, 0, 0x10)]);
+        let message = focus_window(&fake, &FocusParams { window: 0x40 }).unwrap_err();
+        assert_eq!(
+            fake.sent(),
+            [
+                Command::State,
+                Command::FocusWorkspace { index: 1 },
+                Command::State,
+                Command::State,
+            ]
+        );
+        assert!(message.contains("no command"), "{message}");
+        assert!(
+            message.contains("already sent: focus-workspace"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_window_is_named_in_the_error() {
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10)]);
+        let message = focus_window(&fake, &FocusParams { window: 0x77 }).unwrap_err();
+        assert!(message.contains("119"), "{message}");
+        assert_eq!(fake.sent(), [Command::State]);
+    }
+
+    #[test]
+    fn moving_sends_or_moves_by_index_or_by_name() {
+        let cases = [
+            (Some(3), None, false, Command::SendToWorkspace { index: 3 }),
+            (Some(3), None, true, Command::MoveToWorkspace { index: 3 }),
+            (
+                None,
+                Some("web"),
+                false,
+                Command::SendToNamedWorkspace { name: "web".into() },
+            ),
+            (
+                None,
+                Some("web"),
+                true,
+                Command::MoveToNamedWorkspace { name: "web".into() },
+            ),
+        ];
+        for (workspace, name, follow, command) in cases {
+            let fake = Fake::with_states([desktop(0, 0, 0, 0x10)]);
+            let p = MoveParams {
+                window: None,
+                workspace,
+                workspace_name: name.map(str::to_owned),
+                follow,
+            };
+            let answer = move_window_to_workspace(&fake, &p).unwrap();
+            assert_eq!(fake.sent(), std::slice::from_ref(&command));
+            assert_eq!(answer["followed"], follow);
+            assert_eq!(answer["sent"], json!([command.name()]));
+        }
+    }
+
+    #[test]
+    fn moving_a_given_window_focuses_it_first() {
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10), desktop(0, 0, 1, 0x20)]);
+        let p = MoveParams {
+            window: Some(0x20),
+            workspace: Some(1),
+            workspace_name: None,
+            follow: false,
+        };
+        let answer = move_window_to_workspace(&fake, &p).unwrap();
+        assert_eq!(
+            fake.sent().last(),
+            Some(&Command::SendToWorkspace { index: 1 })
+        );
+        assert_eq!(answer["sent"], json!(["cycle-focus", "send-to-workspace"]));
+        assert_eq!(answer["window"], 0x20);
+        assert_eq!(answer["workspace"], 1);
+    }
+
+    #[test]
+    fn moving_needs_exactly_one_workspace() {
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10)]);
+        for (workspace, name) in [(None, None), (Some(1), Some("web".to_owned()))] {
+            let p = MoveParams {
+                window: None,
+                workspace,
+                workspace_name: name,
+                follow: false,
+            };
+            assert!(move_window_to_workspace(&fake, &p).is_err());
+        }
+        assert!(fake.sent().is_empty());
+    }
+
+    #[test]
+    fn switching_maps_to_the_workspace_commands() {
+        let fake = Fake::default();
+        let p = SwitchParams {
+            workspace: Some(2),
+            monitor: Some(1),
+            name: None,
+        };
+        switch_workspace(&fake, &p).unwrap();
+        let p = SwitchParams {
+            workspace: Some(4),
+            monitor: None,
+            name: None,
+        };
+        switch_workspace(&fake, &p).unwrap();
+        let p = SwitchParams {
+            workspace: None,
+            monitor: None,
+            name: Some("web".into()),
+        };
+        let answer = switch_workspace(&fake, &p).unwrap();
+        assert_eq!(
+            fake.sent(),
+            [
+                Command::FocusMonitor { index: 1 },
+                Command::FocusWorkspace { index: 2 },
+                Command::FocusWorkspace { index: 4 },
+                Command::FocusNamedWorkspace { name: "web".into() },
+            ]
+        );
+        assert_eq!(
+            answer,
+            json!({ "ok": true, "sent": ["focus-named-workspace"] })
+        );
+    }
+
+    #[test]
+    fn every_layout_name_is_one_the_daemon_takes() {
+        for name in LayoutName::ALL {
+            let fake = Fake::default();
+            let answer = set_layout(&fake, &LayoutParams { layout: name }).unwrap();
+            let layout = name.wire().unwrap();
+            assert_eq!(fake.sent(), [Command::ChangeLayout { layout }]);
+            assert_eq!(answer["layout"], name.name());
+            let parsed: LayoutName = serde_json::from_value(json!(name.name())).unwrap();
+            assert_eq!(parsed, name);
+        }
+    }
+
+    #[test]
+    fn toggles_act_on_the_focused_window_or_on_the_one_given() {
+        let fake = Fake::default();
+        let answer = toggle(&fake, &WindowParams { window: None }, Command::ToggleFloat).unwrap();
+        assert_eq!(fake.sent(), [Command::ToggleFloat]);
+        assert_eq!(
+            answer,
+            json!({ "ok": true, "window": null, "sent": ["toggle-float"] })
+        );
+
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10), desktop(0, 0, 1, 0x20)]);
+        toggle(
+            &fake,
+            &WindowParams { window: Some(0x20) },
+            Command::ToggleMonocle,
+        )
+        .unwrap();
+        assert_eq!(fake.sent().last(), Some(&Command::ToggleMonocle));
+    }
+
+    #[test]
+    fn pausing_and_resuming_only_toggle_when_needed() {
+        let paused_query = Command::Query {
+            target: QueryTarget::Paused,
+        };
+        let running = Fake::default();
+        let answer = set_paused(&running, true).unwrap();
+        assert_eq!(running.sent(), [paused_query.clone(), Command::TogglePause]);
+        assert_eq!(
+            answer,
+            json!({ "ok": true, "paused": true, "changed": true, "sent": ["toggle-pause"] })
+        );
+
+        let paused = Fake {
+            paused: true,
+            ..Fake::default()
+        };
+        let answer = set_paused(&paused, true).unwrap();
+        assert_eq!(answer["changed"], false);
+        assert_eq!(paused.sent(), [paused_query]);
+        set_paused(&paused, false).unwrap();
+        assert_eq!(paused.sent().last(), Some(&Command::TogglePause));
+    }
+
+    #[test]
+    fn why_answers_for_a_managed_window_from_the_state() {
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10)]);
+        let answer = why_not_tiled(&fake, WhyParams { window: Some(0x31) }).unwrap();
+        assert_eq!(
+            answer,
+            json!({
+                "hwnd": "0x31",
+                "title": "mail",
+                "exe": "mail.exe",
+                "class": "C",
+                "managed": true,
+                "monitor": 0,
+                "workspace": 0,
+            })
+        );
+        assert_eq!(fake.sent(), [Command::State]);
+    }
+
+    #[test]
+    fn why_asks_the_daemon_about_the_window_in_front() {
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10)]);
+        let front = why_not_tiled(&fake, WhyParams { window: None }).unwrap();
+        assert_eq!(front["reason"], "tool window");
+        assert_eq!(fake.sent(), [Command::Why]);
+
+        let by_id = why_not_tiled(&fake, WhyParams { window: Some(0x99) }).unwrap();
+        assert_eq!(by_id, front);
+
+        let message = why_not_tiled(&fake, WhyParams { window: Some(0x77) }).unwrap_err();
+        assert!(message.contains("in front"), "{message}");
+    }
+
+    #[test]
+    fn a_refusal_comes_back_in_the_daemons_words() {
+        let fake = Fake {
+            refuse: Some(("reload-configuration", "mochi.json: expected `,` at line 4")),
+            ..Fake::default()
+        };
+        let message = simple(&fake, Command::ReloadConfiguration).unwrap_err();
+        assert_eq!(
+            message,
+            "Mochi refused `reload-configuration`: mochi.json: expected `,` at line 4"
+        );
+    }
+
+    // Over the protocol
+    // -----------------
+
+    /// A client on the other end of an in-memory stdio pipe.
+    struct Session {
+        write: WriteHalf<DuplexStream>,
+        lines: Lines<BufReader<ReadHalf<DuplexStream>>>,
+        server: tokio::task::JoinHandle<()>,
+        next_id: u64,
+    }
+
+    impl Session {
+        async fn open(server: Server) -> (Session, Value) {
+            let (ours, theirs) = tokio::io::duplex(1 << 20);
+            let server = tokio::spawn(async move {
+                if let Ok(running) = server.serve(theirs).await {
+                    let _ = running.waiting().await;
+                }
+            });
+            let (read, write) = tokio::io::split(ours);
+            let mut session = Session {
+                write,
+                lines: BufReader::new(read).lines(),
+                server,
+                next_id: 0,
+            };
+            let init = session
+                .request(
+                    "initialize",
+                    json!({
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": { "name": "test", "version": "1" },
+                    }),
+                )
+                .await;
+            session
+                .send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+                .await;
+            (session, init)
+        }
+
+        async fn send(&mut self, message: Value) {
+            let line = format!("{message}\n");
+            self.write.write_all(line.as_bytes()).await.unwrap();
+        }
+
+        /// Sends a request and returns the whole answer to it.
+        async fn request(&mut self, method: &str, params: Value) -> Value {
+            self.next_id += 1;
+            let id = self.next_id;
+            self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+                .await;
+            loop {
+                let line = tokio::time::timeout(Duration::from_secs(20), self.lines.next_line())
+                    .await
+                    .expect("an answer in time")
+                    .unwrap()
+                    .expect("the server is still there");
+                let answer: Value = serde_json::from_str(&line).expect("one JSON message a line");
+                if answer["id"] == json!(id) {
+                    return answer;
+                }
+            }
+        }
+
+        /// Calls a tool and returns its result.
+        async fn call(&mut self, tool: &str, arguments: Value) -> Value {
+            let answer = self
+                .request(
+                    "tools/call",
+                    json!({ "name": tool, "arguments": arguments }),
+                )
+                .await;
+            assert!(answer.get("error").is_none(), "{answer}");
+            answer["result"].clone()
+        }
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    const TOOLS: [&str; 14] = [
+        "check_config",
+        "focus_window",
+        "get_state",
+        "list_hotkeys",
+        "move_window_to_workspace",
+        "pause_tiling",
+        "reload_config",
+        "resume_tiling",
+        "retile",
+        "set_layout",
+        "switch_workspace",
+        "toggle_float",
+        "toggle_monocle",
+        "why_not_tiled",
+    ];
+
+    const READ_ONLY: [&str; 4] = ["check_config", "get_state", "list_hotkeys", "why_not_tiled"];
+
+    fn server(fake: Fake) -> (Server, Arc<Fake>) {
+        let fake = Arc::new(fake);
+        let daemon: Arc<dyn Daemon> = fake.clone();
+        (Server::new(daemon, checker()), fake)
+    }
+
+    #[tokio::test]
+    async fn the_handshake_names_the_server_and_offers_tools() {
+        let (server, _) = server(Fake::default());
+        let (_session, init) = Session::open(server).await;
+        let result = &init["result"];
+        assert_eq!(result["serverInfo"]["name"], "mochi", "{init}");
+        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(result["capabilities"]["tools"].is_object(), "{init}");
+        assert!(
+            result["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("get_state")
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_are_listed_with_their_arguments_and_hints() {
+        let (server, _) = server(Fake::default());
+        let (mut session, _) = Session::open(server).await;
+        let answer = session.request("tools/list", json!({})).await;
+        let tools = answer["result"]["tools"]
+            .as_array()
+            .expect("a list")
+            .clone();
+        let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        names.sort_unstable();
+        assert_eq!(names, TOOLS);
+        for tool in &tools {
+            let name = tool["name"].as_str().unwrap();
+            assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+            assert!(!tool["description"].as_str().unwrap().is_empty(), "{tool}");
+            assert_eq!(
+                tool["annotations"]["readOnlyHint"] == json!(true),
+                READ_ONLY.contains(&name),
+                "{tool}"
+            );
+            assert_ne!(
+                tool["annotations"]["destructiveHint"],
+                json!(true),
+                "{tool}"
+            );
+        }
+        let tool = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap().clone();
+        assert_eq!(
+            tool("focus_window")["inputSchema"]["required"],
+            json!(["window"])
+        );
+        assert_eq!(
+            tool("set_layout")["inputSchema"]["required"],
+            json!(["layout"])
+        );
+        let layouts = tool("set_layout")["inputSchema"].to_string();
+        for name in LayoutName::ALL {
+            assert!(
+                layouts.contains(&format!("\"{}\"", name.name())),
+                "{layouts}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reading_tools_answer_with_the_command_lines_documents() {
+        let state = desktop(0, 0, 0, 0x10);
+        let (server, _) = server(Fake::with_states([state.clone()]));
+        let (mut session, _) = Session::open(server).await;
+
+        let answer = session.call("get_state", json!({})).await;
+        assert_eq!(answer["structuredContent"], state);
+        // The text is the same JSON, for clients that read only text.
+        let text: Value =
+            serde_json::from_str(answer["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, state);
+
+        let hotkeys = session.call("list_hotkeys", json!({})).await;
+        assert_eq!(
+            hotkeys["structuredContent"]["bindings"][0]["command"],
+            "focus left"
+        );
+
+        let check = session.call("check_config", json!({})).await;
+        assert_eq!(check["structuredContent"]["usable"], true);
+        let check = session
+            .call("check_config", json!({ "path": "D:\\mochi.json" }))
+            .await;
+        assert_eq!(check["structuredContent"]["path"], "D:\\mochi.json");
+        let missing = session
+            .call("check_config", json!({ "path": "D:\\missing.json" }))
+            .await;
+        assert_eq!(missing["isError"], true, "{missing}");
+    }
+
+    #[tokio::test]
+    async fn an_action_answers_with_what_it_sent() {
+        let (server, fake) = server(Fake::default());
+        let (mut session, _) = Session::open(server).await;
+        let answer = session
+            .call("set_layout", json!({ "layout": "vertical-stack" }))
+            .await;
+        assert_eq!(
+            answer["structuredContent"],
+            json!({ "ok": true, "layout": "vertical-stack", "sent": ["change-layout"] })
+        );
+        assert_eq!(
+            fake.sent(),
+            [Command::ChangeLayout {
+                layout: Layout::VerticalStack,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn no_tool_stops_mochi_or_writes_a_file() {
+        let (server, fake) = server(Fake::with_states([
+            desktop(1, 0, 2, 0x50),
+            desktop(0, 0, 0, 0x30),
+        ]));
+        let (mut session, _) = Session::open(server).await;
+        for tool in TOOLS {
+            session.call(tool, arguments(tool)).await;
+        }
+        for command in fake.sent() {
+            assert!(
+                !matches!(
+                    command,
+                    Command::Stop | Command::Start | Command::Quickstart | Command::Close
+                ),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// Arguments each tool accepts.
+    fn arguments(tool: &str) -> Value {
+        match tool {
+            "focus_window" => json!({ "window": 0x31 }),
+            "move_window_to_workspace" | "switch_workspace" => json!({ "workspace": 1 }),
+            "set_layout" => json!({ "layout": "bsp" }),
+            _ => json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_tool_says_how_to_start_mochi_when_it_is_not_running() {
+        let (server, _) = server(Fake {
+            stopped: true,
+            ..Fake::default()
+        });
+        let (mut session, _) = Session::open(server).await;
+        for tool in TOOLS {
+            let answer = session.call(tool, arguments(tool)).await;
+            if tool == "check_config" {
+                // Checking a file needs no daemon: it is the tool for when
+                // Mochi will not start.
+                assert_ne!(answer["isError"], true, "{answer}");
+                continue;
+            }
+            assert_eq!(answer["isError"], true, "{tool}: {answer}");
+            assert_eq!(answer["content"][0]["text"], NOT_RUNNING, "{tool}");
+        }
+    }
+}
