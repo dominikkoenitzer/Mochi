@@ -7,25 +7,32 @@ managers that came before it, but shares no code with any of them.
 
 ## Install
 
-Know the way out before you start. The moment Mochi starts, every window on
-screen is rearranged into tiles. `Pause` turns tiling off and on again, or
+[Download Mochi](https://get-mochi.vercel.app/download/windows), then double-click it.
+
+Know the way out before you click Install. The moment Mochi starts, every window
+on screen is rearranged into tiles. `Pause` turns tiling off and on again, or
 `alt + f12` on a keyboard without a Pause key. `alt + shift + e` stops Mochi and
 puts every window back. To start it again, open Mochi from the Start menu or run
 `mochic start`.
 
-Then open PowerShell (Start menu, type PowerShell, Enter) and paste this line:
+If Windows says it protected your PC, click More info, then Run anyway. No admin
+rights are needed. `Mochi-Setup.exe --quiet` installs without asking.
+
+### PowerShell
+
+For a scripted install, open PowerShell (Start menu, type PowerShell, Enter) and
+paste this line instead:
 
 ```
 irm https://github.com/dominikkoenitzer/Mochi/releases/latest/download/install.ps1 | iex
 ```
 
-No admin rights are needed, and it works in Windows PowerShell 5.1 and
-PowerShell 7.
+It works in Windows PowerShell 5.1 and PowerShell 7.
 
 It downloads the [latest release](https://github.com/dominikkoenitzer/Mochi/releases/latest)
-and checks its SHA256. It puts `mochi.exe` and `mochic.exe` in
-`%LOCALAPPDATA%\Programs\Mochi\bin` and adds that folder to your user PATH. If
-you have no `%USERPROFILE%\mochi.json` or `%USERPROFILE%\.config\mochi\hotkeys`
+and checks its SHA256. Like the download above, it puts `mochi.exe` and
+`mochic.exe` in `%LOCALAPPDATA%\Programs\Mochi\bin` and adds that folder to your
+user PATH. If you have no `%USERPROFILE%\mochi.json` or `%USERPROFILE%\.config\mochi\hotkeys`
 yet, it writes a default one, and it never overwrites yours. It makes Mochi
 start at every login with a HKCU Run value called Mochi, adds Mochi to the Start
 menu, and then starts Mochi right away, which tiles every window on screen.
@@ -50,8 +57,9 @@ write the default `mochi.json` and hotkey file.
 
 ### Updating
 
-Run the one line again. It refuses while Mochi is running, so stop Mochi first
-with `alt + shift + e` or `mochic stop`.
+Download and open `Mochi-Setup.exe` again; it stops the running Mochi first. The
+one line refuses while Mochi is running, so stop Mochi first with
+`alt + shift + e` or `mochic stop`, then run it again.
 
 ### Watchdog
 
@@ -74,6 +82,8 @@ another program's startup item aside until `-EnableStartupItem <name>` puts it
 back.
 
 ## Uninstall
+
+Open Settings, Apps, Installed apps, and uninstall Mochi. From PowerShell:
 
 ```
 & ([scriptblock]::Create((irm https://github.com/dominikkoenitzer/Mochi/releases/latest/download/install.ps1))) -Uninstall
