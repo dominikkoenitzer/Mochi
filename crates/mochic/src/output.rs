@@ -268,3 +268,269 @@ impl CheckOutput {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use mochi_client::Command;
+    use mochi_client::cli::Cli;
+    use serde_json::json;
+
+    fn args(line: &str) -> Vec<OsString> {
+        line.split_whitespace().map(OsString::from).collect()
+    }
+
+    fn parsed(line: &str) -> Cmd {
+        Cli::try_parse_from(args(line)).unwrap().command
+    }
+
+    #[test]
+    fn an_error_has_one_fixed_shape() {
+        let out = ErrorOutput::new(ErrorCode::Usage, "unexpected argument '--fast' found");
+        assert_eq!(
+            serde_json::to_string(&out).unwrap(),
+            r#"{"error":{"code":"usage","message":"unexpected argument '--fast' found"}}"#
+        );
+    }
+
+    #[test]
+    fn the_error_codes_are_spelled_in_snake_case() {
+        let codes = [
+            (ErrorCode::DaemonNotRunning, "daemon_not_running"),
+            (ErrorCode::Ipc, "ipc"),
+            (ErrorCode::Daemon, "daemon"),
+            (ErrorCode::Config, "config"),
+            (ErrorCode::Io, "io"),
+            (ErrorCode::Usage, "usage"),
+            (ErrorCode::Internal, "internal"),
+        ];
+        for (code, spelling) in codes {
+            assert_eq!(serde_json::to_value(code).unwrap(), json!(spelling));
+        }
+    }
+
+    #[test]
+    fn an_error_keeps_its_code_and_its_human_message() {
+        let not_running: anyhow::Error = Coded::new(
+            ErrorCode::DaemonNotRunning,
+            "mochi is not running. Start it with `mochic start`.",
+        )
+        .into();
+        assert_eq!(
+            serde_json::to_value(ErrorOutput::from_error(&not_running)).unwrap(),
+            json!({"error": {
+                "code": "daemon_not_running",
+                "message": "mochi is not running. Start it with `mochic start`.",
+            }})
+        );
+
+        // A code put on as context still counts, and the message is the whole
+        // chain, as stderr would show it.
+        let pipe = anyhow::Error::new(std::io::Error::other("pipe busy"))
+            .context(Coded::new(ErrorCode::Ipc, "could not talk to mochi"));
+        let out = ErrorOutput::from_error(&pipe);
+        assert_eq!(out.error.code, ErrorCode::Ipc);
+        assert_eq!(out.error.message, "could not talk to mochi: pipe busy");
+
+        let unmarked = anyhow::anyhow!("something else");
+        assert_eq!(
+            ErrorOutput::from_error(&unmarked).error.code,
+            ErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn a_query_answer_names_its_target() {
+        let out = QueryOutput::new(QueryTarget::FocusedWorkspaceIndex, json!(2));
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            json!({"version": VERSION, "target": "focused-workspace-index", "value": 2})
+        );
+        let out = QueryOutput::new(QueryTarget::FocusedWorkspaceName, json!(null));
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            json!({"version": VERSION, "target": "focused-workspace-name", "value": null})
+        );
+    }
+
+    #[test]
+    fn a_written_schema_names_the_file() {
+        let out = SchemaWritten::new(Path::new("mochi.schema.json"));
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            json!({"version": VERSION, "path": "mochi.schema.json"})
+        );
+    }
+
+    #[test]
+    fn a_usable_file_has_no_headline() {
+        let out = CheckOutput::new(
+            "C:\\Users\\me\\mochi.json".into(),
+            "default".into(),
+            CheckKind::Config,
+            None,
+            None,
+            vec![],
+            vec!["hotkeys: line 3 does not parse".into()],
+            vec!["2 workspace rules".into()],
+        );
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            json!({
+                "version": VERSION,
+                "path": "C:\\Users\\me\\mochi.json",
+                "source": "default",
+                "kind": "config",
+                "usable": true,
+                "headline": null,
+                "errors": [],
+                "warnings": ["hotkeys: line 3 does not parse"],
+                "notes": ["2 workspace rules"],
+            })
+        );
+    }
+
+    #[test]
+    fn an_unusable_file_says_what_to_fix_first() {
+        let out = CheckOutput::new(
+            "applications.json".into(),
+            "command line".into(),
+            CheckKind::AppRules,
+            None,
+            Some("fix line 4 of applications.json".into()),
+            vec!["line 4: bad regex".into()],
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            json!({
+                "version": VERSION,
+                "path": "applications.json",
+                "source": "command line",
+                "kind": "app_rules",
+                "usable": false,
+                "headline": "fix line 4 of applications.json",
+                "errors": ["line 4: bad regex"],
+                "warnings": [],
+                "notes": [],
+            })
+        );
+
+        let fallback = CheckOutput::new(
+            "mochi.json".into(),
+            "default".into(),
+            CheckKind::Config,
+            None,
+            None,
+            vec!["broken".into()],
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            fallback.headline.as_deref(),
+            Some("the configuration cannot be used as it stands")
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_has_its_reason_as_the_error() {
+        let out = CheckOutput::new(
+            "mochi.json".into(),
+            "default".into(),
+            CheckKind::Config,
+            Some("mochi.json does not exist".into()),
+            None,
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(!out.usable);
+        assert_eq!(
+            out.headline.as_deref(),
+            Some("the configuration could not be read")
+        );
+        assert_eq!(out.errors, ["mochi.json does not exist"]);
+    }
+
+    #[test]
+    fn json_is_taken_by_every_command_that_reports_something() {
+        for line in [
+            "mochic state --json",
+            "mochic query monitor-count --json",
+            "mochic query --json monitor-count",
+            "mochic check --json",
+            "mochic check mochi.json --json",
+            "mochic check --json mochi.json",
+            "mochic schema --json",
+            "mochic schema -o mochi.schema.json --json",
+            "mochic doctor --json",
+            "mochic why --json",
+            "mochic hotkeys --json",
+        ] {
+            assert!(wants_json(&parsed(line)), "{line}");
+        }
+        for line in [
+            "mochic state",
+            "mochic query monitor-count",
+            "mochic check",
+            "mochic schema",
+            "mochic doctor",
+            "mochic focus left",
+        ] {
+            assert!(!wants_json(&parsed(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn json_belongs_after_the_subcommand_and_only_on_reporting_ones() {
+        for line in [
+            "mochic --json state",
+            "mochic focus left --json",
+            "mochic subscribe bar --json",
+        ] {
+            assert!(Cli::try_parse_from(args(line)).is_err(), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_flag_does_not_change_what_is_sent() {
+        assert_eq!(
+            parsed("mochic state --json").to_command(),
+            Some(Command::State)
+        );
+        assert_eq!(
+            parsed("mochic query paused --json").to_command(),
+            Some(Command::Query {
+                target: QueryTarget::Paused
+            })
+        );
+    }
+
+    #[test]
+    fn a_bad_command_line_with_json_answers_in_json() {
+        let line = args("mochic focus left --json");
+        let e = Cli::try_parse_from(&line).err().unwrap();
+        let out = usage_error(&line, &e).expect("a usage error document");
+        assert_eq!(out.error.code, ErrorCode::Usage);
+        assert!(
+            out.error.message.contains("--json"),
+            "{}",
+            out.error.message
+        );
+        assert!(!out.error.message.starts_with("error:"));
+
+        let line = args("mochic query --json");
+        let e = Cli::try_parse_from(&line).err().unwrap();
+        assert_eq!(usage_error(&line, &e).unwrap().error.code, ErrorCode::Usage);
+
+        // Without the flag clap reports it, and help is never an error.
+        let line = args("mochic focus sideways");
+        let e = Cli::try_parse_from(&line).err().unwrap();
+        assert!(usage_error(&line, &e).is_none());
+        let line = args("mochic state --json --help");
+        let e = Cli::try_parse_from(&line).err().unwrap();
+        assert!(usage_error(&line, &e).is_none());
+    }
+}
