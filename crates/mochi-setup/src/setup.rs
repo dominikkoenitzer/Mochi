@@ -208,30 +208,30 @@ fn uninstall(options: Options, layout: &Layout) -> i32 {
         // Only an empty folder goes: anything the user put there stays.
         let _ = std::fs::remove_dir(dir);
     }
+    let code = i32::from(!problems.is_empty());
+    if !options.quiet {
+        if problems.is_empty() {
+            win::tell(
+                "Mochi is removed",
+                "Your mochi.json and hotkeys are still in your user folder.",
+                false,
+            );
+        } else {
+            win::tell(
+                "Mochi is removed, with a few things left behind",
+                &problems.join("\n"),
+                true,
+            );
+        }
+    }
+    // Last of all, after the dialog: the cleanup waits only a moment for this
+    // process to exit.
     if let Some(file) = &removal.after_exit
         && let Some(args) = plan::cleanup_after_exit(file, &layout.root)
     {
         let _ = win::spawn_cmd(&args);
     }
-
-    if options.quiet {
-        return i32::from(!problems.is_empty());
-    }
-    if problems.is_empty() {
-        win::tell(
-            "Mochi is removed",
-            "Your mochi.json and hotkeys are still in your user folder.",
-            false,
-        );
-        0
-    } else {
-        win::tell(
-            "Mochi is removed, with a few things left behind",
-            &problems.join("\n"),
-            true,
-        );
-        1
-    }
+    code
 }
 
 /// Asks a running Mochi to stop and waits until it has. The installed mochic
