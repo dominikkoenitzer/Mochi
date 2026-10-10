@@ -51,7 +51,9 @@
     Stop Mochi, remove its Run value, the MochiWatchdog task, the Start menu
     shortcut, the binaries, the <InstallRoot>\bin directory Mochi created, and
     the PATH entry unless -SkipPath is given. <InstallRoot> itself is left
-    alone, it is a directory you named and it may be older than Mochi.
+    alone, it is a directory you named and it may be older than Mochi. In the
+    default folder the copy of Mochi-Setup.exe and its Apps & features entry
+    go too.
 
 .EXAMPLE
     .\scripts\install.ps1
@@ -898,16 +900,22 @@ function Uninstall-Mochi {
     }
 
     # What Mochi-Setup.exe adds on top: its own copy, which Apps & features
-    # runs to uninstall, and that Apps & features entry.
-    $setupCopy = Join-Path $InstallRoot 'Mochi-Setup.exe'
-    if ((Test-Path -LiteralPath $setupCopy) -and $PSCmdlet.ShouldProcess($setupCopy, 'remove')) {
-        Remove-Item -LiteralPath $setupCopy -Force
-        Write-Detail 'removed Mochi-Setup.exe'
-    }
-    $appsEntry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Mochi'
-    if ((Test-Path -LiteralPath $appsEntry) -and $PSCmdlet.ShouldProcess($appsEntry, 'remove')) {
-        Remove-Item -LiteralPath $appsEntry -Recurse -Force
-        Write-Detail 'removed the Apps & features entry'
+    # runs to uninstall, and that Apps & features entry. The setup always
+    # installs to the default folder, so only an uninstall of that folder
+    # touches them; a folder the user named may hold a Mochi-Setup.exe of
+    # their own.
+    $setupRoot = Join-Path $env:LOCALAPPDATA 'Programs\Mochi'
+    if ($InstallRoot.TrimEnd('\') -ieq $setupRoot) {
+        $setupCopy = Join-Path $setupRoot 'Mochi-Setup.exe'
+        if ((Test-Path -LiteralPath $setupCopy) -and $PSCmdlet.ShouldProcess($setupCopy, 'remove')) {
+            Remove-Item -LiteralPath $setupCopy -Force
+            Write-Detail 'removed Mochi-Setup.exe'
+        }
+        $appsEntry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Mochi'
+        if ((Test-Path -LiteralPath $appsEntry) -and $PSCmdlet.ShouldProcess($appsEntry, 'remove')) {
+            Remove-Item -LiteralPath $appsEntry -Recurse -Force
+            Write-Detail 'removed the Apps & features entry'
+        }
     }
 
     if ($SkipPath) {
