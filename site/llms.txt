@@ -1,0 +1,45 @@
+# Mochi
+
+> A tiling window manager for Windows. The daemon mochi.exe arranges every window into tiles and binds its own keys; the client mochic.exe starts, stops and commands it.
+
+Install: download Mochi-Setup.exe from /download/windows and open it, or in PowerShell, as a normal user, run `irm <this site>/install.ps1 | iex`. No admin rights. x64 only.
+Both install to %LOCALAPPDATA%\Programs\Mochi\bin, add that folder to the user PATH, start Mochi at login and start it right away. Mochi-Setup.exe --quiet installs without asking.
+Config: %USERPROFILE%\mochi.json (JSON). Hotkeys: %USERPROFILE%\.config\mochi\hotkeys. Logs: %LOCALAPPDATA%\mochi, one mochi.log.<date> file per day.
+Both files reload when saved. Run `mochic check` after every edit.
+Pause (or alt + f12) turns tiling off and on. alt + shift + e, or `mochic stop`, stops Mochi and puts every window back.
+Uninstall: Settings, Apps, Installed apps, Mochi; after a PowerShell install, run the installer with -Uninstall. Config, hotkeys and logs stay.
+
+## Agent skill
+
+- [Mochi skill, zipped](/skill/mochi.zip): the skill folder for an assistant, with references for every mochic command, config key and default hotkey
+- [SKILL.md](/skill/mochi/SKILL.md): the same instructions as one file
+
+## Downloads
+
+- [Mochi-Setup.exe](/download/windows): the one-file installer for the latest release, with an Installed apps entry
+- [install.ps1](/install.ps1): the PowerShell installer for the latest release
+- [Mochi-x86_64-pc-windows-msvc.zip](/download/Mochi-x86_64-pc-windows-msvc.zip): mochi.exe, mochic.exe and the config schema, latest release
+- [Mochi-x86_64-pc-windows-msvc.zip.sha256](/download/Mochi-x86_64-pc-windows-msvc.zip.sha256): SHA256 of the zip
+- [A file of a given release](/download/v0.1.20/Mochi-v0.1.20-x86_64-pc-windows-msvc.zip): /download/<tag>/<file>; older releases carry the version in the zip name
+
+## Reference
+
+- [Latest release](/latest): JSON with the release tag and its assets
+- [schema.json](/schema.json): JSON schema of mochi.json
+
+## MCP server
+
+`mochic mcp` runs a local MCP server on stdin and stdout (stdio transport).
+An MCP client starts it: command is the full path to mochic.exe, args is ["mcp"].
+The installer puts mochic.exe in %LOCALAPPDATA%\Programs\Mochi\bin. A client config in the common JSON form:
+
+```json
+{ "mcpServers": { "mochi": { "command": "C:\\Users\\you\\AppData\\Local\\Programs\\Mochi\\bin\\mochic.exe", "args": ["mcp"] } } }
+```
+
+It talks to the running Mochi over the same local named pipe mochic uses. Nothing leaves the computer: no network, no account, no telemetry.
+No tool can stop Mochi, close a window or write a file. check_config works without a running Mochi.
+Tools: get_state, why_not_tiled, list_hotkeys, check_config, focus_window, move_window_to_workspace, switch_workspace, set_layout, toggle_float, toggle_monocle, retile, pause_tiling, resume_tiling, reload_config.
+Call get_state first. Window ids are its hwnd numbers. Workspace and monitor indexes are zero-based.
+
+- [SKILL.md, MCP server](/skill/mochi/SKILL.md#mcp-server): every tool with its arguments

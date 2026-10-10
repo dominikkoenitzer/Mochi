@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mochi</title>
+<meta name="description" content="Mochi arranges every open window side by side so nothing overlaps, and you move between them from the keyboard.">
+<meta property="og:title" content="Mochi">
+<meta property="og:description" content="Mochi arranges every open window side by side so nothing overlaps, and you move between them from the keyboard.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<style>
+/* app colours */
+:root {
+  --accent-ink: #ae3274;
+  --button: #ae3274;
+  --button-hover: #962c64;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent-ink: #ffbbdf;
+    --button: #b6357a;
+    --button-hover: #c03a83;
+  }
+}
+ol { margin: 0; padding-left: 1.2rem; }
+.what + .what { margin-top: 2.5rem; }
+
+/* shared */
+:root {
+  --bg: #fbfaf8;
+  --text: #1c1d21;
+  --muted: #5c5f68;
+  --shadow: 0 1px 2px rgb(20 20 30 / 0.06), 0 16px 48px rgb(20 20 30 / 0.09);
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141518;
+    --text: #ececef;
+    --muted: #a3a6ae;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 16px 48px rgb(0 0 0 / 0.45);
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+main {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: clamp(3rem, 10vh, 6.5rem) 1.5rem 5rem;
+}
+.top, .what { max-width: 38rem; }
+h1 {
+  margin: 0;
+  font-size: clamp(3rem, 9vw, 4.75rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-weight: 700;
+}
+.lede {
+  margin: 1.1rem 0 0;
+  font-size: clamp(1.15rem, 2.4vw, 1.3rem);
+  line-height: 1.5;
+}
+.get { margin-top: 2.25rem; }
+.button {
+  display: inline-block;
+  padding: 1rem 1.75rem;
+  border-radius: 0.8rem;
+  background: var(--button);
+  color: #fff;
+  font-weight: 600;
+  font-size: 1.075rem;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+.button:hover { background: var(--button-hover); }
+.others, .note, .away {
+  margin: 0.9rem 0 0;
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+.note { margin-top: 0.35rem; }
+.away { color: var(--text); }
+a { color: var(--accent-ink); text-underline-offset: 0.18em; }
+a:focus-visible {
+  outline: 3px solid var(--accent-ink);
+  outline-offset: 3px;
+  border-radius: 0.25rem;
+}
+.button:focus-visible { border-radius: 0.8rem; }
+figure { margin: clamp(3rem, 8vh, 4.5rem) 0 0; }
+figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 0.9rem;
+  box-shadow: var(--shadow);
+}
+.what { margin-top: clamp(3rem, 8vh, 4.5rem); }
+h2 {
+  margin: 0 0 0.75rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+ul { margin: 0; padding-left: 1.2rem; }
+li { margin: 0.55rem 0; padding-left: 0.2rem; }
+li::marker { color: var(--accent-ink); }
+.skill { margin: 1.25rem 0 0; font-size: 0.95rem; color: var(--muted); }
+kbd { font: inherit; font-weight: 600; }
+@media (prefers-reduced-motion: reduce) {
+  .button { transition: none; }
+}
+</style>
+</head>
+<body data-platforms='{"windows":"Windows"}'>
+<main>
+  <div class="top">
+    <h1>Mochi</h1>
+    <p class="lede">Mochi arranges every open window side by side so nothing overlaps, and you move between them from the keyboard.</p>
+    <div class="get">
+      <a class="button" id="primary" href="/download/windows">Download for Windows</a>
+      <p class="others" id="others">For 64-bit Windows 10 and 11. It needs no admin rights.</p>
+      <p class="note">If Windows says it protected your PC, click More info, then Run anyway.</p>
+      <p class="away" id="away" hidden>Mochi runs on Windows. Open this page on your Windows PC to download it.</p>
+    </div>
+  </div>
+
+  <section class="what" aria-labelledby="start">
+    <h2 id="start">Get going</h2>
+    <ol>
+      <li>Open Mochi-Setup.exe from your downloads and click Install.</li>
+      <li>Every window on your screen moves into a tile of its own at once. Mochi starts again by itself each time you sign in.</li>
+      <li>Hold <kbd>Alt</kbd> and press <kbd>H</kbd>, <kbd>J</kbd>, <kbd>K</kbd> or <kbd>L</kbd> to jump to the window on the left, below, above or to the right.</li>
+    </ol>
+  </section>
+
+  <section class="what" aria-labelledby="out">
+    <h2 id="out">Getting your windows back</h2>
+    <ul>
+      <li><kbd>Pause</kbd> turns tiling off and on. Off leaves every window where it is. On a keyboard without a Pause key, press <kbd>Alt+F12</kbd>.</li>
+      <li><kbd>Alt+Shift+E</kbd> stops Mochi and puts every window back. To start it again, open Mochi from the Start menu.</li>
+      <li>To remove Mochi, open Settings, then Apps, find Mochi in the list and uninstall it.</li>
+    </ul>
+  </section>
+
+  <section class="what" aria-labelledby="keys">
+    <h2 id="keys">More keys</h2>
+    <ul>
+      <li><kbd>Alt+Shift</kbd> with <kbd>H</kbd>, <kbd>J</kbd>, <kbd>K</kbd> or <kbd>L</kbd> moves the window that way.</li>
+      <li><kbd>Alt+1</kbd> to <kbd>Alt+9</kbd> switch between nine workspaces, each with its own windows. Add <kbd>Shift</kbd> to take the window along.</li>
+      <li><kbd>Alt+Shift+Space</kbd> lets a window float above the others, or puts it back in its tile.</li>
+      <li><kbd>Alt+Shift+S</kbd> lets you resize the window with <kbd>H</kbd>, <kbd>J</kbd>, <kbd>K</kbd> and <kbd>L</kbd> until you press <kbd>Esc</kbd>.</li>
+      <li><kbd>Alt+Shift+Q</kbd> closes the window.</li>
+    </ul>
+    <p class="skill">Use it with an AI assistant: <a href="/skill/mochi.zip">download the skill</a>.</p>
+  </section>
+</main>
+<script>
+(function () {
+  var d = document;
+  var names = JSON.parse(d.body.getAttribute("data-platforms"));
+  var keys = Object.keys(names);
+  var uad = navigator.userAgentData;
+  var plat = ((uad && uad.platform) || navigator.platform || "").toLowerCase();
+  var ua = navigator.userAgent.toLowerCase();
+  var os = "";
+  if ((uad && uad.mobile) || /android|iphone|ipad|ipod/.test(ua) || (/mac/.test(plat) && navigator.maxTouchPoints > 1)) os = "mobile";
+  else if (/win/.test(plat) || /windows/.test(ua)) os = "windows";
+  else if (/mac/.test(plat) || /mac os x/.test(ua)) os = "mac";
+  else if (/linux/.test(plat) || /linux|x11/.test(ua)) os = "linux";
+
+  function render(key) {
+    var primary = d.getElementById("primary");
+    primary.href = "/download/" + key;
+    primary.textContent = "Download for " + names[key];
+    var rest = keys.filter(function (k) { return k !== key; });
+    if (!rest.length) return;
+    var others = d.getElementById("others");
+    others.textContent = "Also for ";
+    rest.forEach(function (k, i) {
+      if (i) others.append(i === rest.length - 1 ? " and " : ", ");
+      var a = d.createElement("a");
+      a.href = "/download/" + k;
+      a.textContent = names[k];
+      others.append(a);
+    });
+    others.append(".");
+  }
+
+  if (names[os]) render(os);
+  else d.getElementById("away").hidden = false;
+
+  if (os === "windows" && names["windows-arm"] && uad && uad.getHighEntropyValues) {
+    uad.getHighEntropyValues(["architecture"]).then(function (v) {
+      if (v.architecture === "arm") render("windows-arm");
+    }).catch(function () {});
+  }
+})();
+</script>
+</body>
+</html>

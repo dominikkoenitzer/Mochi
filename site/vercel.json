@@ -1,0 +1,10 @@
+{
+  "redirects": [
+    { "source": "/install.ps1", "destination": "https://github.com/dominikkoenitzer/Mochi/releases/latest/download/install.ps1", "permanent": false },
+    { "source": "/latest", "destination": "https://api.github.com/repos/dominikkoenitzer/Mochi/releases/latest", "permanent": false },
+    { "source": "/download/windows", "destination": "https://github.com/dominikkoenitzer/Mochi/releases/latest/download/Mochi-Setup.exe", "permanent": false },
+    { "source": "/download/:file", "destination": "https://github.com/dominikkoenitzer/Mochi/releases/latest/download/:file", "permanent": false },
+    { "source": "/download/:tag/:file", "destination": "https://github.com/dominikkoenitzer/Mochi/releases/download/:tag/:file", "permanent": false },
+    { "source": "/schema.json", "destination": "https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/schema.json", "permanent": false }
+  ]
+}
