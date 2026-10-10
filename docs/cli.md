@@ -65,7 +65,7 @@ instead of text. [json-output.md](json-output.md) lists every field.
 | Command | Arguments | Does |
 |---|---|---|
 | `toggle-float` | none | Switch the focused window between tiled and floating. |
-| `toggle-float-override` | none | Float every window that appears from now on, and again to stop. Nothing already on screen moves. It lasts until the daemon stops or the configuration is reloaded; `float_override` in `mochi.json` is the permanent version. |
+| `toggle-float-override` | none | Float every window that appears from now on, and again to stop. Nothing already on screen moves. It lasts until the daemon stops, or until a reload of a `mochi.json` that sets `float_override`, which is the permanent version. |
 | `toggle-maximize` | none | Switch the focused window between tiled and maximized. |
 | `toggle-monocle` | none | Give the focused window the whole work area. |
 | `minimize` | none | Minimize the focused window. |
@@ -158,8 +158,10 @@ in [hotkeys.md](hotkeys.md).
 | `workspace-rule` | `exe` \| `class` \| `title` \| `path`, id, monitor, workspace, [`--initial-only`], [`--matching-strategy`] | Open matching windows on that monitor and workspace. The workspace is created if it is not there yet. `--initial-only` routes only the first window the rule ever matches, so a second window of the same application opens where you are. |
 
 Rules added with `float-rule`, `ignore-rule`, `manage-rule` and
-`workspace-rule` live until the daemon stops or the configuration is reloaded.
-Put the permanent ones in `mochi.json`.
+`workspace-rule` live until the daemon stops. A reload keeps them: the rules in
+`mochi.json` replace the file's old ones, and the typed rules go back in after
+them in the same order, so a reload does not change which rule wins. Put the
+permanent ones in `mochi.json`.
 
 `--matching-strategy` takes `equals` (the default), `contains`, `starts-with`,
 `ends-with` or `regex`. The file knows ten strategies and the command line only

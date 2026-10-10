@@ -438,8 +438,10 @@ conditions like "class equals X and title does not contain Y".
 
 The file is watched, so saving it applies at once. `mochic
 reload-configuration` re-reads it on demand, and the hotkey file with it.
-Anything set with a `mochic` command in the meantime is overwritten by what the
-file says.
+A key the file names replaces whatever a `mochic` command set in the meantime;
+a key it leaves out keeps the command's value. Rules added with `float-rule`,
+`ignore-rule`, `manage-rule` and `workspace-rule` survive the reload and stay
+until the daemon stops.
 
 Keys are not configured here. They live in their own file, next to this one in
 spirit but with a syntax of its own, and they reload the same way: see

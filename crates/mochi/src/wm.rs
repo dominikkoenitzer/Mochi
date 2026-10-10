@@ -3743,9 +3743,9 @@ impl WindowManager {
 
     /// Adds a `workspace_rules` entry for the rest of this session.
     ///
-    /// Not written to the configuration file. Everything `mochic` sets is
-    /// session state that a reload replaces with the file, which is what makes
-    /// the file the source of truth and a command a thing you can try out.
+    /// Not written to the configuration file, so it ends with the daemon. A
+    /// reload keeps it: `load_config` puts `added_workspace_rules` back after
+    /// the file's own list, the same way it keeps the rules above.
     fn add_workspace_rule(
         &mut self,
         identifier: mochi_client::RuleIdentifier,
