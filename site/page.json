@@ -1,0 +1,111 @@
+{
+  "slug": "mochi",
+  "name": "Mochi",
+  "description": "Mochi arranges every open window side by side so nothing overlaps, and you move between them from the keyboard.",
+  "colours": {
+    "light": { "accent": "#ae3274", "accent-hover": "#962c64", "accent-ink": "#ae3274", "band": "#f7e8f0", "tile": "#fcf2f7", "stage": "#f8eaf1" },
+    "dark": { "accent": "#b6357a", "accent-hover": "#c03a83", "accent-ink": "#ffbbdf", "band": "#24141c", "tile": "#2d1923", "stage": "#22131a" }
+  },
+  "platforms": { "windows": "Windows" },
+  "hero": {
+    "lede": "Mochi arranges every open window side by side so nothing overlaps, and you move between them from the keyboard.",
+    "notes": ["Windows 10 and 11, 64-bit. No admin rights needed.", "The moment it starts, every window becomes a tile. <kbd>Pause</kbd> turns tiling off and on, and <kbd>Alt+Shift+E</kbd> stops Mochi and puts every window back.", "If Windows says it protected your PC, click More info, then Run anyway."],
+    "away": "Mochi runs on Windows. Open this page on your PC to download it.",
+    "image": { "name": "hero", "w": 1920, "h": 1080, "dark": false, "alt": "Four windows tiled side by side by Mochi, the focused one with a pink border" }
+  },
+  "features": [
+    {
+      "label": "Layouts",
+      "title": "Seven layouts, one key away",
+      "body": ["Mochi tiles in BSP, columns, rows, vertical stack, horizontal stack, ultrawide and grid. <kbd>Alt+Shift+V</kbd> steps through them."],
+      "main": { "name": "f1", "w": 1920, "h": 1080, "dark": false, "pos": "50% 0", "alt": "The same four windows in the vertical stack layout" },
+      "detail": { "name": "c1", "w": 980, "h": 460, "dark": false }
+    },
+    {
+      "label": "Workspaces",
+      "title": "Nine workspaces on every monitor",
+      "body": ["<kbd>Alt+1</kbd> to <kbd>Alt+9</kbd> switch workspace, and <kbd>Alt+Shift</kbd> with a number takes the focused window along.", "Each workspace keeps its own layout, so one can be in columns while another stays in BSP."],
+      "main": { "name": "f4", "w": 1920, "h": 1080, "dark": false, "pos": "50% 0", "alt": "A second workspace with three windows in columns" },
+      "detail": { "name": "c4", "w": 650, "h": 360, "dark": false, "style": "width: 40%" }
+    },
+    {
+      "label": "Float",
+      "title": "Float a window above the tiles",
+      "body": ["<kbd>Alt+Shift+Space</kbd> takes the focused window out of the layout and leaves it at its own size and place, above the others. Press it again to tile it."],
+      "main": { "name": "f2", "w": 1920, "h": 1080, "dark": false, "pos": "50% 0", "alt": "A floating window above four tiles" },
+      "detail": { "name": "c2", "w": 770, "h": 520, "dark": false, "style": "width: 40%" }
+    },
+    {
+      "label": "Resize",
+      "title": "Resize tiles from the keyboard",
+      "body": ["<kbd>Alt+Shift+S</kbd> enters resize mode: <kbd>H</kbd> and <kbd>L</kbd> make the window narrower and wider, <kbd>J</kbd> and <kbd>K</kbd> taller and shorter, and <kbd>Esc</kbd> leaves. The tiles next to it make room."],
+      "main": { "name": "f3", "w": 1920, "h": 1080, "dark": false, "pos": "50% 0", "alt": "The left tile made wider in resize mode" },
+      "detail": { "name": "c3", "w": 600, "h": 380, "dark": false, "style": "width: 38%" }
+    },
+    {
+      "label": "Scripting",
+      "title": "Every answer as JSON",
+      "body": ["<code>mochic</code> drives Mochi from a terminal or a script, and every command that reports something takes <code>--json</code>. <code>mochic why</code> says why a window is or is not tiled.", "The hotkey file is plain text and is reloaded the moment you save it."],
+      "main": { "name": "f5", "w": 1920, "h": 1080, "dark": false, "pos": "50% 0", "alt": "The hotkey file in a text editor and JSON answers from mochic in a terminal" },
+      "detail": { "name": "c5", "w": 635, "h": 545, "dark": false, "style": "width: 38%" }
+    }
+  ],
+  "assistant": {
+    "label": "AI assistant",
+    "title": "Arrange windows by asking",
+    "body": [
+      "<code>mochic mcp</code> lets an AI assistant see your monitors, workspaces and windows and arrange them: focus a window, move it, switch workspaces, set the layout.",
+      "No tool can stop Mochi, close a window or write a file, and nothing leaves your PC. <a href=\"/skill/mochi.zip\">Download the skill</a> to teach your assistant the rest."
+    ],
+    "caption": "Add Mochi to your MCP client (replace you with your Windows user name)",
+    "code": "{\n  \"mcpServers\": {\n    \"mochi\": {\n      \"command\": \"C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Programs\\\\Mochi\\\\bin\\\\mochic.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}"
+  },
+  "new": {
+    "version": "0.1.21",
+    "items": [
+      "<code>Mochi-Setup.exe</code>: download, double-click, done. It adds Mochi to Installed apps, and Uninstall there removes it.",
+      "<code>Mochi-Setup.exe --quiet</code> installs without asking, <code>--uninstall --quiet</code> removes it.",
+      "<code>mochic mcp</code>, a local MCP server for AI assistants.",
+      "<code>mochic start --dry-run</code> now runs in the terminal it was typed in."
+    ]
+  },
+  "requirements": [
+    "Windows 10 or 11, 64-bit",
+    "About 14 MB to download",
+    "No admin rights",
+    "No account and no internet connection"
+  ],
+  "privacy": {
+    "title": "Nothing leaves your PC",
+    "body": ["Mochi makes no network connection and needs no account. The assistant connection uses the same local pipe as <code>mochic</code>."]
+  },
+  "data": {
+    "title": "Two plain text files",
+    "body": ["Settings live in <code>%USERPROFILE%\\mochi.json</code>, hotkeys in <code>%USERPROFILE%\\.config\\mochi\\hotkeys</code>. A log a day goes to <code>%LOCALAPPDATA%\\mochi</code>, and the last 14 are kept."]
+  },
+  "keys": [
+    ["Alt+H/J/K/L", "Focus left, down, up, right"],
+    ["Alt+Shift+H/J/K/L", "Move the window"],
+    ["Alt+1–9", "Switch workspace"],
+    ["Alt+Shift+S", "Resize mode"],
+    ["Alt+Shift+Space", "Float, or tile again"],
+    ["Alt+Shift+V", "Next layout"],
+    ["Pause", "Tiling off and on"],
+    ["Alt+Shift+E", "Stop Mochi, every window back"]
+  ],
+  "keys_note": "From the default hotkey file. Every key can be changed in it.",
+  "basics": [
+    { "title": "Get started", "steps": ["Download Mochi-Setup.exe and open it.", "Click Install. Mochi starts and tiles every window.", "Hold <kbd>Alt</kbd> and press <kbd>H</kbd>, <kbd>J</kbd>, <kbd>K</kbd> or <kbd>L</kbd> to move between windows."] },
+    { "title": "Updates", "body": ["Download Mochi-Setup.exe again and open it. It stops the running Mochi first and leaves your settings and hotkeys alone."] },
+    { "title": "Removing it", "body": ["Settings, Apps, Installed apps, Mochi, Uninstall. Every window goes back where it was. Your settings and hotkeys stay until you delete them."] }
+  ],
+  "faq": [
+    { "q": "Is Mochi free?", "a": ["Yes. It is free and open source under the GPL-3.0 licence."] },
+    { "q": "Why does Windows say it protected my PC?", "a": ["Mochi is not signed with a paid certificate, so Windows warns about it the first time. Click More info, then Run anyway. Setup needs no admin rights and installs only for you."] },
+    { "q": "How do I get my normal desktop back?", "a": ["<kbd>Pause</kbd>, or <kbd>Alt+F12</kbd> on a keyboard without a Pause key, turns tiling off and leaves every window where it is. <kbd>Alt+Shift+E</kbd> stops Mochi and puts every window back."] },
+    { "q": "A window is not being tiled. Why?", "a": ["Run <code>mochic why</code> with that window in front. It says what Mochi makes of the window and what you can do about it. A program running as administrator cannot be moved, because Mochi runs without admin rights."] },
+    { "q": "Where does Mochi keep my data?", "a": ["Settings in <code>%USERPROFILE%\\mochi.json</code>, hotkeys in <code>%USERPROFILE%\\.config\\mochi\\hotkeys</code>, and the log in <code>%LOCALAPPDATA%\\mochi</code>. Nothing leaves your PC."] }
+  ],
+  "closing": { "title": "Get Mochi", "sub": "Free for Windows 10 and 11. No admin rights needed." },
+  "footer": ["For AI assistants: <a href=\"/skill/mochi.zip\">the Mochi skill</a> and <a href=\"/llms.txt\">llms.txt</a>."]
+}

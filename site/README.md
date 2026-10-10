@@ -1,21 +1,34 @@
 # Download page
 
-The page behind https://get-mochi.vercel.app: plain static files, no build step.
+The page behind https://get-mochi.vercel.app: static files, no build step on the server.
 It names no author and does not link to this repository.
 
-- `index.html` is the page.
+- `page.json` holds every word on the page and which screenshots it shows.
+- `build.py` turns `page.json` into `index.html`. The same `build.py` sits in every app's
+  `site/` folder, so all the download pages share one design. After an edit:
+
+  ```
+  python build.py
+  ```
+
+- `img/` holds real screenshots of the app as WebP, `-light` and `-dark` where the app has both
+  looks. Never put a mock-up or an edited screenshot there.
+- `jakarta.woff2` is the Plus Jakarta Sans typeface, served from the page itself;
+  `jakarta-OFL.txt` is its licence.
 - `vercel.json` holds the download addresses, each a temporary redirect:
-  - `/install.ps1`: the newest release's `install.ps1`
-  - `/latest`: the newest release's details (JSON)
-  - `/download/windows`: the newest release's `Mochi-Setup.exe`
-  - `/download/:file`: the newest release's `:file`
-  - `/download/:tag/:file`: that file of that release
-  - `/schema.json`: `schema.json` on the main branch
-- `llms.txt` describes Mochi for AI assistants.
-- `skill/mochi/` is the assistant skill, and `skill/mochi.zip` is that folder zipped. Rebuild the zip after an edit, from this folder:
+  - `/install.ps1`
+  - `/latest`
+  - `/download/windows`
+  - `/download/:file`
+  - `/download/:tag/:file`
+  - `/schema.json`
+- `llms.txt` describes the app for AI assistants.
+- `skill/mochi/` is the assistant skill, and `skill/mochi.zip` is that folder zipped. Rebuild the zip
+  after an edit, from this folder:
 
   ```
   python -c "import shutil; shutil.make_archive('skill/mochi', 'zip', 'skill', 'mochi')"
   ```
 
-Vercel deploys this folder whenever a push to main changes it. `.vercelignore` keeps this README off the site.
+Vercel deploys this folder whenever a push to main changes it. `.vercelignore` keeps this README,
+`build.py` and `page.json` off the site.
