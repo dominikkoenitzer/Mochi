@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, LPARAM, WIN32_ERROR, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError, HANDLE, LPARAM,
+    WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Com::{
@@ -25,7 +26,9 @@ use windows::Win32::System::Registry::{
     RegDeleteTreeW, RegGetValueW, RegOpenKeyExW, RegQueryInfoKeyW, RegSetKeyValueW,
 };
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
+use windows::Win32::System::Threading::{
+    CreateMutexW, GetCurrentProcess, GetCurrentProcessId, OpenProcessToken,
+};
 use windows::Win32::UI::Controls::{
     TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDCBF_CLOSE_BUTTON, TaskDialogIndirect,
 };
@@ -502,5 +505,17 @@ pub fn create_shortcut(path: &Path, mochic: &Path, icon: &Path) -> Result<(), St
         }
         file.Save(&HSTRING::from(path.as_os_str()), true)
             .map_err(fail)
+    }
+}
+
+/// Whether this is the only setup running for this user. A second double
+/// click while the first is still busy would race it for the same files.
+pub fn first_instance() -> bool {
+    unsafe {
+        match CreateMutexW(None, true, &HSTRING::from(r"Local\MochiSetup")) {
+            // The handle stays open until this process exits, which is the point.
+            Ok(_) => GetLastError() != ERROR_ALREADY_EXISTS,
+            Err(_) => true,
+        }
     }
 }

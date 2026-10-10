@@ -39,6 +39,11 @@ pub fn run() -> i32 {
             return 2;
         }
     };
+    // A second double click while the first setup is busy: that one is
+    // already on screen.
+    if !win::first_instance() {
+        return 0;
+    }
     let Some(layout) = layout() else {
         return fail(
             options,
