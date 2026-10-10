@@ -15,7 +15,7 @@ next to the old ones and the switch is reversible.
 | its separate hotkey daemon | nothing to install, `mochi.exe` binds the keys |
 | `%USERPROFILE%\.config\mochi\whkdrc` | `%USERPROFILE%\.config\mochi\hotkeys` |
 | `applications.json` | same file, keep `app_specific_configuration_path` |
-| its log file | `%LOCALAPPDATA%\mochi\mochi.log` |
+| its log file | `%LOCALAPPDATA%\mochi\mochi.log.<date>`, one per day |
 
 `%USERPROFILE%\.config\mochi\whkdrc` is the one other name Mochi looks for by
 itself, for a desktop that kept the old file name in the new folder. A hotkey

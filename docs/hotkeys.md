@@ -284,8 +284,9 @@ alt + shift + t : toggle-scratchpad term
   as a parse error with its line number.
 - A mode may still be on. Inside one only its own keys are bound; in the
   shipped file `Esc` leaves it.
-- The log at `%LOCALAPPDATA%\mochi\mochi.log` records every hotkey that fired
-  and every shell command that failed to start.
+- The log in `%LOCALAPPDATA%\mochi`, one `mochi.log.<date>` file per day,
+  records every hotkey that fired and every shell command that failed to
+  start.
 - Another program may own the key. Windows calls the most recently installed
   keyboard hook first, so between Mochi and another hotkey daemon on the same
   key, whichever started last wins and the other one never sees the press. Two
