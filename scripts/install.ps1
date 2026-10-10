@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Without a checkout, for example run as
-        irm https://github.com/dominikkoenitzer/Mochi/releases/latest/download/install.ps1 | iex
+        irm https://get-mochi.vercel.app/install.ps1 | iex
     it downloads the latest release from GitHub and verifies the SHA256 file
     that ships with it. From a checkout it builds the release binaries with
     cargo instead. Either way mochi.exe and mochic.exe end up in
@@ -31,9 +31,6 @@
     release. Without it the repository is built from source with cargo, or,
     when the script was downloaded on its own and has no checkout around it,
     the latest release is installed.
-
-.PARAMETER Repo
-    GitHub repository to download releases from.
 
 .PARAMETER InstallRoot
     Install directory. The binaries land in <InstallRoot>\bin.
@@ -79,7 +76,6 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string] $Version,
-    [string] $Repo = 'dominikkoenitzer/Mochi',
     [string] $InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\Mochi'),
     [switch] $SkipPath,
     [switch] $SkipQuickstart,
@@ -87,6 +83,11 @@ param(
     [switch] $SkipStart,
     [switch] $Uninstall
 )
+
+# Every download goes through this address: /install.ps1 is this script,
+# /latest names the newest release, /download/<tag>/<file> is one of its
+# files.
+$BaseUrl = 'https://get-mochi.vercel.app'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -287,23 +288,6 @@ function Get-RepoRoot {
     return $root
 }
 
-# A native command run with its stderr redirected turns every stderr line into
-# an error record under Windows PowerShell 5.1, and Stop makes that fatal. The
-# GitHub CLI writes to stderr whenever it is not signed in, which is exactly
-# the case the plain download below exists for.
-function Invoke-Quietly {
-    param([Parameter(Mandatory)][scriptblock] $Command)
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        return (& $Command)
-    } catch {
-        return $null
-    } finally {
-        $ErrorActionPreference = $previous
-    }
-}
-
 # The acquisition functions print progress, so they hand the result over in
 # $acquired.SourceDir instead of returning it.
 function Invoke-CargoBuild {
@@ -323,19 +307,13 @@ function Invoke-CargoBuild {
 }
 
 # `latest` is resolved to the newest published release tag here, so every
-# later step works with a real tag and the download names stay exact. The
-# GitHub CLI goes first for the same reason as in the download below.
+# later step works with a real tag and the download names stay exact.
 function Resolve-ReleaseTag {
     param([Parameter(Mandatory)][string] $Tag)
 
     if ($Tag -ne 'latest') { return $Tag }
-    $gh = (Get-Command gh -ErrorAction SilentlyContinue)
-    if ($gh) {
-        $found = Invoke-Quietly { & $gh.Source release view --repo $Repo --json tagName --jq .tagName 2>$null }
-        if ($LASTEXITCODE -eq 0 -and $found) { return "$found".Trim() }
-    }
     try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
+        $release = Invoke-RestMethod -Uri "$BaseUrl/latest" -UseBasicParsing
         return $release.tag_name
     } catch {
         throw "could not find the latest Mochi release ($($_.Exception.Message)). Pass a tag such as -Version v0.1.20."
@@ -365,7 +343,7 @@ function Save-ReleaseAsset {
     # releases carry the version in the name; -Version on one of those still
     # finds it.
     $names = @('Mochi-x86_64-pc-windows-msvc', "Mochi-$Tag-x86_64-pc-windows-msvc")
-    $base = "https://github.com/$Repo/releases/download/$Tag"
+    $base = "$BaseUrl/download/$Tag"
     $work = Join-Path $env:TEMP "mochi-install-$Tag"
 
     Write-Step "downloading Mochi $Tag"
@@ -381,12 +359,6 @@ function Save-ReleaseAsset {
 
     New-Item -ItemType Directory -Force -Path $work | Out-Null
 
-    # For a private fork GitHub answers 404 rather than 403, so the plain
-    # download looks like a missing file. The GitHub CLI carries the
-    # credentials that make it visible, so it goes first when it is installed.
-    # Installed is not signed in, though: when it fails, the plain download
-    # still gets its turn instead of the install stopping there.
-    $gh = (Get-Command gh -ErrorAction SilentlyContinue)
     $zip = $null
     $sum = $null
     $haveSum = $false
@@ -394,16 +366,6 @@ function Save-ReleaseAsset {
     foreach ($name in $names) {
         $candidate = Join-Path $work "$name.zip"
         $candidateSum = "$candidate.sha256"
-        if ($gh) {
-            [void] (Invoke-Quietly { & $gh.Source release download $Tag --repo $Repo --pattern "$name.zip*" --dir $work --clobber 2>$null })
-            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $candidate)) {
-                Write-Detail "$name.zip, using $($gh.Source)"
-                $zip = $candidate
-                $sum = $candidateSum
-                $haveSum = Test-Path -LiteralPath $candidateSum
-                break
-            }
-        }
         try {
             Invoke-WebRequest -Uri "$base/$name.zip" -OutFile $candidate -UseBasicParsing
         } catch {
@@ -888,7 +850,7 @@ function Install-Mochi {
         Write-Detail "hotkeys    not written, see docs/hotkeys.md for $HotkeyPath"
     }
     Write-Detail "log        $LogPath"
-    Write-Detail "uninstall  & ([scriptblock]::Create((irm https://github.com/$Repo/releases/latest/download/install.ps1))) -Uninstall"
+    Write-Detail "uninstall  & ([scriptblock]::Create((irm $BaseUrl/install.ps1))) -Uninstall"
 
     Write-Step 'the way out, before Mochi rearranges your windows'
     Write-WayOut
