@@ -164,12 +164,9 @@
     "code": "{\n  \"mcpServers\": {\n    \"mochi\": {\n      \"command\": \"C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Programs\\\\Mochi\\\\bin\\\\mochic.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}"
   },
   "new": {
-    "version": "0.1.21",
+    "version": "0.1.22",
     "items": [
-      "<code>Mochi-Setup.exe</code>: download, double-click, done. It adds Mochi to Installed apps, and Uninstall there removes it.",
-      "<code>Mochi-Setup.exe --quiet</code> installs without asking, <code>--uninstall --quiet</code> removes it.",
-      "<code>mochic mcp</code>, a local MCP server for AI assistants.",
-      "<code>mochic start --dry-run</code> now runs in the terminal it was typed in."
+      "The focused border stays on the window after you click it or move it."
     ]
   },
   "requirements": [
