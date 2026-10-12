@@ -29,18 +29,20 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenProcessToken,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::HiDpi::{
+    GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, BringWindowToTop, DeferWindowPos, EndDeferWindowPos, EnumChildWindows,
     EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
     GetCursorPos, GetForegroundWindow, GetShellWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
     IsIconic, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, MINMAXINFO, PostMessageW,
-    SET_WINDOW_POS_FLAGS, SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE,
-    SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SendMessageTimeoutW, SetCursorPos, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE,
-    WM_GETMINMAXINFO, WindowFromPoint,
+    SET_WINDOW_POS_FLAGS, SM_CXMAXTRACK, SM_CXMINTRACK, SM_CYMAXTRACK, SM_CYMINTRACK,
+    SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SendMessageTimeoutW, SetCursorPos, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE, WM_GETMINMAXINFO, WindowFromPoint,
 };
 
 use super::appview::{self, ViewCloakError};
@@ -824,7 +826,29 @@ impl Platform for Win32Platform {
 
     fn min_size(&self, h: Hwnd) -> Option<MinSize> {
         let handle = hwnd(h);
-        let mut info = MINMAXINFO::default();
+        // SAFETY: tolerates any handle value; a window that is already gone
+        // reads as 0, which counts as 96 DPI.
+        let window_dpi = unsafe { GetDpiForWindow(handle) };
+        let metric_dpi = if window_dpi == 0 { 96 } else { window_dpi };
+        // Filled in the way Windows fills it in before it asks, in the
+        // window's own DPI: many applications only adjust what they find, and
+        // one that keeps the system's minimum, or clamps the minimum to the
+        // maximum, answers nothing useful to a structure of zeros.
+        // SAFETY: plain metric reads.
+        let metric = |index| unsafe { GetSystemMetricsForDpi(index, metric_dpi) };
+        let max = POINT {
+            x: metric(SM_CXMAXTRACK),
+            y: metric(SM_CYMAXTRACK),
+        };
+        let mut info = MINMAXINFO {
+            ptMaxSize: max,
+            ptMaxTrackSize: max,
+            ptMinTrackSize: POINT {
+                x: metric(SM_CXMINTRACK),
+                y: metric(SM_CYMINTRACK),
+            },
+            ..MINMAXINFO::default()
+        };
         let mut result = 0_usize;
         // SAFETY: user32 marshals WM_GETMINMAXINFO's structure across a
         // process boundary itself, in both directions, so a pointer into this
@@ -845,9 +869,7 @@ impl Platform for Win32Platform {
         if answered.0 == 0 {
             return None;
         }
-        // SAFETY: both tolerate any handle value; a window that died in the
-        // meantime reads as 0, which counts as 96 DPI.
-        let window_dpi = unsafe { GetDpiForWindow(handle) };
+        // SAFETY: tolerates any handle value.
         let monitor = unsafe { MonitorFromWindow(handle, MONITOR_DEFAULTTONEAREST) };
         let (mut dpi_x, mut dpi_y) = (window_dpi, window_dpi);
         // SAFETY: the monitor handle came from MonitorFromWindow just now.
