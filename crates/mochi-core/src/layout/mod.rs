@@ -1142,6 +1142,477 @@ mod tests {
         assert_eq!(Sizing::Increase.to_string(), "increase");
     }
 
+    // -- window minimums ----------------------------------------------------
+
+    const fn min(width: i32, height: i32) -> Option<MinSize> {
+        Some(MinSize { width, height })
+    }
+
+    /// The layout with the default tile floor, no padding and these window
+    /// minimums.
+    fn fitted(layout: Layout, len: usize, windows: &[Option<MinSize>]) -> Vec<Rect> {
+        layout.calculate_fitted(
+            AREA,
+            len,
+            0,
+            Flip::NONE,
+            &[],
+            Minimums {
+                tile: MinSize::default(),
+                windows,
+            },
+        )
+    }
+
+    fn assert_minimums_kept(rects: &[Rect], windows: &[Option<MinSize>]) {
+        for (i, (rect, min)) in rects.iter().zip(windows).enumerate() {
+            if let Some(min) = min {
+                assert!(
+                    rect.width() >= min.width && rect.height() >= min.height,
+                    "window {i} accepts {}x{} and got {rect:?}",
+                    min.width,
+                    min.height
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn four_demanding_windows_on_the_4k_panel_no_longer_overlap() {
+        // His desktop: the 4K panel at 150 percent, workspace padding 14,
+        // container padding 10, BSP with WhatsApp, Brave, Spotify and Discord.
+        // The bottom right quarter used to be cut into two tiles of about 920
+        // pixels, narrower than both Spotify and Discord accept, so the two
+        // windows spilled over each other.
+        use crate::model::{Window, WindowId, Workspace};
+
+        let work_area = Rect::new(0, 0, 3840, 2088);
+        let tiling_area = Rect::new(21, 21, 3819, 2067);
+        // Logical minimums as the windows report them, and the physical
+        // sizes they come to at 150 percent.
+        let windows = [
+            (
+                MinSize {
+                    width: 500,
+                    height: 400,
+                },
+                (750, 600),
+            ),
+            (
+                MinSize {
+                    width: 515,
+                    height: 88,
+                },
+                (772, 131),
+            ),
+            (
+                MinSize {
+                    width: 800,
+                    height: 600,
+                },
+                (1200, 900),
+            ),
+            (
+                MinSize {
+                    width: 814,
+                    height: 508,
+                },
+                (1221, 761),
+            ),
+        ];
+
+        let blind = Layout::Bsp.calculate_with_min(
+            tiling_area,
+            4,
+            15,
+            Flip::NONE,
+            &[],
+            MinSize::square(96),
+        );
+        assert!(
+            blind[2].width() < 1200 && blind[3].width() < 1221,
+            "without the window minimums the bottom right is too narrow: {blind:?}"
+        );
+
+        let mut ws = Workspace::new();
+        for (i, (logical, _)) in windows.iter().enumerate() {
+            ws.add_window(Window::new(i as isize + 1).with_min_size(Some(*logical)));
+        }
+        let rects = ws
+            .update_layout_scaled(work_area, 14, 10, 1.5, 1.5)
+            .to_vec();
+        assert_eq!(rects.len(), 4);
+
+        for (i, (_, (width, height))) in windows.iter().enumerate() {
+            let idx = ws
+                .container_idx_for_window(WindowId(i as isize + 1))
+                .unwrap();
+            let rect = rects[idx];
+            assert!(
+                tiling_area.contains_rect(&rect),
+                "window {i} escapes the tiling area: {rect:?}"
+            );
+            assert!(
+                rect.width() >= *width && rect.height() >= *height,
+                "window {i} accepts {width}x{height} and got {rect:?}"
+            );
+        }
+        for (i, a) in rects.iter().enumerate() {
+            for (j, b) in rects.iter().enumerate().skip(i + 1) {
+                assert!(!a.intersects(b), "tiles {i} and {j} overlap: {a:?} {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn window_minimums_that_never_bind_give_exactly_the_old_layout() {
+        let resizes = [
+            vec![],
+            vec![Some(Rect::new(-120, 80, 200, -60)); 8],
+            vec![Some(Rect::new(-100_000, 100_000, 100_000, -100_000)); 8],
+            vec![
+                Some(Rect::new(
+                    i32::MIN / 2,
+                    i32::MAX / 2,
+                    i32::MAX / 2,
+                    i32::MIN / 2
+                ));
+                8
+            ],
+        ];
+        for layout in Layout::ALL {
+            for len in 1..=8 {
+                for resize in &resizes {
+                    for padding in [0, 10] {
+                        for flip in [Flip::NONE, Flip::both()] {
+                            let tile = MinSize::default();
+                            let old =
+                                layout.calculate_with_min(AREA, len, padding, flip, resize, tile);
+                            let none = vec![None; len];
+                            let small = vec![min(10, 10); len];
+                            for windows in [none.as_slice(), small.as_slice(), &[]] {
+                                let new = layout.calculate_fitted(
+                                    AREA,
+                                    len,
+                                    padding,
+                                    flip,
+                                    resize,
+                                    Minimums { tile, windows },
+                                );
+                                assert_eq!(
+                                    new, old,
+                                    "{layout} with {len}, padding {padding}, {flip:?}, {windows:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_negative_window_minimum_changes_nothing() {
+        let windows = [min(-500, i32::MIN), None, min(0, 0)];
+        for layout in Layout::ALL {
+            assert_eq!(
+                layout.calculate_fitted(
+                    AREA,
+                    3,
+                    10,
+                    Flip::NONE,
+                    &[],
+                    Minimums {
+                        tile: MinSize::default(),
+                        windows: &windows,
+                    },
+                ),
+                layout.calculate_with_min(AREA, 3, 10, Flip::NONE, &[], MinSize::default()),
+                "{layout}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_window_list_counts_the_rest_as_unknown_and_a_long_one_is_cut_off() {
+        for layout in Layout::ALL {
+            assert_eq!(
+                fitted(layout, 4, &[None, min(1000, 0)]),
+                fitted(layout, 4, &[None, min(1000, 0), None, None]),
+                "{layout}"
+            );
+            assert_eq!(
+                fitted(layout, 2, &[None, None, min(5000, 5000)]),
+                layout.calculate_with_min(AREA, 2, 0, Flip::NONE, &[], MinSize::default()),
+                "{layout}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_container_padding_is_added_to_a_window_minimum() {
+        let windows = [None, min(1200, 0)];
+        let rects = Layout::Bsp.calculate_fitted(
+            AREA,
+            2,
+            10,
+            Flip::NONE,
+            &[],
+            Minimums {
+                tile: MinSize::default(),
+                windows: &windows,
+            },
+        );
+        assert_eq!(rects[0], Rect::new(10, 10, 690, 1070));
+        assert_eq!(rects[1], Rect::new(710, 10, 1910, 1070));
+    }
+
+    #[test]
+    fn a_vertical_stack_widens_the_whole_stack_for_one_wide_window() {
+        let windows = [None, None, min(1200, 0)];
+        let rects = fitted(Layout::VerticalStack, 3, &windows);
+        assert_eq!(rects[0], Rect::new(0, 0, 720, 1080));
+        assert_eq!(rects[1], Rect::new(720, 0, 1920, 540), "it spans the stack");
+        assert_tiles(&rects, AREA);
+        assert_minimums_kept(&rects, &windows);
+    }
+
+    #[test]
+    fn a_vertical_stack_keeps_a_tall_stack_window_and_a_wide_main_one() {
+        let windows = [min(1500, 0), min(0, 900), None];
+        let rects = fitted(Layout::VerticalStack, 3, &windows);
+        assert_eq!(rects[0], Rect::new(0, 0, 1500, 1080));
+        assert_eq!(rects[1], Rect::new(1500, 0, 1920, 900));
+        assert_eq!(rects[2], Rect::new(1500, 900, 1920, 1080));
+        assert_tiles(&rects, AREA);
+    }
+
+    #[test]
+    fn a_horizontal_stack_keeps_a_tall_main_window_and_a_wide_stack_one() {
+        let windows = [min(0, 800), min(1400, 0), None];
+        let rects = fitted(Layout::HorizontalStack, 3, &windows);
+        assert_eq!(rects[0], Rect::new(0, 0, 1920, 800));
+        assert_eq!(rects[1], Rect::new(0, 800, 1400, 1080));
+        assert_eq!(rects[2], Rect::new(1400, 800, 1920, 1080));
+        assert_tiles(&rects, AREA);
+    }
+
+    #[test]
+    fn a_horizontal_stack_gives_the_whole_stack_the_height_of_its_tallest_window() {
+        let windows = [None, None, min(0, 700)];
+        let rects = fitted(Layout::HorizontalStack, 3, &windows);
+        assert_eq!(rects[0], Rect::new(0, 0, 1920, 380));
+        assert_eq!(rects[1].height(), 700);
+        assert_tiles(&rects, AREA);
+        assert_minimums_kept(&rects, &windows);
+    }
+
+    #[test]
+    fn ultrawide_with_two_keeps_either_windows_minimum() {
+        // The primary is rects[0] on the right, the secondary rects[1] on
+        // the left.
+        let rects = fitted(Layout::UltrawideVerticalStack, 2, &[min(1500, 0), None]);
+        assert_eq!(rects[0], Rect::new(420, 0, 1920, 1080));
+        assert_eq!(rects[1], Rect::new(0, 0, 420, 1080));
+
+        let rects = fitted(Layout::UltrawideVerticalStack, 2, &[None, min(1500, 0)]);
+        assert_eq!(rects[0], Rect::new(1500, 0, 1920, 1080));
+        assert_eq!(rects[1], Rect::new(0, 0, 1500, 1080));
+    }
+
+    #[test]
+    fn ultrawide_with_more_keeps_the_primary_the_secondary_and_the_stack() {
+        let rects = fitted(
+            Layout::UltrawideVerticalStack,
+            4,
+            &[min(1200, 0), None, None, None],
+        );
+        assert_eq!(rects[0], Rect::new(360, 0, 1560, 1080), "primary");
+        assert_eq!(rects[1], Rect::new(0, 0, 360, 1080), "secondary");
+        assert_eq!(rects[2], Rect::new(1560, 0, 1920, 540));
+
+        let rects = fitted(
+            Layout::UltrawideVerticalStack,
+            4,
+            &[None, min(700, 0), None, None],
+        );
+        assert_eq!(rects[1], Rect::new(0, 0, 700, 1080), "secondary");
+        assert_eq!(rects[0], Rect::new(700, 0, 1513, 1080), "primary");
+
+        let windows = [None, None, None, min(800, 900)];
+        let rects = fitted(Layout::UltrawideVerticalStack, 4, &windows);
+        assert_eq!(rects[2], Rect::new(1120, 0, 1920, 180));
+        assert_eq!(rects[3], Rect::new(1120, 180, 1920, 1080));
+        assert_tiles(&rects, AREA);
+        assert_minimums_kept(&rects, &windows);
+    }
+
+    #[test]
+    fn a_grid_column_is_as_wide_as_its_widest_cell_needs() {
+        let rects = fitted(Layout::Grid, 4, &[None, min(1400, 0), None, None]);
+        assert_eq!(rects[0], Rect::new(0, 0, 1400, 540));
+        assert_eq!(rects[1], Rect::new(0, 540, 1400, 1080));
+        assert_eq!(rects[2], Rect::new(1400, 0, 1920, 540));
+
+        let windows = [None, min(1000, 0), min(1300, 0)];
+        let rects = fitted(Layout::Grid, 3, &windows);
+        assert_eq!(rects[0], Rect::new(0, 0, 620, 1080));
+        assert_eq!(rects[1], Rect::new(620, 0, 1920, 540));
+        assert_eq!(rects[2], Rect::new(620, 540, 1920, 1080));
+        assert_minimums_kept(&rects, &windows);
+    }
+
+    #[test]
+    fn a_grid_row_keeps_a_tall_cell_and_leaves_the_other_column_alone() {
+        let rects = fitted(Layout::Grid, 4, &[None, None, min(0, 900), None]);
+        assert_eq!(rects[0], Rect::new(0, 0, 960, 540));
+        assert_eq!(rects[2], Rect::new(960, 0, 1920, 900));
+        assert_eq!(rects[3], Rect::new(960, 900, 1920, 1080));
+    }
+
+    #[test]
+    fn columns_and_rows_take_the_room_from_every_other_slice() {
+        let rects = fitted(Layout::Columns, 4, &[None, min(1000, 0), None, None]);
+        let widths: Vec<i32> = rects.iter().map(Rect::width).collect();
+        assert_eq!(widths, vec![306, 1000, 307, 307]);
+        assert_tiles(&rects, AREA);
+
+        let rects = fitted(Layout::Rows, 3, &[min(0, 700), None, None]);
+        assert_eq!(rects[0], Rect::new(0, 0, 1920, 700));
+        assert_eq!(rects[1], Rect::new(0, 700, 1920, 890));
+        assert_eq!(rects[2], Rect::new(0, 890, 1920, 1080));
+    }
+
+    #[test]
+    fn every_layout_keeps_a_window_minimum_that_fits_and_still_tiles() {
+        for layout in Layout::ALL {
+            for len in 1..=6 {
+                for idx in 0..len {
+                    let mut windows = vec![None; len];
+                    windows[idx] = min(400, 250);
+                    let rects = fitted(layout, len, &windows);
+                    assert_tiles(&rects, AREA);
+                    assert_minimums_kept(&rects, &windows);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_wider_than_the_whole_area_starts_at_its_left_and_overflows_right() {
+        let windows = [None, min(3000, 0)];
+        let rects = Layout::Columns.calculate_fitted(
+            AREA,
+            2,
+            10,
+            Flip::NONE,
+            &[],
+            Minimums {
+                tile: MinSize::default(),
+                windows: &windows,
+            },
+        );
+        assert_eq!(rects[1], Rect::new(10, 10, 3010, 1070));
+        assert!(rects[0].width() >= 1 && rects[0].height() >= 1);
+    }
+
+    #[test]
+    fn a_window_at_the_right_edge_grows_leftwards_to_stay_inside() {
+        // 1000 + 128 + 1000 does not fit in 1920, so the layout shares the
+        // shortfall and both windows are handed the rectangle they really
+        // cover: the left one grows right, the right one grows left.
+        let windows = [min(1000, 0), None, min(1000, 0)];
+        let rects = fitted(Layout::Columns, 3, &windows);
+        assert_eq!(rects[0], Rect::new(0, 0, 1000, 1080));
+        assert_eq!(rects[2], Rect::new(920, 0, 1920, 1080));
+        for rect in &rects {
+            assert!(AREA.contains_rect(rect), "{rect:?}");
+        }
+    }
+
+    #[test]
+    fn a_grown_rect_stays_inside_the_area_whatever_the_flip() {
+        let windows = [min(1000, 600), None, min(1000, 600)];
+        for flip in [
+            Flip::NONE,
+            Flip::horizontal(),
+            Flip::vertical(),
+            Flip::both(),
+        ] {
+            for layout in Layout::ALL {
+                for padding in [0, 10] {
+                    let rects = layout.calculate_fitted(
+                        AREA,
+                        3,
+                        padding,
+                        flip,
+                        &[],
+                        Minimums {
+                            tile: MinSize::default(),
+                            windows: &windows,
+                        },
+                    );
+                    for (i, rect) in rects.iter().enumerate() {
+                        assert!(
+                            AREA.padded_clamped(padding).contains_rect(rect),
+                            "{layout} {flip:?} padding {padding}: rect {i} escapes: {rect:?}"
+                        );
+                        assert!(rect.width() >= 1 && rect.height() >= 1);
+                    }
+                    assert_minimums_kept(&rects, &windows);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absurd_window_minimums_never_panic_and_never_erase_a_tile() {
+        let areas = [
+            AREA,
+            Rect::new(-1080, 200, 0, 1000),
+            Rect::new(0, 0, 7, 7),
+            Rect::new(0, 0, 0, 0),
+        ];
+        let absurd = [
+            min(i32::MAX, i32::MAX),
+            min(i32::MIN, i32::MAX),
+            min(i32::MAX - 1, 0),
+            min(100_000, 100_000),
+            None,
+        ];
+        for area in areas {
+            for layout in Layout::ALL {
+                for len in 1..=6 {
+                    for (k, first) in absurd.iter().enumerate() {
+                        let windows: Vec<Option<MinSize>> =
+                            (0..len).map(|i| absurd[(k + i) % absurd.len()]).collect();
+                        assert_eq!(windows[0], *first);
+                        for padding in [0, 15] {
+                            let rects = layout.calculate_fitted(
+                                area,
+                                len,
+                                padding,
+                                Flip::both(),
+                                &[],
+                                Minimums {
+                                    tile: MinSize::default(),
+                                    windows: &windows,
+                                },
+                            );
+                            assert_eq!(rects.len(), len);
+                            for (i, rect) in rects.iter().enumerate() {
+                                assert!(
+                                    rect.width() >= 1 && rect.height() >= 1,
+                                    "{layout} {len} in {area:?}: rect {i} is {rect:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// A rough guard against the layout arithmetic growing a hidden cost.
     /// Ignored by default, because a timing assertion on a busy machine is a
     /// flake waiting to happen: `cargo test -p mochi-core -- --ignored`.

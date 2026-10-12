@@ -2587,6 +2587,196 @@ mod tests {
         }
     }
 
+    // -- window minimums ----------------------------------------------------
+
+    const fn min_size(width: i32, height: i32) -> Option<MinSize> {
+        Some(MinSize { width, height })
+    }
+
+    #[test]
+    fn a_new_window_minimum_retiles_the_workspace_on_screen() {
+        let mut state = with_windows(2);
+        let changes = state.set_window_min_size(WindowId(2), min_size(1200, 0));
+        assert_eq!(changes, Changes::none().retile(0, 0));
+        assert_eq!(
+            state.rect_for_window(WindowId(1)),
+            Some(Rect::new(0, 0, 720, 1080))
+        );
+        assert_eq!(
+            state.rect_for_window(WindowId(2)),
+            Some(Rect::new(720, 0, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn a_window_minimum_on_the_other_monitor_retiles_that_monitor() {
+        // Workspace 0 of the side monitor is on screen even though the main
+        // monitor has the focus.
+        let mut state = with_windows(1);
+        state.add_window_to(1, 0, Window::new(7)).unwrap();
+        state.add_window_to(1, 0, Window::new(8)).unwrap();
+        assert_eq!(
+            state.set_window_min_size(WindowId(8), min_size(0, 1500)),
+            Changes::none().retile(1, 0)
+        );
+        assert!(state.rect_for_window(WindowId(8)).unwrap().height() >= 1500);
+    }
+
+    #[test]
+    fn an_unchanged_or_unknown_window_minimum_does_nothing() {
+        let mut state = with_windows(2);
+        assert!(
+            !state
+                .set_window_min_size(WindowId(2), min_size(1200, 0))
+                .is_empty()
+        );
+        let before = state.workspace(0, 0).unwrap().latest_layout().to_vec();
+        assert_eq!(
+            state.set_window_min_size(WindowId(2), min_size(1200, 0)),
+            Changes::none()
+        );
+        assert_eq!(
+            state.set_window_min_size(WindowId(99), min_size(1200, 0)),
+            Changes::none()
+        );
+        assert_eq!(
+            state.set_window_min_size(WindowId(99), None),
+            Changes::none()
+        );
+        assert_eq!(state.workspace(0, 0).unwrap().latest_layout(), before);
+    }
+
+    #[test]
+    fn a_window_minimum_on_a_hidden_workspace_relays_it_out_without_a_redraw() {
+        let mut state = with_windows(1);
+        state.add_window_to(0, 3, Window::new(7)).unwrap();
+        state.add_window_to(0, 3, Window::new(8)).unwrap();
+        let changes = state.set_window_min_size(WindowId(8), min_size(1200, 0));
+        assert_eq!(changes, Changes::none());
+        assert_eq!(
+            state.rect_for_window(WindowId(8)),
+            Some(Rect::new(720, 0, 1920, 1080)),
+            "whatever reads the hidden workspace gets the new rectangles"
+        );
+    }
+
+    #[test]
+    fn a_window_minimum_while_paused_is_recorded_but_moves_nothing() {
+        let mut state = with_windows(2);
+        state.toggle_pause().unwrap();
+        let changes = state.set_window_min_size(WindowId(2), min_size(1200, 0));
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(
+            state.window(WindowId(2)).and_then(|w| w.min_size),
+            min_size(1200, 0)
+        );
+
+        let changes = state.toggle_pause().unwrap();
+        assert!(!changes.retiled.is_empty());
+        assert_eq!(
+            state.rect_for_window(WindowId(2)),
+            Some(Rect::new(720, 0, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn a_window_minimum_follows_the_display_scale_even_when_the_paddings_do_not() {
+        let mut state = State::new();
+        let area = Rect::new(0, 0, 3840, 2160);
+        state.add_monitor(Monitor::new(1, area, area).with_dpi(144));
+        state.default_workspace_padding = 0;
+        state.default_container_padding = 0;
+        state.scale_padding_with_dpi = false;
+        state.add_window(Window::new(1)).unwrap();
+        state.add_window(Window::new(2)).unwrap();
+
+        state.set_window_min_size(WindowId(2), min_size(2000, 0));
+        assert_eq!(
+            state.rect_for_window(WindowId(2)),
+            Some(Rect::new(840, 0, 3840, 2160)),
+            "2000 logical pixels are 3000 physical ones at 150 percent"
+        );
+    }
+
+    #[test]
+    fn resizing_never_shrinks_a_tile_below_its_windows_minimum() {
+        let mut state = with_windows(2);
+        state.set_window_min_size(WindowId(2), min_size(1000, 0));
+        assert_eq!(
+            state.rect_for_window(WindowId(1)),
+            Some(Rect::new(0, 0, 920, 1080)),
+            "the cut already sits as far right as window 2 allows"
+        );
+
+        state.focus_window(WindowId(1)).unwrap();
+        let changes = state
+            .resize_axis(Axis::Horizontal, Sizing::Increase)
+            .unwrap();
+        assert!(changes.is_empty(), "{changes:?}");
+        let changes = state
+            .resize_edge(Direction::Right, Sizing::Increase)
+            .unwrap();
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(state.workspace(0, 0).unwrap().resize_dimension(0), None);
+
+        state.focus_window(WindowId(2)).unwrap();
+        let changes = state
+            .resize_axis(Axis::Horizontal, Sizing::Decrease)
+            .unwrap();
+        assert!(changes.is_empty(), "{changes:?}");
+        let changes = state
+            .resize_edge(Direction::Left, Sizing::Decrease)
+            .unwrap();
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(state.workspace(0, 0).unwrap().resize_dimension(1), None);
+        assert_eq!(
+            state.rect_for_window(WindowId(2)),
+            Some(Rect::new(920, 0, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn leaning_on_the_resize_key_stops_at_the_neighbours_window_minimum() {
+        let mut state = with_windows(2);
+        state.set_window_min_size(WindowId(2), min_size(900, 0));
+        state.focus_window(WindowId(1)).unwrap();
+        let mut presses = 0;
+        while !state
+            .resize_axis(Axis::Horizontal, Sizing::Increase)
+            .unwrap()
+            .is_empty()
+        {
+            presses += 1;
+            assert!(presses < 100, "the clamp never stopped the key");
+        }
+        assert_eq!(presses, 2, "960 to 1010, then the last 10 pixels to 1020");
+        assert_eq!(
+            state.rect_for_window(WindowId(2)),
+            Some(Rect::new(1020, 0, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn resizing_a_neighbour_of_a_deep_window_in_a_bsp_keeps_its_minimum() {
+        let mut state = with_windows(4);
+        state.set_window_min_size(WindowId(4), min_size(0, 900));
+        for id in 1..=4 {
+            state.focus_window(WindowId(id)).unwrap();
+            for axis in [Axis::Horizontal, Axis::Vertical] {
+                for sizing in [Sizing::Increase, Sizing::Decrease] {
+                    for _ in 0..30 {
+                        state.resize_axis(axis, sizing).unwrap();
+                    }
+                    let rect = state.rect_for_window(WindowId(4)).unwrap();
+                    assert!(
+                        rect.height() >= 900,
+                        "window {id} {axis:?} {sizing}: window 4 is {rect:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn resizing_without_a_container_is_an_error() {
         let mut state = state();

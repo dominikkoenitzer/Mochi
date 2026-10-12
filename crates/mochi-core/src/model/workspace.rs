@@ -1602,6 +1602,173 @@ mod tests {
         assert!(ws.tile);
     }
 
+    // -- window minimums ----------------------------------------------------
+
+    const fn logical(width: i32, height: i32) -> Option<crate::layout::MinSize> {
+        Some(crate::layout::MinSize { width, height })
+    }
+
+    #[test]
+    fn without_any_window_minimum_the_layout_is_handed_none() {
+        let ws = workspace_with(3);
+        assert!(ws.window_minimums(1.5).is_empty());
+    }
+
+    #[test]
+    fn a_container_whose_windows_have_not_said_gets_no_minimum() {
+        let mut ws = workspace_with(2);
+        ws.add_window(Window::new(3).with_min_size(logical(400, 300)));
+        assert_eq!(ws.window_minimums(1.0), vec![None, None, logical(400, 300)]);
+    }
+
+    #[test]
+    fn a_stack_keeps_the_largest_minimum_of_all_its_windows() {
+        let mut ws = Workspace::new();
+        ws.add_window(Window::new(1).with_min_size(logical(500, 100)));
+        ws.add_window(Window::new(2));
+        assert!(ws.focus_container(0));
+        ws.containers_mut()
+            .focused_mut()
+            .unwrap()
+            .add_window(Window::new(3).with_min_size(logical(300, 400)));
+        // Window 1 is hidden under window 3 and still counts, so cycling the
+        // stack never moves the tiles around it.
+        assert_eq!(ws.visible_window_ids(), vec![WindowId(3), WindowId(2)]);
+        assert_eq!(ws.window_minimums(1.0), vec![logical(500, 400), None]);
+    }
+
+    #[test]
+    fn window_minimums_are_scaled_to_physical_pixels_and_rounded_up() {
+        let mut ws = Workspace::new();
+        ws.add_window(Window::new(1).with_min_size(logical(815, 814)));
+        assert_eq!(ws.window_minimums(1.5), vec![logical(1223, 1221)]);
+        assert_eq!(ws.window_minimums(1.25), vec![logical(1019, 1018)]);
+        assert_eq!(ws.window_minimums(1.0), vec![logical(815, 814)]);
+    }
+
+    #[test]
+    fn a_broken_display_scale_falls_back_to_one() {
+        let mut ws = Workspace::new();
+        ws.add_window(Window::new(1).with_min_size(logical(815, 814)));
+        for broken in [f32::NAN, 0.0, -0.0, -1.5, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                ws.window_minimums(broken),
+                vec![logical(815, 814)],
+                "display scale {broken}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absurd_window_minimum_saturates_instead_of_overflowing() {
+        let mut ws = Workspace::new();
+        ws.add_window(Window::new(1).with_min_size(logical(i32::MAX, i32::MIN)));
+        let mins = ws.window_minimums(1.5);
+        assert_eq!(mins[0].map(|m| m.width), Some(i32::MAX));
+        ws.update_layout_scaled(WORK_AREA, 0, 0, 1.5, 1.5);
+        assert_eq!(ws.latest_layout().len(), 1);
+    }
+
+    #[test]
+    fn the_display_scale_raises_a_window_minimum_even_when_the_paddings_do_not_scale() {
+        // 815 logical pixels at 150 percent are 1222.5 physical ones. A tile
+        // of 1222 is a pixel short and the window would spill over it.
+        let mut ws = Workspace::new();
+        ws.add_window(Window::new(1));
+        ws.add_window(Window::new(2).with_min_size(logical(815, 0)));
+        let rects = ws.update_layout_scaled(WORK_AREA, 0, 0, 1.0, 1.5).to_vec();
+        assert_eq!(
+            rects,
+            vec![Rect::new(0, 0, 697, 1080), Rect::new(697, 0, 1920, 1080)]
+        );
+    }
+
+    #[test]
+    fn update_layout_reads_the_window_minimums_at_a_scale_of_one() {
+        let mut ws = Workspace::new();
+        ws.add_window(Window::new(1));
+        ws.add_window(Window::new(2).with_min_size(logical(1200, 0)));
+        let rects = ws.update_layout(WORK_AREA, 0, 0).to_vec();
+        assert_eq!(rects[1], Rect::new(720, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn a_floating_window_minimum_leaves_the_tiles_alone() {
+        let mut ws = workspace_with(2);
+        let before = ws.latest_layout().to_vec();
+        ws.add_floating_window(Window::new(9).with_min_size(logical(5000, 5000)));
+        ws.update_layout(WORK_AREA, 0, 0);
+        assert_eq!(ws.latest_layout(), before.as_slice());
+    }
+
+    #[test]
+    fn a_window_minimum_is_recorded_wherever_the_window_is() {
+        let mut ws = workspace_with(4);
+        assert!(ws.focus_container(0));
+        ws.containers_mut()
+            .focused_mut()
+            .unwrap()
+            .add_window(Window::new(9));
+        assert!(
+            ws.set_window_min_size(WindowId(1), logical(100, 100)),
+            "hidden in a stack"
+        );
+
+        assert!(ws.float_window(WindowId(2)));
+        assert!(
+            ws.set_window_min_size(WindowId(2), logical(100, 100)),
+            "floating"
+        );
+
+        assert!(ws.focus_window(WindowId(3)));
+        assert!(ws.toggle_maximize());
+        assert!(
+            ws.set_window_min_size(WindowId(3), logical(100, 100)),
+            "maximized"
+        );
+        assert!(!ws.toggle_maximize());
+
+        assert!(ws.focus_window(WindowId(4)));
+        assert!(ws.toggle_monocle());
+        assert!(
+            ws.set_window_min_size(WindowId(4), logical(100, 100)),
+            "monocle"
+        );
+        assert!(!ws.toggle_monocle());
+
+        for id in [1, 2, 3, 4] {
+            assert_eq!(
+                ws.window(WindowId(id)).and_then(|w| w.min_size),
+                logical(100, 100),
+                "window {id}"
+            );
+        }
+        assert_eq!(ws.window(WindowId(9)).and_then(|w| w.min_size), None);
+    }
+
+    #[test]
+    fn recording_the_same_minimum_again_or_an_unknown_window_reports_no_change() {
+        let mut ws = workspace_with(2);
+        assert!(ws.set_window_min_size(WindowId(1), logical(400, 300)));
+        assert!(!ws.set_window_min_size(WindowId(1), logical(400, 300)));
+        assert!(ws.set_window_min_size(WindowId(1), logical(400, 301)));
+        assert!(
+            ws.set_window_min_size(WindowId(1), None),
+            "forgetting it is a change"
+        );
+        assert!(!ws.set_window_min_size(WindowId(1), None));
+        assert!(!ws.set_window_min_size(WindowId(99), logical(400, 300)));
+    }
+
+    #[test]
+    fn a_window_minimum_is_never_saved() {
+        let mut ws = workspace_with(1);
+        assert!(ws.set_window_min_size(WindowId(1), logical(400, 300)));
+        let json = serde_json::to_string(&ws).unwrap();
+        let back: Workspace = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.window(WindowId(1)).and_then(|w| w.min_size), None);
+    }
+
     // -- regressions --------------------------------------------------------
 
     fn container_ids(ws: &Workspace) -> Vec<Vec<WindowId>> {

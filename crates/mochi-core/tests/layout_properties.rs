@@ -5,7 +5,7 @@
 //! seed is printed with every assertion.
 
 use mochi_core::geometry::{Axis, Direction, Rect};
-use mochi_core::layout::{Flip, Layout, MIN_TILE_SIZE, Sizing};
+use mochi_core::layout::{Flip, Layout, MIN_TILE_SIZE, MinSize, Minimums, Sizing};
 use mochi_core::model::{Container, CycleDirection, Monitor, State, Window, WindowId};
 
 /// The 4K panel on the left and the portrait panel on the right, the pair this
@@ -547,6 +547,215 @@ fn no_random_resize_sequence_shrinks_a_tile_below_the_minimum() {
                             rect.height()
                         );
                     }
+                    check_state(&state, &context);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// window minimums
+// ---------------------------------------------------------------------------
+
+/// A resize delta, absurd or not, for every edge of every container.
+fn random_resize(rng: &mut Rng, len: usize) -> Vec<Option<Rect>> {
+    (0..len)
+        .map(|_| {
+            if rng.below(3) == 0 {
+                None
+            } else {
+                Some(Rect::new(
+                    rng.delta(),
+                    rng.delta(),
+                    rng.delta(),
+                    rng.delta(),
+                ))
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_window_minimum_that_fits_is_kept_without_overlapping_a_neighbour() {
+    // One window asks for real room and every other one either says nothing
+    // or asks for less than the tile floor. The demanding one stays small
+    // enough for every layout to fit it next to seven tiles of the floor, so
+    // the result has to tile the area exactly and nothing may need growing.
+    for seed in 0..3_000_u64 {
+        let mut rng = Rng::new(seed ^ 0x0a11_0c47);
+        let area = rng.pick(&AREAS[..3]);
+        let layout = rng.pick(&Layout::ALL);
+        let len = 1 + rng.below(8);
+        let flip = Flip {
+            horizontal: rng.bool(),
+            vertical: rng.bool(),
+        };
+        let resize = random_resize(&mut rng, len);
+        let max_width = 384.min(area.width() / 4) as usize;
+        let max_height = 352.min(area.height() / 3) as usize;
+        let demanding = rng.below(len);
+        let windows: Vec<Option<MinSize>> = (0..len)
+            .map(|i| {
+                if i == demanding {
+                    Some(MinSize {
+                        width: rng.below(max_width + 1) as i32,
+                        height: rng.below(max_height + 1) as i32,
+                    })
+                } else if rng.bool() {
+                    Some(MinSize {
+                        width: rng.below(MIN_TILE_SIZE as usize) as i32,
+                        height: rng.below(MIN_TILE_SIZE as usize) as i32,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let context = format!("seed {seed}, {layout} with {len} in {area:?}, {windows:?}");
+        let rects = layout.calculate_fitted(
+            area,
+            len,
+            0,
+            flip,
+            &resize,
+            Minimums {
+                tile: MinSize::square(MIN_TILE_SIZE),
+                windows: &windows,
+            },
+        );
+        assert_eq!(rects.len(), len, "{context}");
+        assert_sane(&rects, area, &context);
+        assert_covers(&rects, area, &context);
+        for (i, (rect, min)) in rects.iter().zip(&windows).enumerate() {
+            if let Some(min) = min {
+                assert!(
+                    rect.width() >= min.width && rect.height() >= min.height,
+                    "{context}: window {i} got {rect:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn absurd_window_minimums_never_panic_or_erase_a_tile() {
+    let sizes = [i32::MIN, -1, 0, 1, 64, 500, 1_500, 5_000, 100_000, i32::MAX];
+    for seed in 0..3_000_u64 {
+        let mut rng = Rng::new(seed ^ 0x0ab5_0e0d);
+        let area = rng.pick(&AREAS);
+        let layout = rng.pick(&Layout::ALL);
+        let len = 1 + rng.below(12);
+        let padding = rng.pick(&[0, 10, 15, 40]);
+        let flip = Flip {
+            horizontal: rng.bool(),
+            vertical: rng.bool(),
+        };
+        let resize = random_resize(&mut rng, len);
+        let windows: Vec<Option<MinSize>> = (0..len)
+            .map(|_| {
+                if rng.below(3) == 0 {
+                    None
+                } else {
+                    Some(MinSize {
+                        width: rng.pick(&sizes),
+                        height: rng.pick(&sizes),
+                    })
+                }
+            })
+            .collect();
+
+        let context = format!("seed {seed}, {layout} with {len} in {area:?}, padding {padding}");
+        let rects = layout.calculate_fitted(
+            area,
+            len,
+            padding,
+            flip,
+            &resize,
+            Minimums {
+                tile: MinSize::square(MIN_TILE_SIZE),
+                windows: &windows,
+            },
+        );
+        assert_eq!(rects.len(), len, "{context}");
+        let bounds = area.padded_clamped(padding);
+        for (i, rect) in rects.iter().enumerate() {
+            assert!(
+                rect.width() >= 1 && rect.height() >= 1,
+                "{context}: rect {i} has no pixels left: {rect:?}"
+            );
+            let Some(Some(min)) = windows.get(i) else {
+                continue;
+            };
+            let min = min.clamped();
+            // A window always gets what it accepts, and one that fits inside
+            // the area at all is kept inside it.
+            if min.width <= 100_000 {
+                assert!(rect.width() >= min.width, "{context}: rect {i} {rect:?}");
+            }
+            if min.height <= 100_000 {
+                assert!(rect.height() >= min.height, "{context}: rect {i} {rect:?}");
+            }
+            if (1..=bounds.width()).contains(&min.width) {
+                assert!(
+                    rect.left >= area.left && rect.right <= area.right,
+                    "{context}: rect {i} escapes {area:?} sideways: {rect:?}"
+                );
+            }
+            if (1..=bounds.height()).contains(&min.height) {
+                assert!(
+                    rect.top >= area.top && rect.bottom <= area.bottom,
+                    "{context}: rect {i} escapes {area:?} vertically: {rect:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn no_random_resize_sequence_squeezes_a_window_below_its_own_minimum() {
+    // Through the command surface, on the 4K panel at 150 percent: the
+    // window reports a logical minimum and the layout has to keep the
+    // physical one through any run of resize presses.
+    for layout in Layout::ALL {
+        for len in 2..=8_usize {
+            for seed in 0..4_u64 {
+                let mut rng = Rng::new(seed ^ 0x3171_d0e5 ^ len as u64);
+                let mut state = two_monitors(0);
+                state.default_workspace_padding = 0;
+                state.change_layout(layout).unwrap();
+                for id in 1..=len {
+                    state.add_window(Window::new(id as isize)).unwrap();
+                }
+                let demanding = WindowId(1 + rng.below(len) as isize);
+                let logical = MinSize {
+                    width: 64 + rng.below(193) as i32,
+                    height: 64 + rng.below(193) as i32,
+                };
+                state.set_window_min_size(demanding, Some(logical));
+                // Rounded up, the way the workspace scales it.
+                let physical = |v: i32| (v * 3 + 1) / 2;
+
+                for step in 0..60 {
+                    state
+                        .focused_workspace_mut()
+                        .unwrap()
+                        .focus_container(rng.below(len));
+                    let axis = rng.pick(&[Axis::Horizontal, Axis::Vertical]);
+                    let sizing = rng.pick(&[Sizing::Increase, Sizing::Decrease]);
+                    state.resize_axis(axis, sizing).ok();
+
+                    let context = format!(
+                        "{layout} with {len} containers, seed {seed}, step {step}, \
+                         window {demanding} accepts {logical:?}"
+                    );
+                    let rect = state.rect_for_window(demanding).unwrap();
+                    assert!(
+                        rect.width() >= physical(logical.width)
+                            && rect.height() >= physical(logical.height),
+                        "{context}: it got {rect:?}"
+                    );
                     check_state(&state, &context);
                 }
             }
