@@ -422,6 +422,77 @@ impl Workspace {
         }
     }
 
+    /// The smallest visible frame each container's windows accept, in the
+    /// physical pixels of a display with that scale factor, by container.
+    ///
+    /// A stack keeps the largest minimum of all its windows, not only the
+    /// shown one's, so cycling through the stack never moves the tiles around
+    /// it. Empty when no window has said, which is the layout without any
+    /// window minimum and costs nothing.
+    fn window_minimums(&self, display_scale: f32) -> Vec<Option<crate::layout::MinSize>> {
+        let any = self
+            .containers
+            .iter()
+            .any(|c| c.windows().iter().any(|w| w.min_size.is_some()));
+        if !any {
+            return Vec::new();
+        }
+        let scale = if display_scale.is_finite() && display_scale > 0.0 {
+            display_scale
+        } else {
+            1.0
+        };
+        // Rounded up: a pixel short of what the window accepts is a window
+        // that still spills a pixel out of its tile.
+        let physical = |logical: i32| (logical as f32 * scale).ceil() as i32;
+        self.containers
+            .iter()
+            .map(|container| {
+                container
+                    .windows()
+                    .iter()
+                    .filter_map(|w| w.min_size)
+                    .reduce(|a, b| crate::layout::MinSize {
+                        width: a.width.max(b.width),
+                        height: a.height.max(b.height),
+                    })
+                    .map(|min| crate::layout::MinSize {
+                        width: physical(min.width),
+                        height: physical(min.height),
+                    })
+            })
+            .collect()
+    }
+
+    /// Records the smallest size a window accepts, in logical pixels.
+    ///
+    /// Returns `true` when the window is in this workspace and the value is
+    /// new. The caller retiles; the layout only reads it on the next update.
+    pub fn set_window_min_size(
+        &mut self,
+        id: WindowId,
+        min_size: Option<crate::layout::MinSize>,
+    ) -> bool {
+        let window = self
+            .containers
+            .iter_mut()
+            .find_map(|c| c.window_mut(id))
+            .or_else(|| {
+                self.monocle_container
+                    .as_mut()
+                    .and_then(|c| c.window_mut(id))
+            })
+            .or_else(|| self.maximized_window.as_mut().filter(|w| w.id == id))
+            .or_else(|| self.floating_windows.iter_mut().find(|w| w.id == id));
+        match window {
+            Some(window) if window.min_size != min_size => {
+                window.min_size = min_size;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Recomputes the tiled rectangles and stores them in `latest_layout`.
     ///
     /// Returns the new rectangles. A workspace with tiling turned off gets an
@@ -437,6 +508,7 @@ impl Workspace {
             default_workspace_padding,
             default_container_padding,
             1.0,
+            1.0,
         )
     }
 
@@ -447,12 +519,18 @@ impl Workspace {
     /// is exactly [`Workspace::update_layout`]. The minimum is
     /// [`Workspace::minimum_tile_size`], which is
     /// [`MIN_TILE_SIZE`] until a configuration says otherwise.
+    ///
+    /// `display_scale` is the display's own scale factor, which the windows'
+    /// minimum sizes are multiplied by. It is a separate number because
+    /// `scale` is 1.0 whenever the paddings are configured not to follow the
+    /// DPI, while an application's minimum always does.
     pub fn update_layout_scaled(
         &mut self,
         work_area: Rect,
         default_workspace_padding: i32,
         default_container_padding: i32,
         scale: f32,
+        display_scale: f32,
     ) -> &[Rect] {
         let len = self.containers.len();
         self.resize_dimensions.resize(len, None);
@@ -463,18 +541,22 @@ impl Workspace {
                 self.container_padding.unwrap_or(default_container_padding),
                 scale,
             );
-            let rects = self.resolve_layout(len).calculate_with_min(
+            let windows = self.window_minimums(display_scale);
+            let rects = self.resolve_layout(len).calculate_fitted(
                 area,
                 len,
                 padding,
                 self.layout_flip,
                 &self.resize_dimensions,
-                {
-                    let min = self.minimum_tile_size();
-                    crate::layout::MinSize {
-                        width: scale_padding(min.width, scale),
-                        height: scale_padding(min.height, scale),
-                    }
+                crate::layout::Minimums {
+                    tile: {
+                        let min = self.minimum_tile_size();
+                        crate::layout::MinSize {
+                            width: scale_padding(min.width, scale),
+                            height: scale_padding(min.height, scale),
+                        }
+                    },
+                    windows: &windows,
                 },
             );
             // Reusing the buffer keeps the per event path free of one free and

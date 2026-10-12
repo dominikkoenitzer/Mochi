@@ -421,6 +421,17 @@ impl State {
             .map_or(1.0, Monitor::scale_factor)
     }
 
+    /// The monitor's own scale factor, 1.0 at 96 DPI, whatever
+    /// [`State::scale_padding_with_dpi`] says. The windows' minimum sizes are
+    /// multiplied by it: an application's minimum follows the DPI whether the
+    /// paddings are configured to or not.
+    #[must_use]
+    pub fn display_scale(&self, monitor: usize) -> f32 {
+        self.monitors
+            .get(monitor)
+            .map_or(1.0, Monitor::scale_factor)
+    }
+
     /// The floor a tile is not allowed to shrink below, as width and height in
     /// logical pixels.
     ///

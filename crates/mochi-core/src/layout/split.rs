@@ -29,17 +29,6 @@ fn share_floor(extent: i32, parts: usize) -> i32 {
     }
 }
 
-/// The minimum every one of `parts` equal slices keeps: the fair-share floor
-/// raised to `min_tile`, and scaled back down when that does not fit.
-fn uniform_minimum(extent: i32, parts: usize, min_tile: i32) -> i32 {
-    let min = share_floor(extent, parts).max(min_tile.max(0));
-    if i64::from(min) * parts.max(1) as i64 > i64::from(extent) {
-        extent / parts.max(1) as i32
-    } else {
-        min
-    }
-}
-
 /// The boundary between two slices of `start..end`.
 ///
 /// The natural boundary is the middle, `delta` moves it, and the clamps keep
@@ -71,18 +60,112 @@ pub(crate) fn split_two(start: i32, end: i32, delta: i32, min_first: i32, min_re
     (start + extent / 2).saturating_add(delta).clamp(low, high)
 }
 
-/// Divides `start..end` into `parts` slices with the given relative `weights`,
-/// then moves internal boundary `i` by `deltas[i]` pixels.
+/// The minimum each slice of `extent` keeps: its own floor from `mins`, raised
+/// to the fair-share floor, and all of them scaled down together when the
+/// range is too short to give every slice that much.
+///
+/// Scaling them together means a range that cannot satisfy everyone shares
+/// the shortfall out in proportion, rather than starving whichever slice the
+/// clamps happen to reach last. With one floor for every slice, every slice
+/// that cannot have it gets the same fair share of the range.
+fn slice_minimums(extent: i32, mins: &[i32]) -> Vec<i32> {
+    let floor = share_floor(extent, mins.len());
+    let raised: Vec<i64> = mins
+        .iter()
+        .map(|min| i64::from(floor.max((*min).max(0))))
+        .collect();
+    let demand: i64 = raised.iter().sum();
+    let extent = i64::from(extent.max(0));
+    if demand > extent && demand > 0 {
+        raised
+            .iter()
+            .map(|min| (min * extent / demand) as i32)
+            .collect()
+    } else {
+        raised.iter().map(|min| *min as i32).collect()
+    }
+}
+
+/// Where the boundaries fall before any resize delta moves them.
+///
+/// Every slice gets its weighted share of the range, except one whose minimum
+/// is larger than that share: it gets its minimum, and the slices that are
+/// left share what remains by their weights again, until every share fits.
+/// The room a demanding slice needs is taken from all of its neighbours in
+/// proportion, not from whichever one happens to sit next to it. While no
+/// minimum binds, this is the plain weighted division.
+///
+/// `mins` must already fit the range, as [`slice_minimums`] makes them.
+fn base_bounds(start: i32, end: i32, weights: &[u32], mins: &[i32]) -> Vec<i32> {
+    let parts = weights.len();
+    let extent = i64::from(end - start);
+    let mut pinned = vec![false; parts];
+    let (free_extent, free_weight) = loop {
+        let pinned_extent: i64 = (0..parts)
+            .filter(|i| pinned[*i])
+            .map(|i| i64::from(mins[i]))
+            .sum();
+        let free_extent = (extent - pinned_extent).max(0);
+        let free_weight: i64 = (0..parts)
+            .filter(|i| !pinned[*i])
+            .map(|i| i64::from(weights[i]))
+            .sum();
+        if free_weight == 0 {
+            break (free_extent, free_weight);
+        }
+        let mut changed = false;
+        for i in 0..parts {
+            if !pinned[i] && free_extent * i64::from(weights[i]) / free_weight < i64::from(mins[i])
+            {
+                pinned[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break (free_extent, free_weight);
+        }
+    };
+
+    let mut bounds = Vec::with_capacity(parts + 1);
+    bounds.push(start);
+    let mut pinned_so_far: i64 = 0;
+    let mut running: i64 = 0;
+    for i in 0..parts - 1 {
+        if pinned[i] {
+            pinned_so_far += i64::from(mins[i]);
+        } else {
+            running += i64::from(weights[i]);
+        }
+        let free_so_far = if free_weight == 0 {
+            0
+        } else {
+            free_extent * running / free_weight
+        };
+        bounds.push(start + (pinned_so_far + free_so_far) as i32);
+    }
+    bounds.push(end);
+    bounds
+}
+
+/// Divides `start..end` into slices with the given relative `weights`, then
+/// moves internal boundary `i` by `deltas[i]` pixels.
 ///
 /// Boundaries are clamped so every slice keeps at least a fifth of its fair
-/// share and at least `min_tile` pixels, and so the slices always tile the
-/// range exactly with no gap and no overlap. Missing deltas count as zero.
-pub(crate) fn divide_weighted(
+/// share and at least its own minimum, and so the slices always tile the range
+/// exactly with no gap and no overlap. Missing deltas count as zero.
+///
+/// `mins[i]` is the narrowest slice `i` may get: the configured minimum tile
+/// size, or more for a window that accepts nothing smaller. A slice whose minimum is larger than its share
+/// takes the room from the others before any delta is applied, and no delta
+/// can push a boundary past a minimum. A range too short for every minimum
+/// scales them all down together, so the slices still tile it exactly. A
+/// minimum missing from `mins` counts as zero.
+pub(crate) fn divide_with_minimums(
     start: i32,
     end: i32,
     weights: &[u32],
     deltas: &[i32],
-    min_tile: i32,
+    mins: &[i32],
 ) -> Vec<(i32, i32)> {
     let parts = weights.len();
     if parts == 0 {
@@ -99,21 +182,22 @@ pub(crate) fn divide_weighted(
     }
 
     // The floor keeps the clamp satisfiable even on a pathologically small area.
-    let min = uniform_minimum(extent, parts, min_tile);
+    let mins: Vec<i32> = (0..parts)
+        .map(|i| mins.get(i).copied().unwrap_or(0))
+        .collect();
+    let mins = slice_minimums(extent, &mins);
+    let mut bounds = base_bounds(start, end, weights, &mins);
 
-    let mut bounds = Vec::with_capacity(parts + 1);
-    bounds.push(start);
-    let mut running: i64 = 0;
-    for weight in &weights[..parts - 1] {
-        running += i64::from(*weight);
-        bounds.push(start + (i64::from(extent) * running / total) as i32);
+    // What every slice after boundary `i` needs between it and the end.
+    let mut rest = vec![0_i32; parts + 1];
+    for i in (0..parts).rev() {
+        rest[i] = rest[i + 1].saturating_add(mins[i]);
     }
-    bounds.push(end);
 
     for i in 0..parts - 1 {
         let delta = deltas.get(i).copied().unwrap_or(0);
-        let low = bounds[i] + min;
-        let high = end - min * (parts - 1 - i) as i32;
+        let low = bounds[i] + mins[i];
+        let high = end - rest[i + 1];
         let target = bounds[i + 1].saturating_add(delta);
         bounds[i + 1] = if low >= high {
             low
@@ -123,17 +207,6 @@ pub(crate) fn divide_weighted(
     }
 
     (0..parts).map(|i| (bounds[i], bounds[i + 1])).collect()
-}
-
-/// Divides `start..end` into `parts` equal slices, nudged by `deltas`.
-pub(crate) fn divide(
-    start: i32,
-    end: i32,
-    parts: usize,
-    deltas: &[i32],
-    min_tile: i32,
-) -> Vec<(i32, i32)> {
-    divide_weighted(start, end, &vec![1_u32; parts], deltas, min_tile)
 }
 
 /// Turns the slices of one axis into rectangles inside `area`.
@@ -240,6 +313,22 @@ mod tests {
 
     /// Asking for no minimum tile size leaves only the fair-share floor.
     const NO_MIN: i32 = 0;
+
+    /// `parts` slices of equal weight, all with the same floor.
+    fn divide(start: i32, end: i32, parts: usize, deltas: &[i32], min: i32) -> Vec<(i32, i32)> {
+        divide_with_minimums(start, end, &vec![1; parts], deltas, &vec![min; parts])
+    }
+
+    /// Weighted slices, all with the same floor.
+    fn divide_weighted(
+        start: i32,
+        end: i32,
+        weights: &[u32],
+        deltas: &[i32],
+        min: i32,
+    ) -> Vec<(i32, i32)> {
+        divide_with_minimums(start, end, weights, deltas, &vec![min; weights.len()])
+    }
 
     fn widths(slices: &[(i32, i32)]) -> Vec<i32> {
         slices.iter().map(|(a, b)| b - a).collect()
@@ -363,11 +452,11 @@ mod tests {
             divide(0, 1000, 2, &[10_000], NO_MIN),
             vec![(0, 900), (900, 1000)]
         );
-        assert_eq!(uniform_minimum(1000, 2, NO_MIN), 100);
-        assert_eq!(uniform_minimum(1000, 12, NO_MIN), 16);
-        assert_eq!(uniform_minimum(1000, 12, MIN_TILE_SIZE), 64);
-        assert_eq!(uniform_minimum(200, 8, MIN_TILE_SIZE), 25);
-        assert_eq!(uniform_minimum(4, 8, MIN_TILE_SIZE), 0);
+        assert_eq!(slice_minimums(1000, &[NO_MIN; 2]), vec![100; 2]);
+        assert_eq!(slice_minimums(1000, &[NO_MIN; 12]), vec![16; 12]);
+        assert_eq!(slice_minimums(1000, &[MIN_TILE_SIZE; 12]), vec![64; 12]);
+        assert_eq!(slice_minimums(200, &[MIN_TILE_SIZE; 8]), vec![25; 8]);
+        assert_eq!(slice_minimums(4, &[MIN_TILE_SIZE; 8]), vec![0; 8]);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::layout::MinSize;
 use crate::rules::WindowInfo;
 
 /// An opaque platform window handle.
@@ -72,6 +73,19 @@ pub struct Window {
     /// The full path of the owning executable.
     #[serde(default)]
     pub path: String,
+    /// The smallest visible frame the window accepts, in logical pixels: its
+    /// size at 96 DPI, so the one number holds on whichever display the
+    /// window is tiled.
+    ///
+    /// Many applications refuse to shrink below a size of their own, and a
+    /// tile smaller than that is a tile the window spills out of. The daemon
+    /// asks the window and the layout leaves it the room. `None` until it has
+    /// been asked and for a window that did not answer. Never saved or
+    /// printed: it describes the window as it is right now, and the daemon
+    /// asks again rather than trust an old answer.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub min_size: Option<MinSize>,
 }
 
 impl Window {
@@ -109,6 +123,14 @@ impl Window {
     #[must_use]
     pub fn with_path(mut self, path: impl Into<String>) -> Self {
         self.path = path.into();
+        self
+    }
+
+    /// Sets the smallest size the window accepts, in logical pixels, builder
+    /// style.
+    #[must_use]
+    pub fn with_min_size(mut self, min_size: Option<MinSize>) -> Self {
+        self.min_size = min_size;
         self
     }
 

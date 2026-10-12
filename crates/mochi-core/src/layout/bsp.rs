@@ -6,22 +6,59 @@
 
 use crate::geometry::{Axis, Rect};
 
+use super::MinSize;
 use super::split::{boundary_delta, rect_from_slice, split_two};
+
+/// The axis cut number `idx` divides: the first one runs top to bottom and
+/// they alternate from there.
+const fn cut_axis(idx: usize) -> Axis {
+    if idx.is_multiple_of(2) {
+        Axis::Horizontal
+    } else {
+        Axis::Vertical
+    }
+}
+
+/// What the containers from each index to the end need between them.
+///
+/// The containers after a cut share the region it leaves over, and that
+/// region is cut again, so what it has to keep is not the floor of the next
+/// tile but of the whole branch: along the axis of a later cut the two sides
+/// add up, across it the larger of the two wins.
+fn branch_minimums(mins: &[MinSize]) -> Vec<MinSize> {
+    let mut need = mins.to_vec();
+    for idx in (0..mins.len().saturating_sub(1)).rev() {
+        let (first, rest) = (mins[idx], need[idx + 1]);
+        need[idx] = match cut_axis(idx) {
+            Axis::Horizontal => MinSize {
+                width: first.width.saturating_add(rest.width),
+                height: first.height.max(rest.height),
+            },
+            Axis::Vertical => MinSize {
+                width: first.width.max(rest.width),
+                height: first.height.saturating_add(rest.height),
+            },
+        };
+    }
+    need
+}
 
 /// The rectangle for each of `len` containers inside `area`.
 ///
-/// `min_tile` is the smallest a tile may get. Every cut keeps that much for
-/// the container it splits off, and one more for each later cut along the same
-/// axis, so the minimum holds all the way down the tree.
+/// `mins[i]` is the smallest tile container `i` may get. Every cut keeps that
+/// much for the container it splits off, and for the region left over it
+/// keeps what the whole rest of the tree needs, so a demanding window deep in
+/// the tree takes its room from every branch above it rather than only from
+/// its last neighbour.
 pub(crate) fn calculate(
     area: Rect,
     len: usize,
     resize: &[Option<Rect>],
-    min_tile: super::MinSize,
+    mins: &[MinSize],
 ) -> Vec<Rect> {
+    let need = branch_minimums(mins);
     let mut rects = Vec::with_capacity(len);
     let mut remaining = area;
-    let mut axis = Axis::Horizontal;
 
     for idx in 0..len {
         if idx + 1 == len {
@@ -29,21 +66,20 @@ pub(crate) fn calculate(
             break;
         }
 
+        let axis = cut_axis(idx);
         let delta = boundary_delta(resize, idx, idx + 1, axis);
-        // What is left over is cut along this axis again every second step, so
-        // it has to keep room for one tile per later cut plus the last one.
-        // Every second cut from here divides this same axis, so the room to
-        // keep is this axis's floor once per later cut plus the last tile.
-        let floor = min_tile.along(axis);
-        let later_tiles = (len - idx - 2) / 2 + 1;
-        let min_rest = (i64::from(floor) * later_tiles as i64).min(i64::from(i32::MAX)) as i32;
         let start = remaining.start(axis);
         let end = remaining.end(axis);
-        let at = split_two(start, end, delta, floor, min_rest);
+        let at = split_two(
+            start,
+            end,
+            delta,
+            mins[idx].along(axis),
+            need[idx + 1].along(axis),
+        );
 
         rects.push(rect_from_slice(remaining, axis, start, at));
         remaining = rect_from_slice(remaining, axis, at, end);
-        axis = axis.other();
     }
 
     rects

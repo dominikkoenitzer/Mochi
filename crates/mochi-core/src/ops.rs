@@ -10,7 +10,7 @@
 
 use crate::error::{Error, Result};
 use crate::geometry::{Axis, Direction};
-use crate::layout::{Layout, Sizing};
+use crate::layout::{Layout, MinSize, Sizing};
 use crate::model::{
     Changes, Container, CycleDirection, MoveBehaviour, State, Window, WindowContainerBehaviour,
     WindowId, Workspace,
@@ -28,8 +28,15 @@ impl State {
         let workspace_padding = self.default_workspace_padding;
         let container_padding = self.default_container_padding;
         let scale = self.padding_scale(monitor);
+        let display = self.display_scale(monitor);
         if let Ok(target) = self.workspace_mut(monitor, workspace) {
-            target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+            target.update_layout_scaled(
+                work_area,
+                workspace_padding,
+                container_padding,
+                scale,
+                display,
+            );
         }
     }
 
@@ -157,6 +164,36 @@ impl State {
         changes.show.extend(self.visible_window_ids());
         changes.settle();
         Ok(changes)
+    }
+
+    /// Records the smallest size a window accepts, in logical pixels, and lays
+    /// its workspace out again when that changes anything.
+    ///
+    /// The layout leaves every window at least the room it accepts, so a new
+    /// answer can move every tile around it. A workspace nobody is looking at
+    /// is laid out too, so its rectangles are right for whatever reads them,
+    /// but only one on screen is reported as needing a redraw. Nothing comes
+    /// back for a window Mochi does not manage or for an answer it already
+    /// had, which is what keeps asking cheap to repeat.
+    pub fn set_window_min_size(&mut self, id: WindowId, min_size: Option<MinSize>) -> Changes {
+        let Some((monitor, workspace)) = self.locate_window(id) else {
+            return Changes::none();
+        };
+        let changed = self
+            .workspace_mut(monitor, workspace)
+            .is_ok_and(|target| target.set_window_min_size(id, min_size));
+        if !changed {
+            return Changes::none();
+        }
+        let shown = self
+            .monitors()
+            .get(monitor)
+            .is_some_and(|m| m.focused_workspace_idx() == workspace);
+        if self.is_paused || !shown {
+            self.refresh(monitor, workspace);
+            return Changes::none();
+        }
+        self.retiled(monitor, workspace)
     }
 
     /// Turns tiling off and on for the focused workspace.
@@ -788,6 +825,7 @@ impl State {
         let workspace_padding = self.default_workspace_padding;
         let container_padding = self.default_container_padding;
         let scale = self.padding_scale(monitor);
+        let display = self.display_scale(monitor);
 
         let target = self.workspace_mut(monitor, workspace)?;
         if target.containers().is_empty() {
@@ -795,14 +833,26 @@ impl State {
         }
         let idx = target.focused_container_idx();
 
-        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+        target.update_layout_scaled(
+            work_area,
+            workspace_padding,
+            container_padding,
+            scale,
+            display,
+        );
         let original = target.resize_dimension(idx);
         let before = target.latest_layout().get(idx).copied();
 
         for far_edge in [true, false] {
             let next = Self::nudged(original.unwrap_or_default(), axis, far_edge, delta);
             target.set_resize_dimension(idx, Some(next));
-            target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+            target.update_layout_scaled(
+                work_area,
+                workspace_padding,
+                container_padding,
+                scale,
+                display,
+            );
             if target.latest_layout().get(idx).copied() != before {
                 // The step is stored the size it was asked for, even when the
                 // clamp could only grant part of it. Storing what the boundary
@@ -824,14 +874,26 @@ impl State {
             // whichever edge is tried first.
             let probe = Self::nudged(original.unwrap_or_default(), axis, far_edge, -delta);
             target.set_resize_dimension(idx, Some(probe));
-            target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+            target.update_layout_scaled(
+                work_area,
+                workspace_padding,
+                container_padding,
+                scale,
+                display,
+            );
             if target.latest_layout().get(idx).copied() != before {
                 break;
             }
         }
 
         target.set_resize_dimension(idx, original);
-        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+        target.update_layout_scaled(
+            work_area,
+            workspace_padding,
+            container_padding,
+            scale,
+            display,
+        );
         Ok(Changes::none())
     }
 
@@ -861,6 +923,7 @@ impl State {
         let workspace_padding = self.default_workspace_padding;
         let container_padding = self.default_container_padding;
         let scale = self.padding_scale(monitor);
+        let display = self.display_scale(monitor);
 
         let target = self.workspace_mut(monitor, workspace)?;
         if target.containers().is_empty() {
@@ -868,7 +931,13 @@ impl State {
         }
         let idx = target.focused_container_idx();
 
-        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+        target.update_layout_scaled(
+            work_area,
+            workspace_padding,
+            container_padding,
+            scale,
+            display,
+        );
         let original = target.resize_dimension(idx);
         let before = target.latest_layout().get(idx).copied();
 
@@ -894,7 +963,13 @@ impl State {
             };
         let next = Self::nudged(original.unwrap_or_default(), axis, far_edge, delta);
         target.set_resize_dimension(idx, Some(next));
-        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+        target.update_layout_scaled(
+            work_area,
+            workspace_padding,
+            container_padding,
+            scale,
+            display,
+        );
         if target.latest_layout().get(idx).copied() != before {
             // Stored as asked for rather than as granted, for the reason
             // `resize_axis` spells out: anything else drifts under a held key.
@@ -904,7 +979,13 @@ impl State {
         // That edge is no boundary, or the clamp refused. Either way there is
         // no second edge to fall back to: this command was given one.
         target.set_resize_dimension(idx, original);
-        target.update_layout_scaled(work_area, workspace_padding, container_padding, scale);
+        target.update_layout_scaled(
+            work_area,
+            workspace_padding,
+            container_padding,
+            scale,
+            display,
+        );
         Ok(Changes::none())
     }
 
