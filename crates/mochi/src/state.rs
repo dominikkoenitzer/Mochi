@@ -367,6 +367,13 @@ fn window_json(window: &Window, rect: Option<Rect>, shown: bool, on_screen: &OnS
         // like. When this disagrees with `rect`, the window is not where Mochi
         // believes it is, and that is worth knowing.
         "actual_rect": measured.map(|&(rect, _)| rect_json(rect)),
+        // The smallest visible frame the window said it accepts, in logical
+        // pixels. A window whose `actual_rect` is bigger than its `rect` while
+        // this is null or smaller has a minimum Mochi has not heard about yet.
+        "min_size": window.min_size.map(|min| json!({
+            "width": min.width,
+            "height": min.height,
+        })),
         // The model's answer: the window its container is showing. A stack
         // shows one of its windows and hides the rest.
         "visible": shown,

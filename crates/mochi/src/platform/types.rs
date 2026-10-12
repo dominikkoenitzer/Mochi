@@ -552,9 +552,110 @@ pub fn is_fullscreen(shape: WindowShape, monitor: Rect, placed: Option<Rect>) ->
         && !placed.is_some_and(covers)
 }
 
+/// The largest minimum, in logical pixels, taken at its word. Past that an
+/// answer is noise rather than a size any screen could hold.
+const MAX_MIN_SIZE: f64 = 32_767.0;
+
+/// The smallest visible frame, in logical pixels, of a window whose
+/// `WM_GETMINMAXINFO` answered `track`.
+///
+/// `track` is the window rect, invisible resize border included, in the
+/// window's own DPI context: `window_dpi`. That is the monitor's DPI for an
+/// application that follows it, but 96 for one that does not know about
+/// scaling, which Windows stretches on a scaled display without converting
+/// the answer: measured, a DPI unaware window asking for 1000 pixels is
+/// handed back as 1000 to a DPI aware caller, while it covers 1500 on a 150%
+/// screen. Dividing by the window's own DPI is what makes both kinds come
+/// out right. `border` is the invisible border in physical pixels on a
+/// monitor at `monitor_dpi`, which is what Mochi tiles without.
+///
+/// Rounded up, so a window is never given a pixel less than it accepts.
+/// `None` for an answer with no minimum in it.
+#[must_use]
+pub fn logical_min_frame(
+    track: (i32, i32),
+    window_dpi: u32,
+    border: (i32, i32),
+    monitor_dpi: u32,
+) -> Option<mochi_core::layout::MinSize> {
+    if track.0 <= 0 && track.1 <= 0 {
+        return None;
+    }
+    let per_logical = |dpi: u32| f64::from(if dpi == 0 { 96 } else { dpi }) / 96.0;
+    let length = |track: i32, border: i32| {
+        let logical = f64::from(track.max(0)) / per_logical(window_dpi)
+            - f64::from(border.max(0)) / per_logical(monitor_dpi);
+        logical.ceil().clamp(0.0, MAX_MIN_SIZE) as i32
+    };
+    Some(mochi_core::layout::MinSize {
+        width: length(track.0, border.0),
+        height: length(track.1, border.1),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_minimum_is_read_in_the_windows_own_dpi() {
+        use mochi_core::layout::MinSize;
+        // A chat application on the 150% screen, frameless: 1221 x 761
+        // physical pixels is 814 x 507.3 logical, rounded up.
+        assert_eq!(
+            logical_min_frame((1221, 761), 144, (0, 0), 144),
+            Some(MinSize {
+                width: 814,
+                height: 508
+            })
+        );
+        // A DPI unaware window answers in its own 96 DPI pixels, whatever
+        // screen it is on.
+        assert_eq!(
+            logical_min_frame((1000, 700), 96, (0, 0), 144),
+            Some(MinSize {
+                width: 1000,
+                height: 700
+            })
+        );
+        // The invisible border is part of the window rect but not of the
+        // frame Mochi tiles: 7 + 7 physical pixels at 100%, 21 at 150%.
+        assert_eq!(
+            logical_min_frame((500, 300), 96, (14, 7), 96),
+            Some(MinSize {
+                width: 486,
+                height: 293
+            })
+        );
+        assert_eq!(
+            logical_min_frame((750, 450), 144, (21, 10), 144),
+            Some(MinSize {
+                width: 486,
+                height: 294
+            })
+        );
+    }
+
+    #[test]
+    fn an_answer_without_a_minimum_is_no_minimum() {
+        assert_eq!(logical_min_frame((0, 0), 96, (0, 0), 96), None);
+        assert_eq!(logical_min_frame((-5, -5), 96, (0, 0), 96), None);
+        // A DPI of zero is a failed query, read as 96.
+        assert_eq!(
+            logical_min_frame((200, 100), 0, (0, 0), 0).map(|m| (m.width, m.height)),
+            Some((200, 100))
+        );
+        // A border wider than the minimum leaves nothing, not a negative.
+        assert_eq!(
+            logical_min_frame((10, 10), 96, (40, 40), 96).map(|m| (m.width, m.height)),
+            Some((0, 0))
+        );
+        // Absurd answers are capped instead of overflowing the layout.
+        assert_eq!(
+            logical_min_frame((i32::MAX, i32::MAX), 96, (0, 0), 96).map(|m| m.width),
+            Some(32_767)
+        );
+    }
 
     fn app_window() -> WindowInfo {
         WindowInfo {

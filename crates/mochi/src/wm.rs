@@ -71,6 +71,16 @@ const SLOW_APPLICATION_SETTLE: std::time::Duration = std::time::Duration::from_m
 /// undone by the next change.
 const DISPLAY_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// How long a tiled window that came out bigger than its tile is left to
+/// settle before it is asked for its minimum size again. Longer than a layout
+/// animation, which passes through every size between the old tile and the
+/// new one, so what is measured is where the window stopped.
+const MIN_SIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How many pixels a window may come out bigger than its tile before it counts
+/// as refusing it. Rounding between logical and physical pixels is worth one.
+const MIN_SIZE_SLACK: i32 = 2;
+
 /// How long a window being redrawn stays minimized. Chromium has to see the
 /// minimize and let go of its broken surface before the restore asks it for a
 /// new one; a restore straight after the minimize can arrive before that.
@@ -580,6 +590,10 @@ pub struct WindowManager {
     /// Chromium windows Mochi had off screen during a display change. Each is
     /// owed the same redraw the moment it is shown again.
     redraw_owed: HashSet<Hwnd>,
+    /// Tiled windows that came out bigger than their tile and are waiting to
+    /// be asked for their minimum size again, so a window that keeps moving
+    /// is asked once per settle rather than once per location change.
+    min_size_checks: HashSet<Hwnd>,
     /// Redraws in flight, by batch, until their windows are restored.
     redraws: BTreeMap<u64, RedrawBatch>,
     /// The id the next redraw batch gets.
@@ -718,6 +732,7 @@ impl WindowManager {
             fullscreen: BTreeMap::new(),
             display_changes: 0,
             redraw_owed: HashSet::new(),
+            min_size_checks: HashSet::new(),
             redraws: BTreeMap::new(),
             next_redraw: 0,
             added_rules: Vec::new(),
@@ -1154,6 +1169,10 @@ impl WindowManager {
             tracing::debug!(hwnd = %info.hwnd, title = %info.title, "an ignore rule matched");
             return;
         }
+        // Asked before the window joins the model, so its very first tile
+        // already leaves it the room it accepts, rather than handing it one
+        // it spills out of and laying the workspace out a second time.
+        let window = window.with_min_size(self.platform.min_size(info.hwnd));
 
         let slow = self.core.rules.is_slow(&window.info());
         let (monitor, workspace) = self.destination(info, &window);
@@ -1914,6 +1933,10 @@ impl WindowManager {
                 self.on_redraw(step);
                 Flow::Continue
             }
+            Event::MinSizeCheck(hwnd) => {
+                self.recheck_min_size(hwnd);
+                Flow::Continue
+            }
             Event::Shutdown(reason) => {
                 tracing::info!(?reason, "shutting down");
                 Flow::Stop
@@ -1958,6 +1981,7 @@ impl WindowManager {
             WindowEventKind::LocationChange => {
                 self.follow_external_maximize(hwnd);
                 self.follow_floating_move(hwnd);
+                self.notice_refused_tile(hwnd);
             }
             WindowEventKind::Destroyed => {
                 self.scratchpad_window_closed(hwnd);
@@ -1977,6 +2001,7 @@ impl WindowManager {
                     self.routed.remove(&hwnd);
                     self.minimized.remove(&hwnd);
                     self.redraw_owed.remove(&hwnd);
+                    self.min_size_checks.remove(&hwnd);
                 }
             }
             WindowEventKind::Hidden | WindowEventKind::Cloaked => {
@@ -2143,6 +2168,99 @@ impl WindowManager {
         if let Ok(info) = self.platform.window_info(hwnd) {
             self.visuals.follow_window(hwnd, info.visible_frame());
         }
+    }
+
+    /// The tile a window is shown in right now, if it is shown in one.
+    ///
+    /// Only a window the layout places: the shown window of a tiled container
+    /// on a workspace someone is looking at. A floating, maximized, monocled
+    /// or fullscreen window, one buried in a stack and one Mochi has hidden
+    /// all have no tile to be measured against.
+    fn shown_tile(&self, hwnd: Hwnd) -> Option<Rect> {
+        let id = window_id(hwnd);
+        let (monitor, workspace) = self.core.locate_window(id)?;
+        if self.core.monitors().get(monitor)?.focused_workspace_idx() != workspace
+            || self.fullscreen.contains_key(&hwnd)
+        {
+            return None;
+        }
+        let target = self.core.workspace(monitor, workspace).ok()?;
+        if target.is_monocle() || target.is_maximized() {
+            return None;
+        }
+        let idx = target.container_idx_for_window(id)?;
+        if target.containers().get(idx)?.focused_window_id() != Some(id) {
+            return None;
+        }
+        target.latest_layout().get(idx).copied()
+    }
+
+    /// Notices a tiled window that came out bigger than its tile.
+    ///
+    /// Almost always that is a window refusing to shrink below a minimum size
+    /// Mochi did not know about: it was asked before the application had set
+    /// one, it did not answer in time, or the application raised it since.
+    /// Asking again on the spot would be asking in the middle of whatever is
+    /// moving the window, and on the flood path; an animation shrinking a
+    /// window into its tile passes through every size bigger than the tile.
+    /// So this only takes note, once per window, and the question is asked
+    /// when the window has had time to settle.
+    fn notice_refused_tile(&mut self, hwnd: Hwnd) {
+        // The cheap checks first: this runs for every location change.
+        if self.core.is_paused
+            || self.min_size_checks.contains(&hwnd)
+            || !self.core.is_managed(window_id(hwnd))
+        {
+            return;
+        }
+        if !self.bigger_than_its_tile(hwnd) {
+            return;
+        }
+        self.min_size_checks.insert(hwnd);
+        self.send_later(MIN_SIZE_SETTLE, Event::MinSizeCheck(hwnd));
+    }
+
+    /// `true` when a shown, tiled window covers more than its tile.
+    fn bigger_than_its_tile(&self, hwnd: Hwnd) -> bool {
+        let Some(tile) = self.shown_tile(hwnd) else {
+            return false;
+        };
+        let Some(frame) = self.platform.visible_frame(hwnd) else {
+            return false;
+        };
+        frame.width() > tile.width() + MIN_SIZE_SLACK
+            || frame.height() > tile.height() + MIN_SIZE_SLACK
+    }
+
+    /// Asks a window that settled bigger than its tile how small it can go,
+    /// and lays its workspace out around the answer.
+    ///
+    /// Nothing happens when the window has fitted itself in the meantime, or
+    /// when its answer is the one Mochi already had: the layout has given it
+    /// all the room the answer asks for, and asking the layout again would
+    /// change nothing. That is also what stops this from ever looping on a
+    /// window that is bigger than what it says it needs.
+    fn recheck_min_size(&mut self, hwnd: Hwnd) {
+        self.min_size_checks.remove(&hwnd);
+        if self.core.is_paused || !self.bigger_than_its_tile(hwnd) {
+            return;
+        }
+        let min_size = self.platform.min_size(hwnd);
+        let changes = self.core.set_window_min_size(window_id(hwnd), min_size);
+        if changes.is_empty() {
+            tracing::debug!(
+                %hwnd,
+                ?min_size,
+                "a window is bigger than its tile and its minimum size has not changed"
+            );
+            return;
+        }
+        tracing::info!(
+            %hwnd,
+            ?min_size,
+            "a window is bigger than its tile, laying it out around its minimum size"
+        );
+        self.apply_changes(changes);
     }
 
     /// The monitor a managed window has taken over, if it has.
@@ -3670,7 +3788,7 @@ impl WindowManager {
             Ok(info) => info,
             Err(e) => return Response::error(e),
         };
-        let window = core_window(&info);
+        let window = core_window(&info).with_min_size(self.platform.min_size(hwnd));
         let (monitor, workspace) = self.destination(&info, &window);
         let before = self.focus();
         match self.core.add_window_to(monitor, workspace, window) {
@@ -4844,6 +4962,7 @@ mod tests {
     use crate::platform::WindowPlacement;
     use crate::platform::types::{MonitorId, style};
     use crate::state::Settings;
+    use mochi_core::layout::MinSize;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4905,6 +5024,11 @@ mod tests {
         /// Windows Windows reports as maximized, which a test drives directly
         /// to stand in for the user pressing the maximize button.
         zoomed: Mutex<Vec<Hwnd>>,
+        /// The smallest size each window answers it accepts, in logical
+        /// pixels. A window not listed has no minimum to speak of.
+        minimums: Mutex<Vec<(Hwnd, MinSize)>>,
+        /// How many times a window was asked for its minimum size.
+        min_size_asks: AtomicUsize,
     }
 
     impl FakePlatform {
@@ -4930,7 +5054,17 @@ mod tests {
                 record_seen: Mutex::new(Vec::new()),
                 unrestorable: Mutex::new(Vec::new()),
                 zoomed: Mutex::new(Vec::new()),
+                minimums: Mutex::new(Vec::new()),
+                min_size_asks: AtomicUsize::new(0),
             }
+        }
+
+        /// The window will not be made smaller than this, in logical pixels,
+        /// and says so when it is asked.
+        fn insists_on(&self, hwnd: Hwnd, width: i32, height: i32) {
+            let mut minimums = self.minimums.lock().unwrap();
+            minimums.retain(|(other, _)| *other != hwnd);
+            minimums.push((hwnd, MinSize { width, height }));
         }
 
         fn last_placements(&self) -> Vec<(Hwnd, Rect)> {
@@ -5054,6 +5188,15 @@ mod tests {
                     style: w.style,
                     rect: w.rect,
                 })
+        }
+        fn min_size(&self, hwnd: Hwnd) -> Option<MinSize> {
+            self.min_size_asks.fetch_add(1, Ordering::SeqCst);
+            self.minimums
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(other, _)| *other == hwnd)
+                .map(|&(_, min)| min)
         }
         fn outranks_us(&self, hwnd: Hwnd) -> bool {
             // Mirrors the real thing: the executable is unreadable for exactly
@@ -5209,7 +5352,12 @@ mod tests {
         windows: Vec<WindowInfo>,
         monitors: Vec<MonitorInfo>,
     ) -> (WindowManager, Arc<FakePlatform>) {
-        let platform = Arc::new(FakePlatform::with_monitors(windows, monitors));
+        manager_over(Arc::new(FakePlatform::with_monitors(windows, monitors)))
+    }
+
+    /// A manager over a fake desktop a test has set up beforehand, for what
+    /// has to be true from the moment the windows are first adopted.
+    fn manager_over(platform: Arc<FakePlatform>) -> (WindowManager, Arc<FakePlatform>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut session = State::new(PathBuf::from(r"C: owhere\mochi.json"), true);
         session.settings = Settings::default();
@@ -8926,6 +9074,249 @@ alt + j : focus down
                 .recv_timeout(std::time::Duration::from_millis(400))
                 .is_err(),
             "the monitor was retiled more than once"
+        );
+    }
+
+    /// The four windows of the screenshot this was written from, with the
+    /// minimum sizes they really answered on the 150% screen, in logical
+    /// pixels. Two of them cannot be narrower than 1200 physical pixels, and
+    /// the layout used to cut the quarter they shared into two tiles of about
+    /// 930 each.
+    fn four_stubborn_windows() -> (WindowManager, Arc<FakePlatform>) {
+        let platform = Arc::new(FakePlatform::new(vec![
+            window(1, "Chat"),
+            window(2, "Browser"),
+            window(3, "Music"),
+            window(4, "Friends"),
+        ]));
+        platform.insists_on(Hwnd(1), 500, 400);
+        platform.insists_on(Hwnd(2), 515, 88);
+        platform.insists_on(Hwnd(3), 800, 600);
+        platform.insists_on(Hwnd(4), 814, 508);
+        manager_over(platform)
+    }
+
+    /// The rectangle the layout gives a window, which every test here reads
+    /// rather than working out tile sizes of its own.
+    fn tile_of(wm: &WindowManager, hwnd: isize) -> Rect {
+        wm.state()
+            .rect_for_window(WindowId(hwnd))
+            .expect("the window has no tile")
+    }
+
+    #[test]
+    fn windows_that_refuse_to_shrink_are_given_the_room_they_accept() {
+        let (wm, platform) = four_stubborn_windows();
+        let area = main_screen().work_area;
+        let tiles: Vec<(isize, Rect)> = (1..=4).map(|hwnd| (hwnd, tile_of(&wm, hwnd))).collect();
+        for &(hwnd, tile) in &tiles {
+            let (width, height) = platform
+                .minimums
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(other, _)| *other == Hwnd(hwnd))
+                .map(|&(_, min)| (min.width * 3 / 2, min.height * 3 / 2))
+                .unwrap();
+            assert!(
+                tile.width() >= width && tile.height() >= height,
+                "window {hwnd} was given {tile:?}, smaller than the {width}x{height} it accepts"
+            );
+            assert!(
+                area.contains_rect(&tile),
+                "window {hwnd} left the screen: {tile:?}"
+            );
+            assert_eq!(
+                platform.rect_of(Hwnd(hwnd)),
+                Some(tile),
+                "window {hwnd} was not placed where the layout says"
+            );
+        }
+        for (i, &(a, first)) in tiles.iter().enumerate() {
+            for &(b, second) in &tiles[i + 1..] {
+                assert!(
+                    !first.intersects(&second),
+                    "windows {a} and {b} overlap: {first:?} {second:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_is_asked_its_minimum_once_when_it_is_managed() {
+        let (mut wm, platform) = four_stubborn_windows();
+        assert_eq!(platform.min_size_asks.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            wm.state().window(WindowId(3)).and_then(|w| w.min_size),
+            Some(MinSize {
+                width: 800,
+                height: 600
+            })
+        );
+
+        // Moving inside its tile is the flood path, and asks nothing.
+        for _ in 0..50 {
+            wm.on_window_event(WindowEventKind::LocationChange, Hwnd(3));
+        }
+        assert_eq!(platform.min_size_asks.load(Ordering::SeqCst), 4);
+        assert!(
+            wm.rx
+                .recv_timeout(MIN_SIZE_SETTLE + std::time::Duration::from_millis(300))
+                .is_err(),
+            "a window that fits its tile was checked again"
+        );
+    }
+
+    #[test]
+    fn a_window_that_settles_bigger_than_its_tile_is_asked_again_and_given_room() {
+        let (mut wm, platform) = manager(vec![
+            window(1, "Editor"),
+            window(2, "Browser"),
+            window(3, "Music"),
+        ]);
+        // The application raised its minimum after it was first asked, and
+        // the window now hangs out of its tile.
+        let tile = tile_of(&wm, 3);
+        platform.insists_on(Hwnd(3), 1600, 300);
+        platform.moves_by_itself(
+            Hwnd(3),
+            Rect::new(tile.left, tile.top, tile.left + 2400, tile.bottom),
+        );
+        let asked = platform.min_size_asks.load(Ordering::SeqCst);
+        // A settling window raises many location changes; it is checked once.
+        for _ in 0..20 {
+            wm.on_window_event(WindowEventKind::LocationChange, Hwnd(3));
+        }
+        assert_eq!(
+            platform.min_size_asks.load(Ordering::SeqCst),
+            asked,
+            "the window was asked on the flood path"
+        );
+
+        let check = wm
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the window was never checked");
+        assert!(matches!(check, Event::MinSizeCheck(Hwnd(3))), "{check:?}");
+        assert!(
+            wm.rx
+                .recv_timeout(MIN_SIZE_SETTLE + std::time::Duration::from_millis(300))
+                .is_err(),
+            "the window was checked more than once"
+        );
+
+        platform.clear_history();
+        wm.on_event(check);
+        let tile = tile_of(&wm, 3);
+        assert!(
+            tile.width() >= 2400,
+            "1600 logical pixels on the 150% screen is 2400, the tile is {tile:?}"
+        );
+        assert_eq!(platform.rect_of(Hwnd(3)), Some(tile), "nothing was retiled");
+        assert!(wm.min_size_checks.is_empty());
+    }
+
+    #[test]
+    fn a_window_bigger_than_its_tile_for_a_known_reason_is_not_retiled() {
+        let (mut wm, platform) = four_stubborn_windows();
+        // Bigger than its tile, but its minimum is the one Mochi already laid
+        // it out around: a drag in progress, or a window that is bigger than
+        // what it says it needs. Retiling would change nothing.
+        let tile = tile_of(&wm, 4);
+        platform.moves_by_itself(
+            Hwnd(4),
+            Rect::new(tile.left, tile.top, tile.right + 400, tile.bottom + 200),
+        );
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(4));
+        let check = wm
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the window was never checked");
+        platform.clear_history();
+        wm.on_event(check);
+        assert_eq!(
+            platform.rect_of(Hwnd(4)),
+            None,
+            "an unchanged minimum retiled"
+        );
+        assert_eq!(tile_of(&wm, 4), tile);
+    }
+
+    #[test]
+    fn a_window_that_fitted_itself_in_the_meantime_is_left_alone() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        let tile = tile_of(&wm, 2);
+        platform.moves_by_itself(
+            Hwnd(2),
+            Rect::new(tile.left, tile.top, tile.right + 500, tile.bottom),
+        );
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(2));
+        let check = wm
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the window was never checked");
+        // It was only passing through: an animation, a redraw, a drag.
+        platform.moves_by_itself(Hwnd(2), tile);
+        platform.insists_on(Hwnd(2), 5000, 5000);
+        let asked = platform.min_size_asks.load(Ordering::SeqCst);
+        wm.on_event(check);
+        assert_eq!(
+            platform.min_size_asks.load(Ordering::SeqCst),
+            asked,
+            "a window back in its tile was asked anyway"
+        );
+        assert_eq!(
+            wm.state().window(WindowId(2)).and_then(|w| w.min_size),
+            None
+        );
+    }
+
+    #[test]
+    fn a_window_that_closes_while_it_is_being_checked_is_forgotten() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        let tile = tile_of(&wm, 2);
+        platform.moves_by_itself(
+            Hwnd(2),
+            Rect::new(tile.left, tile.top, tile.right + 500, tile.bottom),
+        );
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(2));
+        assert!(wm.min_size_checks.contains(&Hwnd(2)));
+
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .retain(|w| w.hwnd != Hwnd(2));
+        wm.on_window_event(WindowEventKind::Destroyed, Hwnd(2));
+        assert!(
+            !wm.min_size_checks.contains(&Hwnd(2)),
+            "a dead handle was kept, and Windows hands handles out again"
+        );
+
+        let check = wm
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the check was never sent");
+        platform.clear_history();
+        wm.on_event(check);
+        assert_eq!(
+            platform.rect_of(Hwnd(1)),
+            None,
+            "a dead window retiled the screen"
+        );
+    }
+
+    #[test]
+    fn a_floating_window_bigger_than_anything_is_never_checked() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+        let changes = wm.core.toggle_float().unwrap();
+        wm.apply_changes(changes);
+        platform.moves_by_itself(Hwnd(2), Rect::new(0, 0, 3840, 2112));
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(2));
+        assert!(
+            wm.min_size_checks.is_empty(),
+            "a floating window has no tile"
         );
     }
 

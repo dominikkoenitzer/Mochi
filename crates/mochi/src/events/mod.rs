@@ -260,6 +260,10 @@ pub enum Event {
     /// A step of the redraw that follows a display change, sent by the daemon
     /// to itself. See [`Redraw`].
     Redraw(Redraw),
+    /// A tiled window that came out bigger than its tile, to be asked for its
+    /// minimum size again now that whatever was moving it has finished. Sent
+    /// by the daemon to itself.
+    MinSizeCheck(Hwnd),
     /// Wind down.
     Shutdown(ShutdownReason),
 }

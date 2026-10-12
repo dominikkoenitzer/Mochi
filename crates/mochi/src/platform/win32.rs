@@ -10,6 +10,7 @@ use std::sync::{LazyLock, PoisonError, RwLock};
 
 use anyhow::{Context, Result, anyhow};
 use mochi_core::Rect;
+use mochi_core::layout::MinSize;
 
 use windows::Win32::Foundation::{
     COLORREF, CloseHandle, E_ACCESSDENIED, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM,
@@ -20,28 +21,32 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
-    MONITOR_DEFAULTTONULL, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITORINFO, MONITORINFOEXW,
+    MonitorFromWindow,
 };
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess, OpenProcessToken,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, BringWindowToTop, DeferWindowPos, EndDeferWindowPos, EnumChildWindows,
     EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
     GetCursorPos, GetForegroundWindow, GetShellWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    IsIconic, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, PostMessageW, SET_WINDOW_POS_FLAGS,
-    SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
+    IsIconic, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, MINMAXINFO, PostMessageW,
+    SET_WINDOW_POS_FLAGS, SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE,
+    SW_RESTORE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SendMessageTimeoutW, SetCursorPos, SetForegroundWindow,
     SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE,
-    WindowFromPoint,
+    WM_GETMINMAXINFO, WindowFromPoint,
 };
 
 use super::appview::{self, ViewCloakError};
-use super::types::{FRAME_HOST, Hwnd, MonitorId, MonitorInfo, WindowInfo, WindowShape, ex_style};
+use super::types::{
+    FRAME_HOST, Hwnd, MonitorId, MonitorInfo, WindowInfo, WindowShape, ex_style, logical_min_frame,
+};
 use super::wide::{file_name, from_wide};
 use super::{CloakUnsupported, Platform, ShowState, WindowPlacement, ZOrder};
 
@@ -56,6 +61,12 @@ const TITLE_BUFFER: usize = 512;
 const CLASS_BUFFER: usize = 257;
 /// `MAX_PATH` is a lie on modern Windows, so use a generous buffer.
 const PATH_BUFFER: usize = 1024;
+/// How long a window gets to say how small it can go, in milliseconds.
+///
+/// The question runs on the loop's own thread, so a window busy with
+/// something else must not be waited on for long; one that misses it is
+/// asked again the next time it turns out bigger than its tile.
+const MIN_SIZE_TIMEOUT_MS: u32 = 50;
 
 /// Windows this process is not allowed to touch, and the process each one
 /// belonged to when it refused.
@@ -796,6 +807,67 @@ impl Platform for Win32Platform {
             style: unsafe { GetWindowLongPtrW(handle, GWL_STYLE) } as u32,
             rect: rect(r),
         })
+    }
+
+    fn visible_frame(&self, h: Hwnd) -> Option<Rect> {
+        let handle = hwnd(h);
+        // SAFETY: IsWindow tolerates any handle value.
+        if !unsafe { IsWindow(Some(handle)) }.as_bool() {
+            return None;
+        }
+        let frame = dwm_frame(handle);
+        if frame.width() > 0 && frame.height() > 0 {
+            return Some(frame);
+        }
+        Some(window_rect(handle))
+    }
+
+    fn min_size(&self, h: Hwnd) -> Option<MinSize> {
+        let handle = hwnd(h);
+        let mut info = MINMAXINFO::default();
+        let mut result = 0_usize;
+        // SAFETY: user32 marshals WM_GETMINMAXINFO's structure across a
+        // process boundary itself, in both directions, so a pointer into this
+        // frame is what the message takes even for another process's window.
+        // The call has returned, answered or timed out, before `info` is read
+        // or goes out of scope. A hung window is given up on at once.
+        let answered = unsafe {
+            SendMessageTimeoutW(
+                handle,
+                WM_GETMINMAXINFO,
+                WPARAM(0),
+                LPARAM((&raw mut info) as isize),
+                SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+                MIN_SIZE_TIMEOUT_MS,
+                Some(&raw mut result),
+            )
+        };
+        if answered.0 == 0 {
+            return None;
+        }
+        // SAFETY: both tolerate any handle value; a window that died in the
+        // meantime reads as 0, which counts as 96 DPI.
+        let window_dpi = unsafe { GetDpiForWindow(handle) };
+        let monitor = unsafe { MonitorFromWindow(handle, MONITOR_DEFAULTTONEAREST) };
+        let (mut dpi_x, mut dpi_y) = (window_dpi, window_dpi);
+        // SAFETY: the monitor handle came from MonitorFromWindow just now.
+        if unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y) }
+            .is_err()
+        {
+            dpi_x = window_dpi;
+        }
+        let window = window_rect(handle);
+        let frame = dwm_frame(handle);
+        let border = if frame.width() > 0 && frame.height() > 0 {
+            (
+                window.width() - frame.width(),
+                window.height() - frame.height(),
+            )
+        } else {
+            (0, 0)
+        };
+        let track = info.ptMinTrackSize;
+        logical_min_frame((track.x, track.y), window_dpi, border, dpi_x)
     }
 
     fn outranks_us(&self, h: Hwnd) -> bool {

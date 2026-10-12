@@ -65,6 +65,17 @@ impl<P: Platform> Platform for DryRunPlatform<P> {
         self.inner.window_shape(hwnd)
     }
 
+    fn visible_frame(&self, hwnd: Hwnd) -> Option<mochi_core::Rect> {
+        // A read, so it passes through.
+        self.inner.visible_frame(hwnd)
+    }
+
+    fn min_size(&self, hwnd: Hwnd) -> Option<mochi_core::layout::MinSize> {
+        // A question the window answers, not a change to it, so it passes
+        // through: a dry run lays out what the real daemon would.
+        self.inner.min_size(hwnd)
+    }
+
     fn outranks_us(&self, hwnd: Hwnd) -> bool {
         // A read, so it passes through.
         self.inner.outranks_us(hwnd)

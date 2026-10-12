@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use mochi_core::Rect;
+use mochi_core::layout::MinSize;
 
 pub mod dpi;
 pub mod types;
@@ -134,6 +135,33 @@ pub trait Platform: Send + Sync {
     /// asked on every location change of a managed window. Two plain reads.
     /// `None` when the handle is no longer a window.
     fn window_shape(&self, hwnd: Hwnd) -> Option<types::WindowShape>;
+
+    /// The rectangle the user sees as the window: the window rect without
+    /// the invisible resize border.
+    ///
+    /// Its own call for the same reason as [`Platform::is_maximized`]: it is
+    /// asked on every location change of a tiled window. `None` when the
+    /// handle is no longer a window.
+    fn visible_frame(&self, hwnd: Hwnd) -> Option<Rect> {
+        self.window_info(hwnd).ok().map(|info| info.visible_frame())
+    }
+
+    /// The smallest visible frame the window accepts, in logical pixels: its
+    /// size at 96 DPI.
+    ///
+    /// Many applications will not shrink below a size of their own and say
+    /// so when Windows asks, which it does before every resize. Mochi asks
+    /// the same question so the layout can leave the window that room,
+    /// rather than hand it a tile it spills out of. `None` when the window
+    /// did not answer in time, which is also the answer of a platform that
+    /// has no such notion.
+    ///
+    /// A message to the window's own thread, so it is never asked on the
+    /// flood path: once when a window is managed, and again when a tiled
+    /// window has settled bigger than its tile.
+    fn min_size(&self, _hwnd: Hwnd) -> Option<MinSize> {
+        None
+    }
 
     /// Whether the window belongs to a process that outranks Mochi.
     ///
