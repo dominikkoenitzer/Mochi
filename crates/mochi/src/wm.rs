@@ -29,7 +29,7 @@
 //! after a hard kill bring it back like any other hidden window. Placing it is
 //! the one position written outside `apply_changes`.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -80,6 +80,15 @@ const MIN_SIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(50
 /// How many pixels a window may come out bigger than its tile before it counts
 /// as refusing it. Rounding between logical and physical pixels is worth one.
 const MIN_SIZE_SLACK: i32 = 2;
+
+/// How many new answers from one window are laid out within
+/// [`MIN_SIZE_CHANGE_WINDOW`]. A real application settles on its minimum; one
+/// whose answer changes every time it is placed would otherwise be retiled
+/// for as long as it keeps doing it.
+const MIN_SIZE_CHANGES: u32 = 3;
+
+/// The stretch of time [`MIN_SIZE_CHANGES`] counts over.
+const MIN_SIZE_CHANGE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a window being redrawn stays minimized. Chromium has to see the
 /// minimize and let go of its broken surface before the restore asks it for a
@@ -594,6 +603,9 @@ pub struct WindowManager {
     /// be asked for their minimum size again, so a window that keeps moving
     /// is asked once per settle rather than once per location change.
     min_size_checks: HashSet<Hwnd>,
+    /// How many new minimum sizes each window has had laid out lately, and
+    /// since when. See [`MIN_SIZE_CHANGES`].
+    min_size_changes: HashMap<Hwnd, (u32, std::time::Instant)>,
     /// Redraws in flight, by batch, until their windows are restored.
     redraws: BTreeMap<u64, RedrawBatch>,
     /// The id the next redraw batch gets.
@@ -733,6 +745,7 @@ impl WindowManager {
             display_changes: 0,
             redraw_owed: HashSet::new(),
             min_size_checks: HashSet::new(),
+            min_size_changes: HashMap::new(),
             redraws: BTreeMap::new(),
             next_redraw: 0,
             added_rules: Vec::new(),
@@ -2002,6 +2015,7 @@ impl WindowManager {
                     self.minimized.remove(&hwnd);
                     self.redraw_owed.remove(&hwnd);
                     self.min_size_checks.remove(&hwnd);
+                    self.min_size_changes.remove(&hwnd);
                 }
             }
             WindowEventKind::Hidden | WindowEventKind::Cloaked => {
@@ -2253,10 +2267,8 @@ impl WindowManager {
             tracing::debug!(%hwnd, "a window bigger than its tile did not say how small it can go");
             return;
         };
-        let changes = self
-            .core
-            .set_window_min_size(window_id(hwnd), Some(min_size));
-        if changes.is_empty() {
+        let id = window_id(hwnd);
+        if self.core.window(id).and_then(|w| w.min_size) == Some(min_size) {
             tracing::debug!(
                 %hwnd,
                 ?min_size,
@@ -2264,6 +2276,17 @@ impl WindowManager {
             );
             return;
         }
+        let now = std::time::Instant::now();
+        let (count, since) = self.min_size_changes.entry(hwnd).or_insert((0, now));
+        if now.duration_since(*since) > MIN_SIZE_CHANGE_WINDOW {
+            (*count, *since) = (0, now);
+        }
+        if *count >= MIN_SIZE_CHANGES {
+            tracing::debug!(%hwnd, ?min_size, "a window keeps changing its minimum size, leaving it be");
+            return;
+        }
+        *count += 1;
+        let changes = self.core.set_window_min_size(id, Some(min_size));
         tracing::info!(
             %hwnd,
             ?min_size,
@@ -9343,6 +9366,34 @@ alt + j : focus down
             tile_of(&wm, 2).width() < wide,
             "the tile kept the old minimum: {:?}",
             tile_of(&wm, 2)
+        );
+    }
+
+    #[test]
+    fn a_window_whose_minimum_keeps_changing_is_followed_only_a_few_times() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        // Every time it is placed it asks for more and grows out of its tile.
+        for round in 1..=6 {
+            platform.insists_on(Hwnd(2), 1000 + 100 * round, 0);
+            let tile = tile_of(&wm, 2);
+            platform.moves_by_itself(
+                Hwnd(2),
+                Rect::new(tile.left, tile.top, tile.right + 500, tile.bottom),
+            );
+            wm.on_window_event(WindowEventKind::LocationChange, Hwnd(2));
+            let check = wm
+                .rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the window was never checked");
+            wm.on_event(check);
+        }
+        assert_eq!(
+            wm.state()
+                .window(WindowId(2))
+                .and_then(|w| w.min_size)
+                .map(|min| min.width),
+            Some(1000 + 100 * i32::try_from(MIN_SIZE_CHANGES).unwrap()),
+            "only the first answers are laid out"
         );
     }
 
