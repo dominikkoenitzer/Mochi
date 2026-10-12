@@ -27,7 +27,7 @@
         & ([scriptblock]::Create((irm <url>))) -Uninstall
 
 .PARAMETER Version
-    Release tag to download, for example v0.1.22, or `latest` for the newest
+    Release tag to download, for example v0.1.23, or `latest` for the newest
     release. Without it the repository is built from source with cargo, or,
     when the script was downloaded on its own and has no checkout around it,
     the latest release is installed.
@@ -59,7 +59,7 @@
     .\scripts\install.ps1
 
 .EXAMPLE
-    .\scripts\install.ps1 -Version v0.1.22
+    .\scripts\install.ps1 -Version v0.1.23
 
 .EXAMPLE
     .\scripts\install.ps1 -Version latest
@@ -318,7 +318,7 @@ function Resolve-ReleaseTag {
         $release = Invoke-RestMethod -Uri "$BaseUrl/latest" -UseBasicParsing
         return $release.tag_name
     } catch {
-        throw "could not find the latest Mochi release ($($_.Exception.Message)). Pass a tag such as -Version v0.1.22."
+        throw "could not find the latest Mochi release ($($_.Exception.Message)). Pass a tag such as -Version v0.1.23."
     }
 }
 
