@@ -152,7 +152,7 @@ The same line in this form takes switches:
 ```
 
 `-SkipStart` installs without starting Mochi now. `-SkipAutostart` does not
-register the login start. `-Version v0.1.24` installs that release instead of
+register the login start. `-Version v0.1.25` installs that release instead of
 the latest. `-SkipPath` leaves your PATH alone, and `-SkipQuickstart` does not
 write the default `mochi.json` and hotkey file. `-Uninstall` removes Mochi the
 way the Apps & features entry does.
