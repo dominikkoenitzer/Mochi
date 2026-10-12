@@ -1521,6 +1521,130 @@ fn a_window_that_defends_a_minimum_size_does_not_make_the_daemon_thrash() {
     steps.finish(&log);
 }
 
+#[test]
+fn a_window_that_defends_a_minimum_size_gets_a_tile_it_fits() {
+    skip_unless_allowed!("a_window_that_defends_a_minimum_size_gets_a_tile_it_fits");
+
+    let mut daemon = Daemon::start("min-fit");
+    let log = daemon.log();
+    let mut steps = Steps::default();
+
+    // Wider than half the screen, so the even split it used to be given is a
+    // tile it would spill out of, and still small enough that the screen has
+    // room for it and a neighbour. Sized from the runner's own screen.
+    let screen = wait_some(STEP, area).expect("the daemon never reported its work area");
+    let min = (screen.tiled.width() * 3 / 5, screen.tiled.height() / 2);
+
+    let plain = TestWindows::spawn(1, 0).expect("could not spawn the plain window");
+    let stubborn = TestWindows::spawn_with(&SpawnOptions {
+        min_size: Some(min),
+        title_prefix: "MochiTestFirm".to_owned(),
+        ..SpawnOptions::new(1, 0)
+    })
+    .expect("could not spawn the stubborn window");
+    let firm = stubborn.handles()[0];
+    let other = plain.handles()[0];
+
+    steps.step("the daemon adopts both windows", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} windows", managed_count()))
+    });
+
+    steps.step(
+        "the stubborn window is not squeezed below its minimum",
+        || {
+            wait_until_still(&plain);
+            let info = all_infos()
+                .into_iter()
+                .find(|w| w.hwnd == firm)
+                .ok_or("the stubborn window vanished")?;
+            check(
+                info.rect.width() >= min.0 && info.rect.height() >= min.1,
+                format!(
+                    "{} is {}x{}, under the {}x{} it defends",
+                    info.hwnd_hex(),
+                    info.rect.width(),
+                    info.rect.height(),
+                    min.0,
+                    min.1
+                ),
+            )
+        },
+    );
+
+    steps.step(
+        "the two windows sit side by side without overlapping",
+        || {
+            let windows = all_infos();
+            let frame_of = |hwnd| {
+                windows
+                    .iter()
+                    .find(|w| w.hwnd == hwnd)
+                    .map(|w| w.frame)
+                    .ok_or("a window vanished")
+            };
+            let (a, b) = (frame_of(firm)?, frame_of(other)?);
+            check(!a.intersects(&b), format!("{a:?} overlaps {b:?}"))?;
+            check(
+                screen.work_area.contains(&a) && screen.work_area.contains(&b),
+                format!(
+                    "a window left the work area {:?}: {a:?} {b:?}",
+                    screen.work_area
+                ),
+            )
+        },
+    );
+
+    steps.step("the daemon knows where the stubborn window is", || {
+        // The model's rectangle is the one the border is drawn around, so it
+        // has to be where the window really is, not the tile it refused.
+        let state = state().ok_or("no state")?;
+        let window = state["monitors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|m| m["workspaces"].as_array().into_iter().flatten())
+            .flat_map(|w| w["containers"].as_array().into_iter().flatten())
+            .flat_map(|c| c["windows"].as_array().into_iter().flatten())
+            .find(|w| w["hwnd"].as_i64() == Some(firm))
+            .cloned()
+            .ok_or("the stubborn window is not in the state document")?;
+        let (Some(model), Some(actual)) = (rect(&window["rect"]), rect(&window["actual_rect"]))
+        else {
+            return Err(format!("no rectangles in {window}"));
+        };
+        check(
+            close_enough(model, actual, 2),
+            format!("the model has it at {model:?}, it is at {actual:?}"),
+        )?;
+        check(
+            !window["min_size"].is_null(),
+            "the window's minimum size was never read",
+        )
+    });
+
+    steps.step("the daemon did not retile in a loop", || {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        let retiles = text.matches("retiling").count();
+        check(
+            retiles < 50,
+            format!("{retiles} retiles for two windows reads like a fight"),
+        )
+    });
+
+    steps.step("stop leaves both windows visible", || {
+        daemon.stop();
+        wait_for(Duration::from_secs(5), || {
+            all_infos().iter().all(|w| w.visible && !w.cloaked)
+        })
+        .map_err(|_| "a window stayed hidden after stop".to_owned())
+    });
+
+    drop(stubborn);
+    drop(plain);
+    steps.finish(&log);
+}
+
 // ---------------------------------------------------------------------------
 // fullscreen: a window that takes its monitor over is left alone until it
 // gives it back
