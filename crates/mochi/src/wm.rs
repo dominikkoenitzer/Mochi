@@ -2272,6 +2272,24 @@ impl WindowManager {
         self.apply_changes(changes);
     }
 
+    /// Asks every window on screen how small it can go, for a retile.
+    ///
+    /// The only other time a window is asked again is when it turns out bigger
+    /// than its tile, which never notices a minimum the application lowered.
+    /// A retile is Mochi being asked to look again, so it asks. A window that
+    /// does not answer keeps what it said before.
+    fn refresh_min_sizes(&mut self) {
+        if self.core.is_paused {
+            return;
+        }
+        for id in self.core.visible_window_ids() {
+            if let Some(min_size) = self.platform.min_size(handle(id)) {
+                // The retile right after this lays everything out.
+                let _ = self.core.set_window_min_size(id, Some(min_size));
+            }
+        }
+    }
+
     /// The monitor a managed window has taken over, if it has.
     ///
     /// On the location-change path, which is the flood path, so the cheap
@@ -3187,7 +3205,10 @@ impl WindowManager {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::error(e),
             },
-            Command::Retile => self.run_op(CoreState::retile),
+            Command::Retile => {
+                self.refresh_min_sizes();
+                self.run_op(CoreState::retile)
+            }
             Command::RestoreWindows => self.restore_stranded_windows(),
 
             // --- focus and movement ------------------------------------
@@ -9294,6 +9315,35 @@ alt + j : focus down
             "a missed answer retiled the screen"
         );
         assert_eq!(tile_of(&wm, 4), tile);
+    }
+
+    #[test]
+    fn retile_asks_every_window_again_and_follows_a_lowered_minimum() {
+        let platform = Arc::new(FakePlatform::new(vec![
+            window(1, "Editor"),
+            window(2, "Browser"),
+        ]));
+        platform.insists_on(Hwnd(2), 1600, 0);
+        let (mut wm, platform) = manager_over(platform);
+        let wide = tile_of(&wm, 2).width();
+        assert!(wide >= 2400, "1600 logical pixels at 150% is 2400: {wide}");
+
+        // Nothing else ever notices a minimum that went down: the window fits
+        // its tile, so it is never bigger than it.
+        platform.insists_on(Hwnd(2), 100, 0);
+        let _ = wm.handle_command(Command::Retile);
+        assert_eq!(
+            wm.state().window(WindowId(2)).and_then(|w| w.min_size),
+            Some(MinSize {
+                width: 100,
+                height: 0
+            })
+        );
+        assert!(
+            tile_of(&wm, 2).width() < wide,
+            "the tile kept the old minimum: {:?}",
+            tile_of(&wm, 2)
+        );
     }
 
     #[test]
