@@ -16,7 +16,7 @@
 //! the panic hook clear every alpha this module ever set, even if the process
 //! never gets to call [`Visuals::clear`] itself.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use mochi_core::Rect;
@@ -63,6 +63,13 @@ pub struct Visuals {
     transparency: Option<TransparencyManager>,
     animator: Option<Animator>,
     animation: AnimationConfig,
+    /// The windows an animation is still moving, and until when.
+    ///
+    /// A window that is already where a new layout wants it is not animated,
+    /// except when it is only there in passing: an animation still on its way
+    /// to the previous layout would carry it off again, so it is handed a job
+    /// that replaces that one.
+    moving: Mutex<HashMap<Hwnd, std::time::Instant>>,
     /// Windows this pass has faded, mirrored into `hidden` so a crash undoes
     /// them; kept here so the next pass knows what to un-mirror.
     faded: BTreeSet<Hwnd>,
@@ -91,6 +98,7 @@ impl Visuals {
             transparency: None,
             animator: None,
             animation: AnimationConfig::default(),
+            moving: Mutex::new(HashMap::new()),
             faded: BTreeSet::new(),
             #[cfg(test)]
             drawn: Vec::new(),
@@ -207,6 +215,12 @@ impl Visuals {
             return;
         }
         if let Some(animator) = &self.animator {
+            let now = std::time::Instant::now();
+            let mut moving = self
+                .moving
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            moving.retain(|_, until| *until > now);
             let jobs: Vec<_> = placements
                 .iter()
                 .filter_map(|&(target, to)| {
@@ -228,7 +242,7 @@ impl Visuals {
                             // exactly where they were, so this is most of the
                             // batch. The border path already refuses the same
                             // work for a border whose rectangle did not change.
-                            if from == to {
+                            if from == to && !moving.contains_key(&target) {
                                 return None;
                             }
                             Some(self.animation.job(handle(target), from, to))
@@ -245,6 +259,12 @@ impl Visuals {
             if jobs.is_empty() {
                 return;
             }
+            // A frame late is still moving, so the slack is a few frames.
+            let until = now + self.animation.duration() + std::time::Duration::from_millis(100);
+            for job in &jobs {
+                moving.insert(hwnd_of(job.handle), until);
+            }
+            drop(moving);
             if let Err(e) = animator.animate(jobs) {
                 tracing::error!(error = %e, "could not animate a layout, applying it directly");
                 self.apply_direct(placements);
@@ -744,6 +764,39 @@ mod tests {
         visuals.apply_layout(&[(target, Rect::new(1000, 100, 1800, 700))]);
         let first = platform.first_move();
         assert_eq!(first.rect, SEEN, "it starts where the window already is");
+        visuals.stop();
+    }
+
+    #[test]
+    fn a_window_put_back_while_it_is_still_moving_stays_where_it_was_put() {
+        // Two layouts a few milliseconds apart, the way a start-up that drops
+        // an administrator window lays the screen out twice: the first sends
+        // the window away, the second puts it back where it still is. Skipping
+        // it because it is already there let the first animation carry on and
+        // leave it at the target nobody wanted any more.
+        let target = Hwnd(0x1234);
+        let mut info = WindowInfo::placeholder(target);
+        info.rect = WINDOW_RECT;
+        info.frame = SEEN;
+        let platform = Arc::new(RecordingPlatform::new(info));
+        let hidden = Arc::new(Mutex::new(Hidden::default()));
+        let mut visuals = Visuals::new(Arc::clone(&platform) as Arc<dyn Platform>, hidden);
+        visuals.set_settings(&animated_config());
+
+        visuals.apply_layout(&[(target, Rect::new(1000, 100, 1800, 700))]);
+        visuals.apply_layout(&[(target, SEEN)]);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let last = *platform
+            .moves
+            .lock()
+            .expect("not poisoned")
+            .last()
+            .expect("the window was never moved");
+        assert_eq!(
+            last.rect, SEEN,
+            "the window ended at the target of the layout that was replaced"
+        );
         visuals.stop();
     }
 }
