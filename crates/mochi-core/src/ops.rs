@@ -841,19 +841,22 @@ impl State {
             display,
         );
         let original = target.resize_dimension(idx);
-        let before = target.latest_layout().get(idx).copied();
-
-        for far_edge in [true, false] {
-            let next = Self::nudged(original.unwrap_or_default(), axis, far_edge, delta);
-            target.set_resize_dimension(idx, Some(next));
-            target.update_layout_scaled(
+        let before = target.latest_tiles().get(idx).copied();
+        let relayout = |w: &mut Workspace| {
+            w.update_layout_scaled(
                 work_area,
                 workspace_padding,
                 container_padding,
                 scale,
                 display,
             );
-            if target.latest_layout().get(idx).copied() != before {
+        };
+        let reach = work_area.width().max(work_area.height());
+
+        for far_edge in [true, false] {
+            let step = (axis, far_edge, delta);
+            let start = original.unwrap_or_default();
+            if Self::first_moving_step(target, idx, start, step, before, reach, &relayout) {
                 // The step is stored the size it was asked for, even when the
                 // clamp could only grant part of it. Storing what the boundary
                 // really did instead throws the rest of the step away, and
@@ -881,7 +884,7 @@ impl State {
                 scale,
                 display,
             );
-            if target.latest_layout().get(idx).copied() != before {
+            if target.latest_tiles().get(idx).copied() != before {
                 break;
             }
         }
@@ -939,7 +942,17 @@ impl State {
             display,
         );
         let original = target.resize_dimension(idx);
-        let before = target.latest_layout().get(idx).copied();
+        let before = target.latest_tiles().get(idx).copied();
+        let relayout = |w: &mut Workspace| {
+            w.update_layout_scaled(
+                work_area,
+                workspace_padding,
+                container_padding,
+                scale,
+                display,
+            );
+        };
+        let reach = work_area.width().max(work_area.height());
 
         // Right and down are the far edges of their axis; left and up are the
         // near ones, which `nudged` already counts the other way round so that
@@ -961,16 +974,9 @@ impl State {
                 Axis::Horizontal => target.layout_flip.horizontal,
                 Axis::Vertical => target.layout_flip.vertical,
             };
-        let next = Self::nudged(original.unwrap_or_default(), axis, far_edge, delta);
-        target.set_resize_dimension(idx, Some(next));
-        target.update_layout_scaled(
-            work_area,
-            workspace_padding,
-            container_padding,
-            scale,
-            display,
-        );
-        if target.latest_layout().get(idx).copied() != before {
+        let step = (axis, far_edge, delta);
+        let start = original.unwrap_or_default();
+        if Self::first_moving_step(target, idx, start, step, before, reach, &relayout) {
             // Stored as asked for rather than as granted, for the reason
             // `resize_axis` spells out: anything else drifts under a held key.
             return Ok(Changes::none().retile(monitor, workspace));
@@ -987,6 +993,45 @@ impl State {
             display,
         );
         Ok(Changes::none())
+    }
+
+    /// Steps the stored delta of one edge `delta` at a time from `start`
+    /// until the container's tile moves, and leaves the first such delta
+    /// stored. `false`, with nothing useful stored, when no step moves it.
+    ///
+    /// One step is all it takes while the stored delta is within a step of
+    /// what the clamps grant, which is where pressing a resize key keeps it.
+    /// A window's minimum that arrives later can clamp the tile far short of
+    /// what was stored, though, and a single step back from there still lands
+    /// inside the clamp: the key went dead, with nothing logged, until the
+    /// minimum went away. So it keeps stepping, never further than `reach`,
+    /// the longest side of the area, past where it started.
+    fn first_moving_step(
+        target: &mut Workspace,
+        idx: usize,
+        start: crate::geometry::Rect,
+        (axis, far_edge, delta): (Axis, bool, i32),
+        before: Option<crate::geometry::Rect>,
+        reach: i32,
+        relayout: &dyn Fn(&mut Workspace),
+    ) -> bool {
+        let stored = if far_edge {
+            start.end(axis)
+        } else {
+            start.start(axis)
+        };
+        let steps = (i64::from(stored).abs() + i64::from(reach.max(0)))
+            / i64::from(delta.unsigned_abs().max(1))
+            + 1;
+        for step in 1..=steps.clamp(1, 1000) as i32 {
+            let next = Self::nudged(start, axis, far_edge, delta.saturating_mul(step));
+            target.set_resize_dimension(idx, Some(next));
+            relayout(target);
+            if target.latest_tiles().get(idx).copied() != before {
+                return true;
+            }
+        }
+        false
     }
 
     /// One resize delta with `by` pixels added to the edge the command is
@@ -2754,6 +2799,42 @@ mod tests {
             state.rect_for_window(WindowId(2)),
             Some(Rect::new(1020, 0, 1920, 1080))
         );
+    }
+
+    #[test]
+    fn a_resize_key_still_works_after_a_neighbours_minimum_clamps_it() {
+        // Ten presses store 500 pixels for window 1. Window 2 then turns out
+        // to need 1200 of the 1920, which clamps window 1 to 720: a press back
+        // has to move the cut, not land inside the clamp and do nothing.
+        for by_edge in [false, true] {
+            let mut state = with_windows(2);
+            state.focus_window(WindowId(1)).unwrap();
+            let press = |state: &mut State, sizing| {
+                if by_edge {
+                    state.resize_edge(Direction::Right, sizing).unwrap()
+                } else {
+                    state.resize_axis(Axis::Horizontal, sizing).unwrap()
+                }
+            };
+            for _ in 0..10 {
+                press(&mut state, Sizing::Increase);
+            }
+            state.set_window_min_size(WindowId(2), min_size(1200, 0));
+            assert_eq!(state.rect_for_window(WindowId(1)).unwrap().width(), 720);
+
+            let changes = press(&mut state, Sizing::Decrease);
+            assert!(!changes.is_empty(), "edge {by_edge}: the key went dead");
+            assert!(
+                state.rect_for_window(WindowId(1)).unwrap().width() < 720,
+                "edge {by_edge}: {:?}",
+                state.rect_for_window(WindowId(1))
+            );
+            // And it still stops where it should, rather than run away.
+            for _ in 0..100 {
+                press(&mut state, Sizing::Increase);
+            }
+            assert_eq!(state.rect_for_window(WindowId(1)).unwrap().width(), 720);
+        }
     }
 
     #[test]
