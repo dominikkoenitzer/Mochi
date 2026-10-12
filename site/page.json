@@ -164,9 +164,9 @@
     "code": "{\n  \"mcpServers\": {\n    \"mochi\": {\n      \"command\": \"C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Programs\\\\Mochi\\\\bin\\\\mochic.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}"
   },
   "new": {
-    "version": "0.1.22",
+    "version": "0.1.23",
     "items": [
-      "The focused border stays on the window after you click it or move it."
+      "A window that cannot shrink below a size of its own gets a tile it fits, instead of spilling over its neighbour."
     ]
   },
   "requirements": [
