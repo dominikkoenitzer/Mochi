@@ -2727,7 +2727,7 @@ impl WindowManager {
                     .core
                     .workspace(monitor, workspace)
                     .ok()
-                    .and_then(|w| w.latest_layout().iter().position(|r| r.contains(x, y)));
+                    .and_then(|w| w.latest_tiles().iter().position(|r| r.contains(x, y)));
                 match (source, under_cursor) {
                     (Some(from), Some(onto)) if from != onto => {
                         let _ = self.core.focus_window(id);
@@ -5038,6 +5038,8 @@ mod tests {
         minimums: Mutex<Vec<(Hwnd, MinSize)>>,
         /// How many times a window was asked for its minimum size.
         min_size_asks: AtomicUsize,
+        /// Where the mouse is, for a drop.
+        cursor: Mutex<(i32, i32)>,
     }
 
     impl FakePlatform {
@@ -5065,7 +5067,13 @@ mod tests {
                 zoomed: Mutex::new(Vec::new()),
                 minimums: Mutex::new(Vec::new()),
                 min_size_asks: AtomicUsize::new(0),
+                cursor: Mutex::new((0, 0)),
             }
+        }
+
+        /// Puts the mouse somewhere, the way a drag leaves it.
+        fn points_at(&self, x: i32, y: i32) {
+            *self.cursor.lock().unwrap() = (x, y);
         }
 
         /// The window will not be made smaller than this, in logical pixels,
@@ -5181,7 +5189,7 @@ mod tests {
             None
         }
         fn cursor_position(&self) -> Result<(i32, i32)> {
-            Ok((0, 0))
+            Ok(*self.cursor.lock().unwrap())
         }
 
         fn is_maximized(&self, hwnd: Hwnd) -> bool {
@@ -9286,6 +9294,54 @@ alt + j : focus down
             "a missed answer retiled the screen"
         );
         assert_eq!(tile_of(&wm, 4), tile);
+    }
+
+    #[test]
+    fn a_drop_inside_its_own_tile_does_not_swap_even_where_windows_overlap() {
+        // Two windows that each need 1400 logical pixels, 2100 on the 150%
+        // screen, cannot both fit: each is grown out of its tile and they
+        // overlap in the middle.
+        let platform = Arc::new(FakePlatform::new(vec![
+            window(1, "Editor"),
+            window(2, "Browser"),
+        ]));
+        platform.insists_on(Hwnd(1), 1400, 0);
+        platform.insists_on(Hwnd(2), 1400, 0);
+        let (mut wm, platform) = manager_over(platform);
+        let workspace = wm.state().workspace(0, 0).unwrap();
+        let (placed, tiles) = (
+            workspace.latest_layout().to_vec(),
+            workspace.latest_tiles().to_vec(),
+        );
+        assert!(
+            placed[0].intersects(&placed[1]),
+            "meant to overlap: {placed:?}"
+        );
+        let order = |wm: &WindowManager| {
+            wm.state()
+                .workspace(0, 0)
+                .unwrap()
+                .containers()
+                .iter()
+                .filter_map(mochi_core::model::Container::focused_window_id)
+                .collect::<Vec<_>>()
+        };
+        let before = order(&wm);
+
+        // Let go of window 2 inside the overlap but on its own tile.
+        let x = tiles[1].left + 10;
+        assert!(
+            placed[0].contains(x, 500),
+            "the point is meant to be in the overlap"
+        );
+        platform.points_at(x, 500);
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(2));
+        assert_eq!(order(&wm), before, "a drop on its own tile swapped");
+
+        // Let go of it on window 1's own tile, and they do swap.
+        platform.points_at(tiles[0].left + 10, 500);
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(2));
+        assert_ne!(order(&wm), before, "a drop on the other tile did not swap");
     }
 
     #[test]

@@ -2757,6 +2757,31 @@ mod tests {
     }
 
     #[test]
+    fn direction_and_position_read_the_tiles_when_grown_windows_overlap() {
+        // Two windows that each need 1400 of 1920 cannot both fit: each is
+        // grown out of its 960 pixel tile and the two overlap on 520..1400.
+        let mut state = with_windows(2);
+        state.set_window_min_size(WindowId(1), min_size(1400, 0));
+        state.set_window_min_size(WindowId(2), min_size(1400, 0));
+        let workspace = state.workspace(0, 0).unwrap();
+        let placed = workspace.latest_layout();
+        assert!(
+            placed[0].intersects(&placed[1]),
+            "meant to overlap: {placed:?}"
+        );
+
+        state.focus_window(WindowId(1)).unwrap();
+        state.focus_direction(Direction::Right).unwrap();
+        assert_eq!(state.focused_window_id(), Some(WindowId(2)));
+        state.focus_direction(Direction::Left).unwrap();
+        assert_eq!(state.focused_window_id(), Some(WindowId(1)));
+
+        // A point in the overlap belongs to the tile it was cut for.
+        assert_eq!(state.container_at_point(0, 1200, 500), Some(1));
+        assert_eq!(state.container_at_point(0, 600, 500), Some(0));
+    }
+
+    #[test]
     fn resizing_a_neighbour_of_a_deep_window_in_a_bsp_keeps_its_minimum() {
         let mut state = with_windows(4);
         state.set_window_min_size(WindowId(4), min_size(0, 900));

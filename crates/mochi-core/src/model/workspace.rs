@@ -97,8 +97,13 @@ pub struct Workspace {
     /// The rectangles from the last layout update, one per container.
     ///
     /// The daemon diffs against this to work out which windows actually have
-    /// to move, and the directional focus commands read it to find neighbours.
+    /// to move. A window that cannot fit its tile is given the rectangle it
+    /// really covers, so these may overlap.
     latest_layout: Vec<Rect>,
+    /// The same, as cut before any window was grown out of its tile. These
+    /// never overlap, so the directional commands and every lookup by
+    /// position read them.
+    latest_tiles: Vec<Rect>,
 }
 
 impl Default for Workspace {
@@ -124,6 +129,7 @@ impl Default for Workspace {
             apply_window_based_work_area_offset: false,
             resize_dimensions: Vec::new(),
             latest_layout: Vec::new(),
+            latest_tiles: Vec::new(),
         }
     }
 }
@@ -542,7 +548,7 @@ impl Workspace {
                 scale,
             );
             let windows = self.window_minimums(display_scale);
-            let rects = self.resolve_layout(len).calculate_fitted(
+            let (tiles, rects) = self.resolve_layout(len).calculate_tiles_and_fitted(
                 area,
                 len,
                 padding,
@@ -563,8 +569,11 @@ impl Workspace {
             // one allocation on every retile.
             self.latest_layout.clear();
             self.latest_layout.extend_from_slice(&rects);
+            self.latest_tiles.clear();
+            self.latest_tiles.extend_from_slice(&tiles);
         } else {
             self.latest_layout.clear();
+            self.latest_tiles.clear();
         }
 
         &self.latest_layout
@@ -576,9 +585,23 @@ impl Workspace {
         &self.latest_layout
     }
 
+    /// The tiles from the last [`Workspace::update_layout`], as cut: where
+    /// each container's window would sit if every window fitted. They never
+    /// overlap. Equal to [`Workspace::latest_layout`] while every window fits,
+    /// and that is also what a workspace read back from a saved state answers.
+    #[must_use]
+    pub fn latest_tiles(&self) -> &[Rect] {
+        if self.latest_tiles.len() == self.latest_layout.len() {
+            &self.latest_tiles
+        } else {
+            &self.latest_layout
+        }
+    }
+
     /// Overwrites the cached layout. Only useful in tests and when restoring a
     /// saved state.
     pub fn set_latest_layout(&mut self, rects: Vec<Rect>) {
+        self.latest_tiles.clone_from(&rects);
         self.latest_layout = rects;
     }
 
@@ -587,7 +610,7 @@ impl Workspace {
     #[must_use]
     pub fn container_idx_in_direction(&self, direction: Direction) -> Option<usize> {
         nearest_in_direction(
-            &self.latest_layout,
+            self.latest_tiles(),
             self.containers.focused_idx(),
             direction,
         )

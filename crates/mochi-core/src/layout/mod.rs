@@ -426,8 +426,36 @@ impl Layout {
         resize_dimensions: &[Option<Rect>],
         minimums: Minimums<'_>,
     ) -> Vec<Rect> {
+        self.calculate_tiles_and_fitted(
+            area,
+            len,
+            container_padding,
+            flip,
+            resize_dimensions,
+            minimums,
+        )
+        .1
+    }
+
+    /// [`Layout::calculate_fitted`], handing back the tiles as they were cut
+    /// as well, before a window that cannot fit was grown out of its own.
+    ///
+    /// The two only differ for such a window. The grown rectangles overlap,
+    /// and an overlap lies in no direction and under the cursor twice, so a
+    /// lookup by position or by direction reads the tiles, which still cover
+    /// the area exactly.
+    #[must_use]
+    pub fn calculate_tiles_and_fitted(
+        &self,
+        area: Rect,
+        len: usize,
+        container_padding: i32,
+        flip: Flip,
+        resize_dimensions: &[Option<Rect>],
+        minimums: Minimums<'_>,
+    ) -> (Vec<Rect>, Vec<Rect>) {
         if len == 0 {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let mins = minimums.per_slice(len, container_padding);
         let floor = minimums.tile.clamped();
@@ -460,20 +488,6 @@ impl Layout {
             }
         }
 
-        // A window that cannot shrink to its tile is going to be bigger than
-        // the tile whatever the layout says, so the layout says where it will
-        // really be. Everything downstream takes its rectangle from here: the
-        // placement, the border, `mochic state` and the neighbour a direction
-        // command finds.
-        if minimums.windows.iter().any(Option::is_some) {
-            let bounds = area.padded_clamped(container_padding.max(0));
-            for (rect, min) in rects.iter_mut().zip(minimums.windows) {
-                if let Some(min) = min {
-                    *rect = fit_minimum(*rect, min.clamped(), bounds);
-                }
-            }
-        }
-
         // Nothing downstream may be handed a tile a window cannot exist in.
         //
         // Tiling the area exactly is what every layout here is for, and this
@@ -501,7 +515,21 @@ impl Layout {
             }
         }
 
-        rects
+        // A window that cannot shrink to its tile is going to be bigger than
+        // the tile whatever the layout says, so the layout says where it will
+        // really be. The placement, the border and `mochic state` take their
+        // rectangle from here. Fitting only grows, so every one keeps a pixel.
+        let mut fitted = rects.clone();
+        if minimums.windows.iter().any(Option::is_some) {
+            let bounds = area.padded_clamped(container_padding.max(0));
+            for (rect, min) in fitted.iter_mut().zip(minimums.windows) {
+                if let Some(min) = min {
+                    *rect = fit_minimum(*rect, min.clamped(), bounds);
+                }
+            }
+        }
+
+        (rects, fitted)
     }
 }
 

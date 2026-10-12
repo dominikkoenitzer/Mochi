@@ -369,7 +369,7 @@ impl State {
     pub fn container_at_point(&self, monitor: usize, x: i32, y: i32) -> Option<usize> {
         let workspace = self.monitors.get(monitor)?.focused_workspace()?;
         workspace
-            .latest_layout()
+            .latest_tiles()
             .iter()
             .position(|rect| rect.contains(x, y))
     }
