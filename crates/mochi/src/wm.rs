@@ -2245,8 +2245,17 @@ impl WindowManager {
         if self.core.is_paused || !self.bigger_than_its_tile(hwnd) {
             return;
         }
-        let min_size = self.platform.min_size(hwnd);
-        let changes = self.core.set_window_min_size(window_id(hwnd), min_size);
+        // A window that is bigger than its tile has a minimum, so no answer
+        // here is a window too busy to give one, never one whose minimum went
+        // away. Forgetting what it said before would shrink its tile below
+        // what it accepts, and the next check would only put it back.
+        let Some(min_size) = self.platform.min_size(hwnd) else {
+            tracing::debug!(%hwnd, "a window bigger than its tile did not say how small it can go");
+            return;
+        };
+        let changes = self
+            .core
+            .set_window_min_size(window_id(hwnd), Some(min_size));
         if changes.is_empty() {
             tracing::debug!(
                 %hwnd,
@@ -9238,6 +9247,43 @@ alt + j : focus down
             platform.rect_of(Hwnd(4)),
             None,
             "an unchanged minimum retiled"
+        );
+        assert_eq!(tile_of(&wm, 4), tile);
+    }
+
+    #[test]
+    fn a_window_too_busy_to_answer_keeps_the_minimum_it_gave_before() {
+        let (mut wm, platform) = four_stubborn_windows();
+        let tile = tile_of(&wm, 4);
+        platform.moves_by_itself(
+            Hwnd(4),
+            Rect::new(tile.left, tile.top, tile.right + 400, tile.bottom),
+        );
+        // This once it does not answer in time.
+        platform
+            .minimums
+            .lock()
+            .unwrap()
+            .retain(|(other, _)| *other != Hwnd(4));
+        wm.on_window_event(WindowEventKind::LocationChange, Hwnd(4));
+        let check = wm
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the window was never checked");
+        platform.clear_history();
+        wm.on_event(check);
+        assert_eq!(
+            wm.state().window(WindowId(4)).and_then(|w| w.min_size),
+            Some(MinSize {
+                width: 814,
+                height: 508
+            }),
+            "a missed answer erased what the window said before"
+        );
+        assert_eq!(
+            platform.rect_of(Hwnd(4)),
+            None,
+            "a missed answer retiled the screen"
         );
         assert_eq!(tile_of(&wm, 4), tile);
     }
