@@ -32,9 +32,11 @@ fn share_floor(extent: i32, parts: usize) -> i32 {
 /// The boundary between two slices of `start..end`.
 ///
 /// The natural boundary is the middle, `delta` moves it, and the clamps keep
-/// `min_first` pixels on the near side and `min_rest` on the far side. When
-/// the two minimums do not both fit they are scaled down together, so a
-/// pathologically small range still produces two slices that are not inverted.
+/// `min_first` pixels on the near side and `min_rest` on the far side, each
+/// raised to the fair-share floor while that fits. The floor gives way before
+/// a minimum does: see [`slice_minimums`]. When the two minimums do not both
+/// fit they are scaled down together, so a pathologically small range still
+/// produces two slices that are not inverted.
 ///
 /// This is the allocation free path the BSP layout runs for every cut.
 pub(crate) fn split_two(start: i32, end: i32, delta: i32, min_first: i32, min_rest: i32) -> i32 {
@@ -43,47 +45,56 @@ pub(crate) fn split_two(start: i32, end: i32, delta: i32, min_first: i32, min_re
         return end;
     }
 
-    let floor = share_floor(extent, 2);
-    let mut first = floor.max(min_first.max(0));
-    let mut rest = floor.max(min_rest.max(0));
-    let demand = i64::from(first) + i64::from(rest);
-    if demand > i64::from(extent) && demand > 0 {
-        first = (i64::from(first) * i64::from(extent) / demand) as i32;
-        rest = (i64::from(rest) * i64::from(extent) / demand) as i32;
-    }
+    let span = i64::from(extent);
+    let floor = i64::from(share_floor(extent, 2));
+    let (own_first, own_rest) = (i64::from(min_first.max(0)), i64::from(min_rest.max(0)));
+    let (raised_first, raised_rest) = (own_first.max(floor), own_rest.max(floor));
+    let (first, rest) = if raised_first + raised_rest <= span {
+        (raised_first, raised_rest)
+    } else if own_first + own_rest <= span {
+        (own_first, own_rest)
+    } else {
+        let demand = raised_first + raised_rest;
+        (raised_first * span / demand, raised_rest * span / demand)
+    };
 
-    let low = start + first;
-    let high = end - rest;
+    let low = start + first as i32;
+    let high = end - rest as i32;
     if low >= high {
         return low;
     }
     (start + extent / 2).saturating_add(delta).clamp(low, high)
 }
 
-/// The minimum each slice of `extent` keeps: its own floor from `mins`, raised
-/// to the fair-share floor, and all of them scaled down together when the
-/// range is too short to give every slice that much.
+/// The minimum each slice of `extent` keeps, from its own floor in `mins`.
 ///
-/// Scaling them together means a range that cannot satisfy everyone shares
-/// the shortfall out in proportion, rather than starving whichever slice the
-/// clamps happen to reach last. With one floor for every slice, every slice
-/// that cannot have it gets the same fair share of the range.
+/// Three steps. While it all fits, every slice keeps its own floor raised to
+/// the fair-share floor. The fair-share floor only exists so that a resize
+/// cannot squeeze a slice to a sliver, so it is the first to give way: when it
+/// is what makes the range too short, the slices keep their own floors and
+/// nothing more, and a window is never cut below the size it accepts to make
+/// room for a floor its neighbour does not need. Only when the floors
+/// themselves do not fit are the raised floors scaled down together, so the
+/// shortfall is shared out in proportion rather than starving whichever slice
+/// the clamps happen to reach last. With one floor for every slice, every
+/// slice that cannot have it gets the same fair share of the range.
 fn slice_minimums(extent: i32, mins: &[i32]) -> Vec<i32> {
-    let floor = share_floor(extent, mins.len());
-    let raised: Vec<i64> = mins
-        .iter()
-        .map(|min| i64::from(floor.max((*min).max(0))))
-        .collect();
-    let demand: i64 = raised.iter().sum();
+    let floor = i64::from(share_floor(extent, mins.len()));
+    let own: Vec<i64> = mins.iter().map(|min| i64::from((*min).max(0))).collect();
+    let raised: Vec<i64> = own.iter().map(|min| (*min).max(floor)).collect();
     let extent = i64::from(extent.max(0));
-    if demand > extent && demand > 0 {
+    let (raised_total, own_total) = (raised.iter().sum::<i64>(), own.iter().sum::<i64>());
+    let kept: Vec<i64> = if raised_total <= extent {
+        raised
+    } else if own_total <= extent {
+        own
+    } else {
         raised
             .iter()
-            .map(|min| (min * extent / demand) as i32)
+            .map(|min| min * extent / raised_total)
             .collect()
-    } else {
-        raised.iter().map(|min| *min as i32).collect()
-    }
+    };
+    kept.into_iter().map(|min| min as i32).collect()
 }
 
 /// Where the boundaries fall before any resize delta moves them.
@@ -474,6 +485,23 @@ mod tests {
     }
 
     #[test]
+    fn a_minimum_that_fits_is_never_cut_for_the_fair_share_floor() {
+        // A window that needs 1800 of 1920 pixels next to a 64 pixel tile
+        // fits. The fair-share floor would ask 192 for the small side, and
+        // giving way to it used to squeeze the window to 1736.
+        assert_eq!(split_two(0, 1920, 0, 1800, MIN_TILE_SIZE), 1800);
+        assert_eq!(split_two(0, 1920, 0, MIN_TILE_SIZE, 1800), 120);
+        assert_eq!(
+            divide_with_minimums(0, 1920, &[1, 1], &[], &[1800, MIN_TILE_SIZE]),
+            vec![(0, 1800), (1800, 1920)]
+        );
+        // Three slices: the demanding one takes everything the floors of the
+        // other two can give up, and they keep their own floors.
+        let slices = divide_with_minimums(0, 1920, &[1, 1, 1], &[], &[64, 1700, 64]);
+        assert_eq!(widths(&slices), vec![110, 1700, 110]);
+    }
+
+    #[test]
     fn slices_become_rects_along_the_right_axis() {
         let area = Rect::new(0, 0, 100, 50);
         let cols = slices_to_rects(area, Axis::Horizontal, &[(0, 40), (40, 100)]);
@@ -514,5 +542,203 @@ mod tests {
             boundary_deltas(&[], 0, 0, Axis::Vertical),
             Vec::<i32>::new()
         );
+    }
+
+    // -- a floor of its own for every slice -----------------------------------
+
+    /// Slices of equal weight, each with its own floor.
+    fn divide_mins(start: i32, end: i32, deltas: &[i32], mins: &[i32]) -> Vec<(i32, i32)> {
+        divide_with_minimums(start, end, &vec![1; mins.len()], deltas, mins)
+    }
+
+    /// The slices cover `start..end` with no gap, no overlap and no inversion.
+    fn assert_tiles_range(slices: &[(i32, i32)], start: i32, end: i32) {
+        assert_eq!(slices.first().map(|s| s.0), Some(start), "{slices:?}");
+        assert_eq!(slices.last().map(|s| s.1), Some(end), "{slices:?}");
+        for (a, b) in slices {
+            assert!(b >= a, "inverted slice {a}..{b} in {slices:?}");
+        }
+        for pair in slices.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0, "gap or overlap in {slices:?}");
+        }
+    }
+
+    #[test]
+    fn a_demanding_slice_in_the_middle_takes_its_room_from_both_sides() {
+        let slices = divide_mins(0, 900, &[], &[0, 500, 0]);
+        assert_eq!(slices, vec![(0, 200), (200, 700), (700, 900)]);
+    }
+
+    #[test]
+    fn two_demanding_slices_both_keep_their_minimums() {
+        let slices = divide_mins(0, 1000, &[], &[0, 400, 0, 400]);
+        assert_eq!(widths(&slices), vec![100, 400, 100, 400]);
+        assert_tiles_range(&slices, 0, 1000);
+    }
+
+    #[test]
+    fn pinning_one_slice_can_pin_the_next_one_too() {
+        // 450 is pinned first. The three left would then share 550 as 183
+        // each, less than the 200 the third one needs, so it is pinned too.
+        let slices = divide_mins(0, 1000, &[], &[0, 450, 200, 0]);
+        assert_eq!(widths(&slices), vec![175, 450, 200, 175]);
+    }
+
+    #[test]
+    fn what_a_demanding_slice_leaves_is_shared_by_the_weights() {
+        let slices = divide_with_minimums(0, 1000, &[1, 2, 1], &[], &[0, 0, 400]);
+        assert_eq!(widths(&slices), vec![200, 400, 400]);
+    }
+
+    #[test]
+    fn a_minimum_up_to_its_fair_share_leaves_the_plain_division() {
+        assert_eq!(
+            divide_mins(0, 1920, &[], &[MIN_TILE_SIZE, 480, MIN_TILE_SIZE, 480]),
+            divided(0, 1920, 4, &[])
+        );
+        assert_eq!(
+            divide_with_minimums(0, 1920, &[1, 2, 1], &[], &[480, 960, 480]),
+            divide_weighted(0, 1920, &[1, 2, 1], &[], MIN_TILE_SIZE)
+        );
+    }
+
+    #[test]
+    fn an_infeasible_set_of_minimums_shares_the_shortfall_in_proportion() {
+        let slices = divide_mins(0, 1000, &[], &[600, 600, 300]);
+        assert_eq!(widths(&slices), vec![400, 400, 200]);
+        assert_tiles_range(&slices, 0, 1000);
+    }
+
+    #[test]
+    fn an_infeasible_range_still_tiles_exactly_whatever_the_deltas() {
+        for deltas in [
+            [0, 0],
+            [i32::MAX, i32::MIN],
+            [i32::MIN, i32::MAX],
+            [5_000, -5_000],
+        ] {
+            for mins in [
+                [600, 600, 300],
+                [2_000, 0, 0],
+                [0, 0, 2_000],
+                [999, 999, 999],
+            ] {
+                let slices = divide_mins(-1080, -80, &deltas, &mins);
+                assert_tiles_range(&slices, -1080, -80);
+            }
+        }
+    }
+
+    #[test]
+    fn no_delta_pushes_a_boundary_past_a_minimum() {
+        assert_eq!(
+            divide_mins(0, 1000, &[i32::MAX], &[0, 600]),
+            vec![(0, 400), (400, 1000)]
+        );
+        assert_eq!(
+            divide_mins(0, 1000, &[i32::MIN], &[600, 0]),
+            vec![(0, 600), (600, 1000)]
+        );
+        // A demanding slice in the middle, pushed from both sides at once.
+        for deltas in [
+            [i32::MAX, i32::MIN],
+            [i32::MIN, i32::MAX],
+            [100_000, 100_000],
+            [-100_000, -100_000],
+        ] {
+            let slices = divide_mins(0, 900, &deltas, &[0, 500, 0]);
+            assert!(widths(&slices)[1] >= 500, "{deltas:?} gave {slices:?}");
+            assert_tiles_range(&slices, 0, 900);
+        }
+    }
+
+    #[test]
+    fn every_slice_keeps_its_own_minimum_while_they_all_fit() {
+        const EXTENT: i32 = 1200;
+        let floors = [0, MIN_TILE_SIZE, 150, 300, 700];
+        let pushes = [
+            [0, 0],
+            [i32::MAX, i32::MIN],
+            [i32::MIN, i32::MAX],
+            [300, -300],
+            [-300, 300],
+            [i32::MAX, i32::MAX],
+        ];
+        for a in floors {
+            for b in floors {
+                for c in floors {
+                    let mins = [a, b, c];
+                    // The fair-share floor is the fifth of a third: 80.
+                    let demand: i32 = mins.iter().map(|m| (*m).max(80)).sum();
+                    if demand > EXTENT {
+                        continue;
+                    }
+                    for deltas in pushes {
+                        let slices = divide_mins(0, EXTENT, &deltas, &mins);
+                        assert_tiles_range(&slices, 0, EXTENT);
+                        for (i, width) in widths(&slices).iter().enumerate() {
+                            assert!(
+                                *width >= mins[i],
+                                "slice {i} of {mins:?} is {width} with {deltas:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absurd_minimums_never_panic_or_overflow() {
+        let absurd = [i32::MIN, -1, 0, i32::MAX - 1, i32::MAX];
+        for a in absurd {
+            for b in absurd {
+                for c in absurd {
+                    for (start, end) in [(0, 1000), (-1080, 0), (0, 0), (0, 3), (5, 2)] {
+                        for deltas in [[0, 0], [i32::MAX, i32::MIN], [i32::MIN, i32::MAX]] {
+                            let slices =
+                                divide_with_minimums(start, end, &[1, 2, 1], &deltas, &[a, b, c]);
+                            assert_eq!(slices.len(), 3);
+                            if end > start {
+                                assert_tiles_range(&slices, start, end);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(slice_minimums(1000, &[i32::MAX, i32::MAX]), vec![500, 500]);
+        assert_eq!(slice_minimums(1000, &[-5, i32::MIN]), vec![100, 100]);
+        assert_eq!(slice_minimums(0, &[i32::MAX, 10]), vec![0, 0]);
+    }
+
+    #[test]
+    fn a_minimum_missing_from_the_list_counts_as_zero() {
+        assert_eq!(
+            divide_with_minimums(0, 900, &[1, 1, 1], &[], &[500]),
+            divide_mins(0, 900, &[], &[500, 0, 0])
+        );
+        assert_eq!(
+            divide_with_minimums(0, 900, &[1, 1, 1], &[], &[]),
+            divide(0, 900, 3, &[], NO_MIN)
+        );
+    }
+
+    #[test]
+    fn two_slices_keep_a_demanding_far_side_and_survive_absurd_minimums() {
+        assert_eq!(split_two(0, 1000, 0, MIN_TILE_SIZE, 700), 300);
+        assert_eq!(split_two(0, 1000, i32::MIN, 700, MIN_TILE_SIZE), 700);
+        assert_eq!(split_two(0, 1000, 0, i32::MAX, i32::MAX), 500);
+        for first in [i32::MIN, -1, 0, i32::MAX] {
+            for rest in [i32::MIN, -1, 0, i32::MAX] {
+                for delta in [i32::MIN, 0, i32::MAX] {
+                    let at = split_two(-500, 500, delta, first, rest);
+                    assert!(
+                        (-500..=500).contains(&at),
+                        "{first} {rest} {delta} put the cut at {at}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -211,4 +211,186 @@ mod tests {
             assert_eq!(covered, AREA.area(), "with {len} containers");
         }
     }
+
+    // -- window minimums ----------------------------------------------------
+
+    /// Every container at the default floor, except the ones given.
+    fn mins_with(len: usize, demanding: &[(usize, MinSize)]) -> Vec<MinSize> {
+        let mut mins = vec![MinSize::default(); len];
+        for (idx, min) in demanding {
+            mins[*idx] = *min;
+        }
+        mins
+    }
+
+    const fn wide(width: i32) -> MinSize {
+        MinSize { width, height: 64 }
+    }
+
+    const fn tall(height: i32) -> MinSize {
+        MinSize { width: 64, height }
+    }
+
+    fn assert_tiles(rects: &[Rect]) {
+        let covered: i64 = rects.iter().map(Rect::area).sum();
+        assert_eq!(covered, AREA.area(), "{rects:?}");
+        for (i, a) in rects.iter().enumerate() {
+            assert!(AREA.contains_rect(a), "rect {i} escapes: {rects:?}");
+            for (j, b) in rects.iter().enumerate().skip(i + 1) {
+                assert!(!a.intersects(b), "rects {i} and {j} overlap: {rects:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_floor_of_a_branch_adds_along_its_cuts_and_takes_the_larger_across() {
+        let mins = [wide(300), tall(200), wide(400), tall(500)];
+        let need = branch_minimums(&mins);
+        assert_eq!(need[3], tall(500));
+        // Cut 2 runs top to bottom: widths add, the taller height wins.
+        assert_eq!(
+            need[2],
+            MinSize {
+                width: 464,
+                height: 500
+            }
+        );
+        // Cut 1 runs left to right: heights add, the wider width wins.
+        assert_eq!(
+            need[1],
+            MinSize {
+                width: 464,
+                height: 700
+            }
+        );
+        assert_eq!(
+            need[0],
+            MinSize {
+                width: 764,
+                height: 700
+            }
+        );
+    }
+
+    #[test]
+    fn branch_floors_saturate_instead_of_overflowing() {
+        let mins = vec![MinSize::square(i32::MAX); 6];
+        for need in branch_minimums(&mins) {
+            assert_eq!(need, MinSize::square(i32::MAX));
+        }
+        assert!(branch_minimums(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_window_minimum_that_fits_its_half_moves_nothing() {
+        let mins = mins_with(4, &[(2, wide(400))]);
+        assert_eq!(calculate(AREA, 4, &[], &mins), bsp(4));
+    }
+
+    #[test]
+    fn a_wide_window_in_the_second_container_moves_the_first_cut() {
+        let mins = mins_with(2, &[(1, wide(1200))]);
+        let rects = calculate(AREA, 2, &[], &mins);
+        assert_eq!(rects[0], Rect::new(0, 0, 720, 1080));
+        assert_eq!(rects[1], Rect::new(720, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn a_wide_window_deep_in_the_tree_moves_the_first_cut() {
+        // Container 3 of 4 sits in the bottom right quarter. Its sibling alone
+        // cannot give it 1200 pixels, so the first cut has to give way too.
+        let mins = mins_with(4, &[(2, wide(1200))]);
+        let rects = calculate(AREA, 4, &[], &mins);
+        assert!(
+            rects[0].right < 960,
+            "the first cut did not move: {rects:?}"
+        );
+        assert!(
+            rects[2].width() >= 1200,
+            "container 3 got {} pixels: {rects:?}",
+            rects[2].width()
+        );
+        assert_tiles(&rects);
+    }
+
+    #[test]
+    fn a_wide_window_in_the_fifth_of_six_containers_moves_the_first_cut() {
+        let mins = mins_with(6, &[(4, wide(1200))]);
+        let rects = calculate(AREA, 6, &[], &mins);
+        assert!(
+            rects[0].right < 960,
+            "the first cut did not move: {rects:?}"
+        );
+        assert!(
+            rects[4].width() >= 1200,
+            "container 5 got {} pixels: {rects:?}",
+            rects[4].width()
+        );
+        assert_tiles(&rects);
+    }
+
+    #[test]
+    fn a_deep_window_with_a_sibling_that_also_needs_room_moves_the_first_cut() {
+        // Both sides of the last cut ask for more than its fair-share floor,
+        // so nothing but the window minimums decides where the cuts go.
+        let mins = mins_with(4, &[(2, wide(1100)), (3, wide(400))]);
+        let rects = calculate(AREA, 4, &[], &mins);
+        assert_eq!(rects[0], Rect::new(0, 0, 420, 1080));
+        assert_eq!(rects[2].width(), 1100);
+        assert_eq!(rects[3].width(), 400);
+        assert_tiles(&rects);
+    }
+
+    #[test]
+    fn a_tall_window_across_a_left_right_cut_still_takes_height_from_the_cut_above() {
+        // Container 4 of 4 shares the bottom region with container 3 across
+        // a cut that runs top to bottom, so its height is the whole region's.
+        let mins = mins_with(4, &[(3, tall(900))]);
+        let rects = calculate(AREA, 4, &[], &mins);
+        assert_eq!(rects[0], Rect::new(0, 0, 960, 1080), "width is not needed");
+        assert_eq!(rects[1], Rect::new(960, 0, 1920, 180));
+        assert_eq!(rects[2].height(), 900);
+        assert_eq!(rects[3].height(), 900);
+        assert_tiles(&rects);
+    }
+
+    #[test]
+    fn two_tall_windows_side_by_side_need_the_taller_height_not_the_sum() {
+        let mins = mins_with(4, &[(2, tall(500)), (3, tall(520))]);
+        let rects = calculate(AREA, 4, &[], &mins);
+        assert_eq!(rects[1], Rect::new(960, 0, 1920, 540), "520 fits under 540");
+        assert_tiles(&rects);
+    }
+
+    #[test]
+    fn no_resize_delta_pushes_a_cut_into_a_deep_windows_minimum() {
+        let mins = mins_with(4, &[(2, wide(500)), (3, tall(700))]);
+        for delta in [i32::MIN, -100_000, -500, 500, 100_000, i32::MAX] {
+            let resize = vec![
+                Some(Rect::new(0, 0, delta, 0)),
+                Some(Rect::new(0, 0, 0, delta)),
+                Some(Rect::new(0, 0, delta, 0)),
+                None,
+            ];
+            let rects = calculate(AREA, 4, &resize, &mins);
+            assert!(rects[2].width() >= 500, "{delta}: {rects:?}");
+            assert!(rects[3].height() >= 700, "{delta}: {rects:?}");
+            assert_tiles(&rects);
+        }
+    }
+
+    #[test]
+    fn absurd_branch_minimums_still_tile_the_area() {
+        for len in 1..=8 {
+            for demanding in 0..len {
+                for min in [MinSize::square(i32::MAX), wide(i32::MAX), tall(5_000)] {
+                    let mins = mins_with(len, &[(demanding, min)]);
+                    let rects = calculate(AREA, len, &[], &mins);
+                    assert_eq!(rects.len(), len);
+                    let covered: i64 = rects.iter().map(Rect::area).sum();
+                    assert_eq!(covered, AREA.area(), "{len} {demanding} {min:?}");
+                }
+            }
+        }
+    }
 }
