@@ -29,85 +29,137 @@ fn share_floor(extent: i32, parts: usize) -> i32 {
     }
 }
 
+/// The floors two or more slices keep, decided in four steps.
+///
+/// `mins` are the slices' own floors: the configured tile floor, raised for a
+/// window that accepts nothing smaller. `floors` are what the configured tile
+/// floor alone asks of each slice, whatever window is in it.
+///
+/// First, a window as long as the whole range or longer is laid out as if it
+/// asked for nothing beyond the floor. It is grown to its full size afterwards
+/// and covers the whole range whatever tile it gets, so squeezing its
+/// neighbours for it would only cost them their tiles. Then:
+///
+/// 1. While it all fits, each slice keeps its own floor raised to the
+///    fair-share floor, `share`.
+/// 2. The fair-share floor only exists so that a resize cannot squeeze a slice
+///    to a sliver, so it is the first to give way: when it is what makes the
+///    range too short, the slices keep their own floors and nothing more, and
+///    a window is never cut below the size it accepts for a floor its
+///    neighbour does not need.
+/// 3. When the windows ask for more than there is between them, every slice
+///    still keeps the configured floor, and what is left goes to the windows
+///    that asked, in proportion to what they asked over the floor. They are
+///    grown to their full size and overlap each other anyway, and this keeps
+///    that overlap as small as it can be without squeezing anyone below the
+///    floor.
+/// 4. Only when the configured floors themselves do not fit are the raised
+///    floors scaled down together, so a pathologically small range still
+///    shares out evenly and never starves whichever slice comes last.
+///
+/// With every slice at the same floor, as without any window minimum, none of
+/// this but steps 1 and 4 can apply, and it is the plain fair division it
+/// always was. Writes into `out` so the BSP's two sided cut needs no
+/// allocation.
+fn kept_floors(span: i64, share: i64, floors: &[i64], mins: &[i64], out: &mut [i64]) {
+    let base = |i: usize| floors[i].min(mins[i]).max(0);
+    let base_total: i64 = (0..mins.len()).map(base).sum();
+    for (i, kept) in out.iter_mut().enumerate() {
+        *kept = if mins[i] >= span { base(i) } else { mins[i] };
+    }
+    let own_total: i64 = out.iter().sum();
+    let raised_total: i64 = out.iter().map(|min| (*min).max(share)).sum();
+    if raised_total <= span {
+        for kept in out.iter_mut() {
+            *kept = (*kept).max(share);
+        }
+    } else if own_total <= span {
+        // Already what `out` holds.
+    } else {
+        let excess_total = own_total - base_total;
+        if base_total <= span && excess_total > 0 {
+            let left = span - base_total;
+            for (i, kept) in out.iter_mut().enumerate() {
+                *kept = base(i) + left * (*kept - base(i)) / excess_total;
+            }
+        } else {
+            for kept in out.iter_mut() {
+                *kept = (*kept).max(share) * span / raised_total;
+            }
+        }
+    }
+}
+
 /// The boundary between two slices of `start..end`.
 ///
 /// The natural boundary is the middle, `delta` moves it, and the clamps keep
-/// `min_first` pixels on the near side and `min_rest` on the far side, each
-/// raised to the fair-share floor while that fits. The floor gives way before
-/// a minimum does: see [`slice_minimums`]. When the two minimums do not both
-/// fit they are scaled down together, so a pathologically small range still
-/// produces two slices that are not inverted.
+/// `min_first` pixels on the near side and `min_rest` on the far side, as far
+/// as [`kept_floors`] can give them. `floor_first` and `floor_rest` are what
+/// the configured tile floor alone asks of each side, without any window's
+/// minimum, which is what both sides keep when a window asks for more than
+/// there is.
 ///
 /// This is the allocation free path the BSP layout runs for every cut.
-pub(crate) fn split_two(start: i32, end: i32, delta: i32, min_first: i32, min_rest: i32) -> i32 {
+pub(crate) fn split_two(
+    start: i32,
+    end: i32,
+    delta: i32,
+    (min_first, min_rest): (i32, i32),
+    (floor_first, floor_rest): (i32, i32),
+) -> i32 {
     let extent = end - start;
     if extent <= 0 {
         return end;
     }
 
-    let span = i64::from(extent);
-    let floor = i64::from(share_floor(extent, 2));
-    let (own_first, own_rest) = (i64::from(min_first.max(0)), i64::from(min_rest.max(0)));
-    let (raised_first, raised_rest) = (own_first.max(floor), own_rest.max(floor));
-    let (first, rest) = if raised_first + raised_rest <= span {
-        (raised_first, raised_rest)
-    } else if own_first + own_rest <= span {
-        (own_first, own_rest)
-    } else {
-        let demand = raised_first + raised_rest;
-        (raised_first * span / demand, raised_rest * span / demand)
-    };
+    let own = [i64::from(min_first.max(0)), i64::from(min_rest.max(0))];
+    let floors = [i64::from(floor_first.max(0)), i64::from(floor_rest.max(0))];
+    let mut kept = [0_i64; 2];
+    kept_floors(
+        i64::from(extent),
+        i64::from(share_floor(extent, 2)),
+        &floors,
+        &own,
+        &mut kept,
+    );
 
-    let low = start + first as i32;
-    let high = end - rest as i32;
+    let low = start + kept[0] as i32;
+    let high = end - kept[1] as i32;
     if low >= high {
         return low;
     }
     (start + extent / 2).saturating_add(delta).clamp(low, high)
 }
 
-/// The minimum each slice of `extent` keeps, from its own floor in `mins`.
-///
-/// Three steps. While it all fits, every slice keeps its own floor raised to
-/// the fair-share floor. The fair-share floor only exists so that a resize
-/// cannot squeeze a slice to a sliver, so it is the first to give way: when it
-/// is what makes the range too short, the slices keep their own floors and
-/// nothing more, and a window is never cut below the size it accepts to make
-/// room for a floor its neighbour does not need. Only when the floors
-/// themselves do not fit are the raised floors scaled down together, so the
-/// shortfall is shared out in proportion rather than starving whichever slice
-/// the clamps happen to reach last. With one floor for every slice, every
-/// slice that cannot have it gets the same fair share of the range.
-fn slice_minimums(extent: i32, mins: &[i32]) -> Vec<i32> {
-    let floor = i64::from(share_floor(extent, mins.len()));
+/// The minimum each slice of `extent` keeps, from its own floor in `mins` and
+/// the configured tile floor `floor`. See [`kept_floors`].
+fn slice_minimums(extent: i32, mins: &[i32], floor: i32) -> Vec<i32> {
     let own: Vec<i64> = mins.iter().map(|min| i64::from((*min).max(0))).collect();
-    let raised: Vec<i64> = own.iter().map(|min| (*min).max(floor)).collect();
-    let extent = i64::from(extent.max(0));
-    let (raised_total, own_total) = (raised.iter().sum::<i64>(), own.iter().sum::<i64>());
-    let kept: Vec<i64> = if raised_total <= extent {
-        raised
-    } else if own_total <= extent {
-        own
-    } else {
-        raised
-            .iter()
-            .map(|min| min * extent / raised_total)
-            .collect()
-    };
+    let floors = vec![i64::from(floor.max(0)); own.len()];
+    let mut kept = vec![0_i64; own.len()];
+    kept_floors(
+        i64::from(extent.max(0)),
+        i64::from(share_floor(extent, mins.len())),
+        &floors,
+        &own,
+        &mut kept,
+    );
     kept.into_iter().map(|min| min as i32).collect()
 }
 
 /// Where the boundaries fall before any resize delta moves them.
 ///
-/// Every slice gets its weighted share of the range, except one whose minimum
-/// is larger than that share: it gets its minimum, and the slices that are
-/// left share what remains by their weights again, until every share fits.
-/// The room a demanding slice needs is taken from all of its neighbours in
-/// proportion, not from whichever one happens to sit next to it. While no
-/// minimum binds, this is the plain weighted division.
+/// Every slice gets its weighted share of the range, except one that holds a
+/// window needing more than that share: it gets its minimum, and the slices
+/// that are left share what remains by their weights again, until every share
+/// fits. The room a demanding window needs is taken from all of its
+/// neighbours in proportion, not from whichever one happens to sit next to
+/// it. A slice that only asks for the configured `floor` is never pinned here:
+/// the clamps after the deltas keep it at its floor, the way they always did.
+/// While no window's minimum binds, this is the plain weighted division.
 ///
 /// `mins` must already fit the range, as [`slice_minimums`] makes them.
-fn base_bounds(start: i32, end: i32, weights: &[u32], mins: &[i32]) -> Vec<i32> {
+fn base_bounds(start: i32, end: i32, weights: &[u32], mins: &[i32], floor: i32) -> Vec<i32> {
     let parts = weights.len();
     let extent = i64::from(end - start);
     let mut pinned = vec![false; parts];
@@ -126,7 +178,9 @@ fn base_bounds(start: i32, end: i32, weights: &[u32], mins: &[i32]) -> Vec<i32> 
         }
         let mut changed = false;
         for i in 0..parts {
-            if !pinned[i] && free_extent * i64::from(weights[i]) / free_weight < i64::from(mins[i])
+            if !pinned[i]
+                && mins[i] > floor
+                && free_extent * i64::from(weights[i]) / free_weight < i64::from(mins[i])
             {
                 pinned[i] = true;
                 changed = true;
@@ -165,18 +219,19 @@ fn base_bounds(start: i32, end: i32, weights: &[u32], mins: &[i32]) -> Vec<i32> 
 /// share and at least its own minimum, and so the slices always tile the range
 /// exactly with no gap and no overlap. Missing deltas count as zero.
 ///
-/// `mins[i]` is the narrowest slice `i` may get: the configured minimum tile
-/// size, or more for a window that accepts nothing smaller. A slice whose minimum is larger than its share
-/// takes the room from the others before any delta is applied, and no delta
-/// can push a boundary past a minimum. A range too short for every minimum
-/// scales them all down together, so the slices still tile it exactly. A
-/// minimum missing from `mins` counts as zero.
+/// `mins[i]` is the narrowest slice `i` may get: the configured tile `floor`,
+/// or more for a window that accepts nothing smaller. A slice whose window
+/// needs more than its share takes the room from the others before any delta
+/// is applied, and no delta can push a boundary past a minimum. A range too
+/// short for every minimum gives way as [`kept_floors`] describes, so the
+/// slices still tile it exactly. A minimum missing from `mins` counts as zero.
 pub(crate) fn divide_with_minimums(
     start: i32,
     end: i32,
     weights: &[u32],
     deltas: &[i32],
     mins: &[i32],
+    floor: i32,
 ) -> Vec<(i32, i32)> {
     let parts = weights.len();
     if parts == 0 {
@@ -196,8 +251,8 @@ pub(crate) fn divide_with_minimums(
     let mins: Vec<i32> = (0..parts)
         .map(|i| mins.get(i).copied().unwrap_or(0))
         .collect();
-    let mins = slice_minimums(extent, &mins);
-    let mut bounds = base_bounds(start, end, weights, &mins);
+    let mins = slice_minimums(extent, &mins, floor);
+    let mut bounds = base_bounds(start, end, weights, &mins, floor.max(0));
 
     // What every slice after boundary `i` needs between it and the end.
     let mut rest = vec![0_i32; parts + 1];
@@ -324,6 +379,41 @@ mod tests {
 
     /// Asking for no minimum tile size leaves only the fair-share floor.
     const NO_MIN: i32 = 0;
+
+    /// The division with the configured floor at the smallest of `mins`, so a
+    /// slice that asks for more stands for a window that needs more.
+    fn divide_with_minimums(
+        start: i32,
+        end: i32,
+        weights: &[u32],
+        deltas: &[i32],
+        mins: &[i32],
+    ) -> Vec<(i32, i32)> {
+        // A minimum missing from the list counts as zero, and so does its floor.
+        let floor = if mins.len() < weights.len() {
+            0
+        } else {
+            mins.iter().copied().min().unwrap_or(0).max(0)
+        };
+        super::divide_with_minimums(start, end, weights, deltas, mins, floor)
+    }
+
+    /// The floors kept, with the configured floor at the smallest of `mins`.
+    fn slice_minimums(extent: i32, mins: &[i32]) -> Vec<i32> {
+        let floor = mins.iter().copied().min().unwrap_or(0).max(0);
+        super::slice_minimums(extent, mins, floor)
+    }
+
+    /// One cut whose two sides ask for nothing beyond the configured floor.
+    fn split_two(start: i32, end: i32, delta: i32, min_first: i32, min_rest: i32) -> i32 {
+        super::split_two(
+            start,
+            end,
+            delta,
+            (min_first, min_rest),
+            (min_first, min_rest),
+        )
+    }
 
     /// `parts` slices of equal weight, all with the same floor.
     fn divide(start: i32, end: i32, parts: usize, deltas: &[i32], min: i32) -> Vec<(i32, i32)> {
@@ -603,8 +693,15 @@ mod tests {
     }
 
     #[test]
-    fn an_infeasible_set_of_minimums_shares_the_shortfall_in_proportion() {
+    fn an_infeasible_set_of_minimums_keeps_every_floor_and_shares_the_rest() {
+        // Two windows asking 600 each next to a tile at the configured 300:
+        // the tile keeps its floor and the windows share what is left.
         let slices = divide_mins(0, 1000, &[], &[600, 600, 300]);
+        assert_eq!(widths(&slices), vec![350, 350, 300]);
+        assert_tiles_range(&slices, 0, 1000);
+        // Only when the configured floors themselves do not fit is everything
+        // scaled down together.
+        let slices = super::divide_with_minimums(0, 1000, &[1, 1, 1], &[], &[600, 600, 300], 400);
         assert_eq!(widths(&slices), vec![400, 400, 200]);
         assert_tiles_range(&slices, 0, 1000);
     }

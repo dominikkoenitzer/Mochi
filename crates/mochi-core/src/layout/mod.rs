@@ -430,19 +430,20 @@ impl Layout {
             return Vec::new();
         }
         let mins = minimums.per_slice(len, container_padding);
+        let floor = minimums.tile.clamped();
 
         let mut rects = match self {
-            Self::Bsp => bsp::calculate(area, len, resize_dimensions, &mins),
-            Self::Columns => columns(area, len, resize_dimensions, &mins),
-            Self::Rows => rows(area, len, resize_dimensions, &mins),
+            Self::Bsp => bsp::calculate(area, len, resize_dimensions, &mins, floor),
+            Self::Columns => columns(area, len, resize_dimensions, &mins, floor),
+            Self::Rows => rows(area, len, resize_dimensions, &mins, floor),
             Self::VerticalStack => {
-                main_and_stack(area, len, resize_dimensions, Axis::Horizontal, &mins)
+                main_and_stack(area, len, resize_dimensions, Axis::Horizontal, &mins, floor)
             }
             Self::HorizontalStack => {
-                main_and_stack(area, len, resize_dimensions, Axis::Vertical, &mins)
+                main_and_stack(area, len, resize_dimensions, Axis::Vertical, &mins, floor)
             }
-            Self::UltrawideVerticalStack => ultrawide(area, len, resize_dimensions, &mins),
-            Self::Grid => grid(area, len, resize_dimensions, &mins),
+            Self::UltrawideVerticalStack => ultrawide(area, len, resize_dimensions, &mins, floor),
+            Self::Grid => grid(area, len, resize_dimensions, &mins, floor),
         };
 
         debug_assert_eq!(rects.len(), len, "{self:?} returned the wrong count");
@@ -539,27 +540,47 @@ impl std::str::FromStr for Layout {
     }
 }
 
-/// `len` equal slices of `start..end`, each kept at least its own floor.
-fn divide_even(start: i32, end: i32, deltas: &[i32], mins: &[i32]) -> Vec<(i32, i32)> {
-    divide_with_minimums(start, end, &vec![1_u32; mins.len()], deltas, mins)
+/// Equal slices of `start..end`, one per entry of `mins`, each kept at least
+/// its own floor. `floor` is the configured tile floor alone.
+fn divide_even(start: i32, end: i32, deltas: &[i32], mins: &[i32], floor: i32) -> Vec<(i32, i32)> {
+    divide_with_minimums(start, end, &vec![1_u32; mins.len()], deltas, mins, floor)
 }
 
-fn columns(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) -> Vec<Rect> {
+fn columns(
+    area: Rect,
+    len: usize,
+    resize: &[Option<Rect>],
+    mins: &[MinSize],
+    floor: MinSize,
+) -> Vec<Rect> {
     let deltas = boundary_deltas(resize, 0, len, Axis::Horizontal);
     let slices = divide_even(
         area.left,
         area.right,
         &deltas,
         &along(mins, Axis::Horizontal),
+        floor.width,
     );
     let mut rects = Vec::with_capacity(len);
     extend_with_rects(&mut rects, area, Axis::Horizontal, &slices);
     rects
 }
 
-fn rows(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) -> Vec<Rect> {
+fn rows(
+    area: Rect,
+    len: usize,
+    resize: &[Option<Rect>],
+    mins: &[MinSize],
+    floor: MinSize,
+) -> Vec<Rect> {
     let deltas = boundary_deltas(resize, 0, len, Axis::Vertical);
-    let slices = divide_even(area.top, area.bottom, &deltas, &along(mins, Axis::Vertical));
+    let slices = divide_even(
+        area.top,
+        area.bottom,
+        &deltas,
+        &along(mins, Axis::Vertical),
+        floor.height,
+    );
     let mut rects = Vec::with_capacity(len);
     extend_with_rects(&mut rects, area, Axis::Vertical, &slices);
     rects
@@ -576,6 +597,7 @@ fn main_and_stack(
     resize: &[Option<Rect>],
     main_axis: Axis,
     mins: &[MinSize],
+    floor: MinSize,
 ) -> Vec<Rect> {
     if len == 1 {
         return vec![area];
@@ -590,6 +612,7 @@ fn main_and_stack(
         area.end(main_axis),
         &[split_delta],
         &[mins[0].along(main_axis), widest(&mins[1..], main_axis)],
+        floor.along(main_axis),
     );
     let main = rect_from_slice(area, main_axis, halves[0].0, halves[0].1);
     let stack_area = rect_from_slice(area, main_axis, halves[1].0, halves[1].1);
@@ -601,6 +624,7 @@ fn main_and_stack(
         stack_area.end(stack_axis),
         &stack_deltas,
         &along(&mins[1..], stack_axis),
+        floor.along(stack_axis),
     );
 
     let mut rects = Vec::with_capacity(len);
@@ -609,7 +633,13 @@ fn main_and_stack(
     rects
 }
 
-fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) -> Vec<Rect> {
+fn ultrawide(
+    area: Rect,
+    len: usize,
+    resize: &[Option<Rect>],
+    mins: &[MinSize],
+    floor: MinSize,
+) -> Vec<Rect> {
     match len {
         1 => vec![area],
         2 => {
@@ -620,6 +650,7 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) 
                 area.right,
                 &[delta],
                 &[mins[1].width, mins[0].width],
+                floor.width,
             );
             vec![
                 rect_from_slice(area, Axis::Horizontal, slices[1].0, slices[1].1),
@@ -642,6 +673,7 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) 
                     mins[0].width,
                     widest(&mins[2..], Axis::Horizontal),
                 ],
+                floor.width,
             );
             let cell = |i: usize| rect_from_slice(area, Axis::Horizontal, slices[i].0, slices[i].1);
             let (secondary, primary, stack_area) = (cell(0), cell(1), cell(2));
@@ -653,6 +685,7 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) 
                 stack_area.bottom,
                 &stack_deltas,
                 &along(&mins[2..], Axis::Vertical),
+                floor.height,
             );
 
             let mut rects = Vec::with_capacity(len);
@@ -664,7 +697,13 @@ fn ultrawide(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) 
     }
 }
 
-fn grid(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) -> Vec<Rect> {
+fn grid(
+    area: Rect,
+    len: usize,
+    resize: &[Option<Rect>],
+    mins: &[MinSize],
+    floor: MinSize,
+) -> Vec<Rect> {
     let columns_count = grid_columns(len);
     let base = len / columns_count;
     let remainder = len % columns_count;
@@ -707,7 +746,13 @@ fn grid(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) -> Ve
             )
         })
         .collect();
-    let column_slices = divide_even(area.left, area.right, &column_deltas, &column_mins);
+    let column_slices = divide_even(
+        area.left,
+        area.right,
+        &column_deltas,
+        &column_mins,
+        floor.width,
+    );
     let column_rects = slices_to_rects(area, Axis::Horizontal, &column_slices);
 
     let mut rects = Vec::with_capacity(len);
@@ -720,6 +765,7 @@ fn grid(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) -> Ve
             column_rect.bottom,
             &deltas,
             &along(&mins[first..first + rows_in_column], Axis::Vertical),
+            floor.height,
         );
         extend_with_rects(&mut rects, column_rect, Axis::Vertical, &slices);
     }
@@ -1514,6 +1560,56 @@ mod tests {
         );
         assert_eq!(rects[1], Rect::new(10, 10, 3010, 1070));
         assert!(rects[0].width() >= 1 && rects[0].height() >= 1);
+    }
+
+    #[test]
+    fn a_window_bigger_than_the_screen_leaves_every_other_tile_as_it_was() {
+        // It covers the whole area whatever tile it gets, so taking room from
+        // its neighbours for it would only squeeze them for nothing.
+        for layout in Layout::ALL {
+            for big in [min(32_767, 32_767), min(2000, 1100)] {
+                let windows = [big, None, None, None];
+                let rects = fitted(layout, 4, &windows);
+                let plain =
+                    layout.calculate_with_min(AREA, 4, 0, Flip::NONE, &[], MinSize::default());
+                assert_eq!(rects[1..], plain[1..], "{layout} with {big:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_that_cannot_fit_beside_its_neighbours_leaves_them_their_floor() {
+        // 1900 of 1920 fits on its own, but not beside three tiles that keep
+        // the configured 64: those keep it, and the window takes the rest.
+        for layout in [Layout::Columns, Layout::Bsp, Layout::VerticalStack] {
+            let windows = [min(1900, 0), None, None, None];
+            let rects = fitted(layout, 4, &windows);
+            for (i, rect) in rects.iter().enumerate().skip(1) {
+                assert!(
+                    rect.width() >= MIN_TILE_SIZE,
+                    "{layout}: tile {i} was squeezed to {rect:?}"
+                );
+            }
+            assert!(rects[0].width() >= 1900, "{layout}: {:?}", rects[0]);
+        }
+    }
+
+    #[test]
+    fn a_floor_wider_than_a_quarter_keeps_the_ultrawide_layout_it_always_had() {
+        // On a portrait screen a floor of 300 is more than the secondary's
+        // quarter. A resize used to be clamped back onto that floor rather
+        // than added on top of it, and still is.
+        let area = Rect::new(0, 0, 1080, 1920);
+        let resize = [None, Some(Rect::new(0, 0, 21, 0)), None];
+        let rects = Layout::UltrawideVerticalStack.calculate_with_min(
+            area,
+            3,
+            0,
+            Flip::NONE,
+            &resize,
+            MinSize::square(300),
+        );
+        assert_eq!(rects[1].width(), 300, "{rects:?}");
     }
 
     #[test]

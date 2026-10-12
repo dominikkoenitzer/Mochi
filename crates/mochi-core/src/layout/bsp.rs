@@ -55,8 +55,12 @@ pub(crate) fn calculate(
     len: usize,
     resize: &[Option<Rect>],
     mins: &[MinSize],
+    floor: MinSize,
 ) -> Vec<Rect> {
     let need = branch_minimums(mins);
+    // What the same branches need from the configured tile floor alone, which
+    // every tile keeps even when a window asks for more than there is.
+    let floor_need = branch_minimums(&vec![floor; len]);
     let mut rects = Vec::with_capacity(len);
     let mut remaining = area;
 
@@ -74,8 +78,8 @@ pub(crate) fn calculate(
             start,
             end,
             delta,
-            mins[idx].along(axis),
-            need[idx + 1].along(axis),
+            (mins[idx].along(axis), need[idx + 1].along(axis)),
+            (floor.along(axis), floor_need[idx + 1].along(axis)),
         );
 
         rects.push(rect_from_slice(remaining, axis, start, at));
@@ -91,6 +95,18 @@ mod tests {
     use crate::layout::{Flip, Layout};
 
     const AREA: Rect = Rect::new(0, 0, 1920, 1080);
+
+    /// The layout with the configured floor at the smallest of `mins`, the
+    /// way a workspace hands over tiles whose windows ask for more.
+    fn calculate(area: Rect, len: usize, resize: &[Option<Rect>], mins: &[MinSize]) -> Vec<Rect> {
+        let floor = mins
+            .iter()
+            .fold(MinSize::square(i32::MAX), |low, min| MinSize {
+                width: low.width.min(min.width),
+                height: low.height.min(min.height),
+            });
+        super::calculate(area, len, resize, mins, floor.clamped())
+    }
 
     fn bsp(len: usize) -> Vec<Rect> {
         Layout::Bsp.calculate(AREA, len, 0, Flip::NONE, &[])
