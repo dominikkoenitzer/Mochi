@@ -173,6 +173,28 @@ screen with twelve BSP containers a floor of `300` is met exactly; a floor of
 `400` gives 400 pixel wide tiles that are 360 tall, because twelve of them do
 not fit into 2160 pixels any other way.
 
+Applications have floors of their own as well. Many refuse to shrink below a
+size they choose, and Mochi asks every tiled window for it when it starts
+managing the window and again when a window turns out bigger than its tile.
+Every layout then leaves each window at least that much room, taken from the
+tiles that can spare it: in BSP a whole branch of the tree gives way, not only
+the tile next door. A stack keeps the largest minimum of all its windows, so
+cycling through it does not move the tiles around it, and `resize-axis` and
+`resize-edge` stop where the window would get smaller than it accepts. The
+configured keys still apply to every tile; a window's own minimum can only
+raise that floor. There is nothing to set, and a workspace where no window
+asks for more than its tile is laid out exactly as before.
+
+A window's minimum is kept in logical pixels like the keys above, so it holds
+when the window moves to a display with different scaling, also for an
+application that does not know about scaling at all. When the screen is
+genuinely too small for every window's minimum, the tiles share the shortfall,
+and a window that still does not fit is placed where it will really sit: grown
+to its minimum and kept inside the workspace. It overlaps its neighbour instead
+of running off the screen, and the focused border is drawn around the window
+rather than around a tile it does not fill. That is the one case where the
+tiles do not cover the area exactly.
+
 ## Rules that are read but not acted on
 
 Two lists parse, merge with the community rule file and are counted by

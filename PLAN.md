@@ -110,8 +110,10 @@ BSP, Columns, Rows, VerticalStack, HorizontalStack, UltrawideVerticalStack, Grid
   app the same program to an `exe` rule. `read_window` walks the host's children
   for the process the application actually runs in, so Calculator reports
   `CalculatorApp.exe`.
-- An application that defends a minimum size gets the tile it cannot fill; it
-  overflows its neighbour rather than shrinking, and the daemon leaves it there
-  instead of fighting it.
+- An application that defends a minimum size no longer overflows its
+  neighbour: the daemon asks every tiled window for its minimum, and each
+  layout leaves it that room, taken from the tiles that can spare it. Only a
+  screen too small for all of them still makes a window overlap a neighbour,
+  and then it stays inside the workspace with the border drawn around it.
 - Electron and game windows each have quirks; ignore rules and a cloak check
   handle most of them.

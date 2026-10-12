@@ -214,7 +214,7 @@ shape is stable across changes to the model:
       "containers": [{
         "index": 0, "stack": false, "focused_window": 852368,
         "rect": {"left":24,"top":24,"right":1920,"bottom":2088,"width":1896,"height":2064},
-        "windows": [{"hwnd":852368,"title":"Cargo.toml","exe":"Code.exe","class":"Chrome_WidgetWin_1","path":"C:\\Program Files\\Code\\Code.exe","rect":{"...":0},"actual_rect":{"...":0},"visible":true,"on_screen":true}]
+        "windows": [{"hwnd":852368,"title":"Cargo.toml","exe":"Code.exe","class":"Chrome_WidgetWin_1","path":"C:\\Program Files\\Code\\Code.exe","rect":{"...":0},"actual_rect":{"...":0},"min_size":{"width":500,"height":400},"visible":true,"on_screen":true}]
       }],
       "monocle_container": null, "maximized_window": null, "floating_windows": []
     }]
@@ -269,6 +269,7 @@ What can be null:
 | `workspaces[].focused_window`, `containers[].focused_window` | that workspace or container is empty |
 | `containers[].rect`, `windows[].rect` | the last layout did not place them: a container added since the last run, a workspace with `tile` off, or a floating window, which has no layout rectangle at all |
 | `windows[].actual_rect`, `windows[].on_screen` | the window could not be read, which is what one that has just died looks like |
+| `windows[].min_size` | the window has not said how small it can go: it did not answer in time, or it has not been asked yet |
 | `monocle_container`, `maximized_window` | that mode is not on for the workspace, which is the normal case |
 
 A `rect` that is present is the rectangle the last layout gave the container,

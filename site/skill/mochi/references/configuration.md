@@ -85,6 +85,8 @@ A key the file names replaces a value set with a `mochic` command since the last
 
 Padding and minimum sizes are in logical pixels. Border width and offset are physical pixels.
 
+The two minimum keys are the floor for every tile. A window that refuses to shrink below a size of its own is given at least that size as well; Mochi asks the window, and there is nothing to set.
+
 ## Rules
 
 Every rule list takes the same object:

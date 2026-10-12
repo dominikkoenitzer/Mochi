@@ -131,6 +131,7 @@ handles as hex strings instead.
 | `path` | string | The full path of the executable. |
 | `rect` | rect or null | Where Mochi says it belongs: its container's tile, shared by every window of a stack. Null for a floating window. |
 | `actual_rect` | rect or null | Where it really is on screen. Null when it could not be read. |
+| `min_size` | object or null | The smallest size the window said it accepts, as `width` and `height` in logical pixels. Null until it has answered. |
 | `visible` | boolean | True when its container is showing it. |
 | `on_screen` | boolean or null | What the desktop says: false when it is cloaked or hidden. Null when it could not be read. |
 
