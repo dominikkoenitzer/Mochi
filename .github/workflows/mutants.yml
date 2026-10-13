@@ -1,0 +1,103 @@
+name: Mutation testing
+
+# Answers a question no CI job asks: not "do the tests pass" but "would they
+# notice if the code were wrong". cargo-mutants changes one thing at a time --
+# flips a comparison, drops a call, returns a default -- and reports every
+# change that no test complained about. Each of those is a line the suite is
+# not really covering, whatever the count says.
+#
+# Worth running here specifically: this repository has around a thousand tests
+# and a day of real defects that none of them caught, because they check a
+# model and the defects lived in what Windows does. The report is an artefact
+# rather than a failure, because the first score on an existing codebase is
+# always bad and a job that is always red is a job nobody reads.
+#
+# It used to be one job inside CI on the three-hourly timer. One pass over
+# mochi-core is about 1900 mutants and took four to six hours on a single
+# runner. Slow runs reached the six-hour limit and were cancelled with half a
+# report, which marked the whole CI run cancelled although every other job had
+# passed, and while it ran it held CI's concurrency group, so timed runs on the
+# same commit queued behind it. Here it has its own workflow, runs once a week
+# (the score only moves when mochi-core or its tests change, which the timer
+# does not track) and splits the mutants across eight runners that finish in
+# well under an hour each.
+on:
+  schedule:
+    - cron: '17 2 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  shard:
+    name: mutants (shard ${{ matrix.shard }} of 8)
+    # About 235 mutants per shard at 8 to 12 seconds each is 30 to 50
+    # minutes. The budget leaves room for a slow runner and a cold cache, and
+    # a shard that still runs past it is stuck rather than slow.
+    timeout-minutes: 90
+    runs-on: windows-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutants
+      - run: cargo install cargo-mutants --locked
+      # mochi-core is the pure logic: no Win32, fast to build, and the crate
+      # where a missed mutant means a real hole rather than a test that cannot
+      # run on a machine with no desktop. Round-robin hands every shard an
+      # even slice of every file, so no shard gets all of one slow module.
+      - run: cargo mutants --package mochi-core --no-shuffle --timeout 120 --shard ${{ matrix.shard }}/8 --sharding round-robin
+        continue-on-error: true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out/
+          retention-days: 14
+
+  # One summary for the whole run, so reading the result does not mean
+  # opening eight artefacts.
+  report:
+    name: mutation report
+    needs: shard
+    if: always()
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mutants-shard-*
+          path: shards
+      - name: Summarise
+        shell: bash
+        run: |
+          count() { cat shards/*/"$1" 2>/dev/null | grep -c . || true; }
+          {
+            echo '## Mutation testing, mochi-core'
+            echo
+            echo "| shards reported | caught | missed | timeout | unviable |"
+            echo "|---|---|---|---|---|"
+            echo "| $(ls -d shards/*/ 2>/dev/null | wc -l) of 8 | $(count caught.txt) | $(count missed.txt) | $(count timeout.txt) | $(count unviable.txt) |"
+            echo
+            echo '### Missed'
+            echo
+            echo '```'
+            cat shards/*/missed.txt 2>/dev/null | sort
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

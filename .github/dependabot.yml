@@ -19,6 +19,16 @@ updates:
           - "windows-core"
       minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # windows-rs 0.100 shipped windows-core and the small crates but held
+      # back the windows crate itself, which still ends at 0.62. The interface
+      # macro in platform/appview.rs implements windows-core's traits, so with
+      # windows-core 0.100 beside windows 0.62 the shell's QueryService no
+      # longer accepts the interfaces it declares and the build breaks. Drop
+      # this once windows 0.100 is on crates.io; that move is a migration of
+      # its own, since 0.100 renames the Win32 modules after the SDK headers.
+      - dependency-name: "windows-core"
+        versions: [">= 0.100"]
     commit-message:
       prefix: deps
     labels:
