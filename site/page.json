@@ -35,7 +35,7 @@
     "image": {
       "name": "hero",
       "w": 1920,
-      "h": 1080,
+      "h": 1044,
       "dark": false,
       "alt": "Four windows tiled side by side by Mochi, the focused one with a pink border"
     }
@@ -50,7 +50,7 @@
       "main": {
         "name": "f1",
         "w": 1920,
-        "h": 1080,
+        "h": 1044,
         "dark": false,
         "pos": "50% 0",
         "alt": "The same four windows in the vertical stack layout"
@@ -72,7 +72,7 @@
       "main": {
         "name": "f4",
         "w": 1920,
-        "h": 1080,
+        "h": 1044,
         "dark": false,
         "pos": "50% 0",
         "alt": "A second workspace with three windows in columns"
@@ -94,7 +94,7 @@
       "main": {
         "name": "f2",
         "w": 1920,
-        "h": 1080,
+        "h": 1044,
         "dark": false,
         "pos": "50% 0",
         "alt": "A floating window above four tiles"
@@ -116,7 +116,7 @@
       "main": {
         "name": "f3",
         "w": 1920,
-        "h": 1080,
+        "h": 1044,
         "dark": false,
         "pos": "50% 0",
         "alt": "The left tile made wider in resize mode"
@@ -139,10 +139,10 @@
       "main": {
         "name": "f5",
         "w": 1920,
-        "h": 1080,
+        "h": 1044,
         "dark": false,
         "pos": "50% 0",
-        "alt": "The hotkey file in a text editor and JSON answers from mochic in a terminal"
+        "alt": "The hotkey file and JSON answers from mochic, each in a terminal"
       },
       "detail": {
         "name": "c5",
