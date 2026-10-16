@@ -53,6 +53,7 @@ fn main() {
         winresource::WindowsResource::new()
             .set("FileDescription", "Mochi Setup")
             .set("ProductName", "Mochi")
+            .set("CompanyName", "Mochi")
             .set_icon("../../assets/mochi.ico")
             .compile()
             .expect("could not embed the icon");

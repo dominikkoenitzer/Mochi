@@ -19,7 +19,11 @@ fn main() {
             // of every login.
             .requested_execution_level(ExecutionLevel::AsInvoker);
         embed_manifest(manifest).expect("could not embed the application manifest");
+        // Task Manager shows FileDescription; the crate name would make it "mochi".
         winresource::WindowsResource::new()
+            .set("FileDescription", "Mochi")
+            .set("ProductName", "Mochi")
+            .set("CompanyName", "Mochi")
             .set_icon("../../assets/mochi.ico")
             .compile()
             .expect("could not embed the icon");
