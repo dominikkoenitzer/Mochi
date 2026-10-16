@@ -7,7 +7,7 @@ window into tiles that you focus, move and resize from the keyboard.
 
 ## Download
 
-[Download Mochi-Setup.exe](https://github.com/dominikkoenitzer/Mochi/releases/latest/download/Mochi-Setup.exe),
+[Download Mochi](https://get-mochi.vercel.app),
 then double-click it.
 
 Know the way out before you click Install. The moment Mochi starts, every window
