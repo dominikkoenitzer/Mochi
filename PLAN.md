@@ -37,9 +37,8 @@ No code is taken from any existing window manager.
 2. Observe. Enumerate monitors and windows, log every WinEvent, `mochic state`
    prints JSON. Moves nothing, safe to run next to another window manager. Done.
 3. Tile. Core model, BSP first, rules, apply layout to real windows, restore on exit.
-   From here only one window manager runs at a time. Done. Missing: the daemon
-   never exercises the tiling path against real windows in CI, so the end to end
-   run with `--manage-class MochiTestWindow` is still a manual step.
+   From here only one window manager runs at a time. Done. CI's end to end job
+   runs the daemon with `--manage-class MochiTestWindow` against real windows.
 4. Control. IPC and CLI for everything a hotkey file binds: focus, move, resize axis,
    workspaces, monitors, float, maximize, monocle, minimize, close, cycle and flip
    layout, retile, pause, reload, stop. Done. `stack`, `unstack` and
