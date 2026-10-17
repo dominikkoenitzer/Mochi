@@ -614,17 +614,37 @@ fn a_bound_key_fires_over_an_elevated_window_exactly_once() {
         daemon.stop();
     }
 
-    // 2. Medium daemon, elevated window in front: the registration hears it.
+    // 2. What Windows itself hands a medium process, with no Mochi involved.
+    let delivered = what_windows_delivers(&windows);
+    steps += 1;
+
+    // 3. Medium daemon, elevated window in front: Mochi hears exactly what the
+    //    control heard, through the registration and never the hook.
     {
         let mut daemon = Daemon::start("medium", true);
         elevated_window_in_front(&windows);
-        assert!(
-            toggle_with(keys::F14, HEARD).is_some(),
-            "F14 did nothing over an elevated window. log:\n{}",
+        let fired = toggle_with(keys::F14, HEARD).is_some();
+        std::thread::sleep(UNHEARD);
+        eprintln!(
+            "registration over an elevated window: {}; Mochi fired: {fired}",
+            if delivered {
+                "delivered"
+            } else {
+                "not delivered"
+            }
+        );
+        assert_eq!(
+            fired,
+            delivered,
+            "Mochi and the control disagree about F14 over an elevated window. log:\n{}",
             daemon.log_text()
         );
-        std::thread::sleep(UNHEARD);
-        assert_eq!(daemon.heard("registered"), 1, "log:\n{}", daemon.log_text());
+        assert_eq!(
+            daemon.heard("registered"),
+            usize::from(delivered),
+            "log:\n{}",
+            daemon.log_text()
+        );
         assert_eq!(
             daemon.heard("hook"),
             0,
@@ -804,4 +824,179 @@ fn what_each_path_costs() {
         eprintln!("  elevated window in front: not measured, this process is not elevated");
     }
     eprintln!();
+}
+
+// ---------------------------------------------------------------------------
+// what Windows itself delivers, with no Mochi involved
+// ---------------------------------------------------------------------------
+
+/// The key the control helper listens for. Nothing of Mochi's binds it here.
+const F13: u16 = 0x7C;
+
+/// Set in the helper's environment to make [`control_helper`] run.
+const HELPER_ENV: &str = "MOCHI_HOTKEY_PATHS_HELPER";
+
+/// A medium integrity process with a window, a keyboard hook that only
+/// listens, and a registration for F13. It reports each one hearing F13 on
+/// stdout, which the parent redirected to a file. Not a test of its own: it
+/// returns at once unless the parent started it.
+#[test]
+fn control_helper() {
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, CreateWindowExW, DispatchMessageW, GetMessageW, KBDLLHOOKSTRUCT, MSG,
+        PostThreadMessageW, SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WINDOW_EX_STYLE,
+        WM_HOTKEY, WM_KEYDOWN, WM_QUIT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    };
+    use windows::core::w;
+
+    if std::env::var(HELPER_ENV).ok().as_deref() != Some("1") {
+        return;
+    }
+
+    unsafe extern "system" fn listen(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code == 0 && wparam.0 as u32 == WM_KEYDOWN {
+            let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            if event.vkCode == u32::from(F13) {
+                println!("heard by the hook");
+            }
+        }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    unsafe {
+        let registered = RegisterHotKey(None, 0x13, HOT_KEY_MODIFIERS(0), u32::from(F13));
+        let instance = GetModuleHandleW(None).expect("no module handle");
+        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(listen), Some(instance.into()), 0);
+        let window = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("EDIT"),
+            w!("hotkey paths control"),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            100,
+            100,
+            400,
+            200,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("no window");
+        println!(
+            "ready hwnd={} registered={} hook={} integrity={:?}",
+            window.0 as i64,
+            registered.is_ok(),
+            hook.is_ok(),
+            own_integrity()
+        );
+
+        let thread = GetCurrentThreadId();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(20));
+            let _ = PostThreadMessageW(thread, WM_QUIT, WPARAM(0), LPARAM(0));
+        });
+        let mut message = MSG::default();
+        while GetMessageW(&raw mut message, None, 0, 0).0 > 0 {
+            if message.message == WM_HOTKEY {
+                println!("heard by the registration");
+            }
+            let _ = TranslateMessage(&raw const message);
+            DispatchMessageW(&raw const message);
+        }
+    }
+}
+
+/// What the control helper heard so far: (hook, registration).
+fn control_heard(log: &Path) -> (usize, usize) {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    (
+        text.matches("heard by the hook").count(),
+        text.matches("heard by the registration").count(),
+    )
+}
+
+/// Runs the control: F13 pressed once with the helper's own medium window in
+/// front and once with an elevated window in front. Returns what the
+/// registration heard over the elevated window, after printing the matrix.
+fn what_windows_delivers(windows: &TestWindows) -> bool {
+    let log = temp_dir().join("control.log");
+    let exe = std::env::current_exe().expect("no test binary path");
+    // Inherited by the helper through CreateProcessAsUserW's default
+    // environment. Nothing else in this process reads it.
+    unsafe { std::env::set_var(HELPER_ENV, "1") };
+    let helper = spawn_at_medium(
+        &exe,
+        &[
+            "control_helper".to_owned(),
+            "--exact".to_owned(),
+            "--nocapture".to_owned(),
+            "--test-threads".to_owned(),
+            "1".to_owned(),
+        ],
+        &log,
+    );
+    unsafe { std::env::remove_var(HELPER_ENV) };
+
+    let mut hwnd = 0i64;
+    wait_for(Duration::from_secs(10), || {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        hwnd = text
+            .split("ready hwnd=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        hwnd != 0
+    })
+    .unwrap_or_else(|_| {
+        panic!(
+            "the control helper never came up:\n{}",
+            std::fs::read_to_string(&log).unwrap_or_default()
+        )
+    });
+
+    // Its own medium window in front.
+    wait_for(Duration::from_secs(5), || {
+        let _ = mochi_testbed::focus_window(hwnd);
+        mochi_testbed::foreground_window() == hwnd
+    })
+    .expect("the control window would not come to the front");
+    assert_eq!(process_integrity(foreground_pid()), Some(MEDIUM));
+    press(F13);
+    std::thread::sleep(UNHEARD);
+    let medium = control_heard(&log);
+
+    // An elevated window in front.
+    elevated_window_in_front(windows);
+    press(F13);
+    std::thread::sleep(UNHEARD);
+    let after = control_heard(&log);
+    let elevated = (after.0 - medium.0, after.1 - medium.1);
+
+    unsafe {
+        if WaitForSingleObject(helper, 0).0 != 0 {
+            let _ = TerminateProcess(helper, 0);
+        }
+        let _ = CloseHandle(helper);
+    }
+
+    eprintln!("what Windows hands a medium process for one injected F13:");
+    eprintln!(
+        "  medium window in front:   hook {}   registration {}",
+        medium.0, medium.1
+    );
+    eprintln!(
+        "  elevated window in front: hook {}   registration {}",
+        elevated.0, elevated.1
+    );
+    assert_eq!(
+        medium,
+        (1, 1),
+        "the control did not hear F13 over its own window, so the instrument is broken:\n{}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    elevated.1 == 1
 }
