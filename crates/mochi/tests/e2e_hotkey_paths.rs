@@ -145,14 +145,16 @@ fn hotkey_path() -> PathBuf {
 
 /// The integrity level of a token, as its label's last sub-authority.
 fn token_integrity(token: HANDLE) -> Option<u32> {
-    let mut buffer = [0u8; 128];
+    // u64s, not bytes: the label starts with a pointer and must be read from
+    // an address aligned for one.
+    let mut buffer = [0u64; 16];
     let mut length = 0u32;
     unsafe {
         GetTokenInformation(
             token,
             TokenIntegrityLevel,
             Some(buffer.as_mut_ptr().cast()),
-            u32::try_from(buffer.len()).ok()?,
+            u32::try_from(size_of_val(&buffer)).ok()?,
             &raw mut length,
         )
         .ok()?;
@@ -366,8 +368,14 @@ fn spawn_at_medium(exe: &Path, args: &[String], log: &Path) -> HANDLE {
         let _ = CloseHandle(own);
 
         // S-1-16-8192, the medium mandatory label: revision 1, one
-        // sub-authority, authority 16, sub-authority 0x2000.
-        let mut sid: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 16, 0, 0x20, 0, 0];
+        // sub-authority, the six byte authority 16, sub-authority 0x2000.
+        // Held as u32s so the sub-authority sits where a SID reader expects
+        // it, on a four byte boundary.
+        let mut sid: [u32; 3] = [
+            u32::from_le_bytes([1, 1, 0, 0]),
+            u32::from_le_bytes([0, 0, 0, 16]),
+            MEDIUM,
+        ];
         let label = TOKEN_MANDATORY_LABEL {
             Label: SID_AND_ATTRIBUTES {
                 Sid: PSID(sid.as_mut_ptr().cast()),
@@ -378,7 +386,7 @@ fn spawn_at_medium(exe: &Path, args: &[String], log: &Path) -> HANDLE {
             token,
             TokenIntegrityLevel,
             (&raw const label).cast(),
-            u32::try_from(size_of::<TOKEN_MANDATORY_LABEL>() + sid.len()).unwrap(),
+            u32::try_from(size_of::<TOKEN_MANDATORY_LABEL>() + size_of_val(&sid)).unwrap(),
         )
         .expect("could not lower the token to medium integrity");
         assert_eq!(
