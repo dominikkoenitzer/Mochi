@@ -1,16 +1,17 @@
-//! A bound key fires over an elevated window, and nothing got slower for it.
+//! Which listener hears a bound key, over which window, and what each costs.
 //!
-//! Windows does not call a keyboard hook in a process that is not elevated
-//! while an elevated window is in front, so Mochi also registers its bindings
-//! with `RegisterHotKey` (see `events/hotkey.rs`). This file proves that on a
-//! real desktop, and measures what it costs:
+//! Mochi listens with a keyboard hook and also registers its bindings with
+//! `RegisterHotKey` (see `events/hotkey.rs`). This file pins down on a real
+//! desktop what that does and does not buy:
 //!
 //! 1. with the daemon and the window in front at the same integrity level, a
-//!    press is heard by the hook, exactly once;
-//! 2. with the daemon at medium integrity and an elevated window in front, the
-//!    same press is heard by the registration instead, exactly once;
-//! 3. a combination another program registered first is named in the log, and
-//!    the hook still catches it whenever it can see the press;
+//!    press is heard by the hook, exactly once, and never twice;
+//! 2. a combination another program registered first is named in the log, and
+//!    the hook still catches it;
+//! 3. a control with no Mochi in it: a medium process hears F13 through both a
+//!    hook and a registration over its own window, and through neither over an
+//!    elevated one. A daemon at medium integrity with an elevated window in
+//!    front is held to exactly what the control heard;
 //! 4. with `MOCHI_MEASURE=1`: idle CPU, press-to-command latency on both paths,
 //!    and the daemon's own CPU per press, for any daemon binary named in
 //!    `MOCHI_DAEMON_UNDER_TEST`, so a build of `main` can be measured by the
@@ -560,8 +561,8 @@ impl Drop for Squatter {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_bound_key_fires_over_an_elevated_window_exactly_once() {
-    skip_unless_allowed!("a_bound_key_fires_over_an_elevated_window_exactly_once");
+fn a_bound_key_fires_once_and_over_an_elevated_window_as_windows_allows() {
+    skip_unless_allowed!("a_bound_key_fires_once_and_over_an_elevated_window_as_windows_allows");
     if own_integrity() != Some(HIGH) {
         assert!(
             std::env::var("MOCHI_E2E_ELEVATED").ok().as_deref() != Some("1"),

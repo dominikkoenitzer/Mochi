@@ -27,15 +27,21 @@
 //! the window sitting in its File menu. A swallowed press under Alt or Win now
 //! injects one masking keystroke, so the modifier is no longer a bare press.
 //!
-//! **Hear the keys the hook cannot.** Windows does not call a hook in a process
-//! that is not elevated while an elevated window is in front, so on its own the
-//! hook goes deaf the moment an administrator terminal has the focus. Every
-//! binding live in the active mode is therefore also registered with
-//! `RegisterHotKey`, which Windows delivers whatever runs in front. The hook
-//! stays first in line: a press it sees, it swallows, and Windows never gets to
-//! match the registration, so nothing fires twice and the path every other
-//! press takes is the same instructions it always was. A `WM_HOTKEY` arrives
-//! only for a press the hook did not see, and goes through the same matching.
+//! **Claim the keys from Windows too.** Every binding live in the active mode is
+//! also registered with `RegisterHotKey`. That makes a combination another
+//! program already holds visible: the registration fails and the log names it.
+//! It is also a second listener for a press the hook did not see, which goes
+//! through the same matching. The hook stays first in line: a press it sees, it
+//! swallows, and Windows never gets to match the registration, so nothing fires
+//! twice and the path every other press takes is the same instructions it
+//! always was.
+//!
+//! It does **not** make a binding fire over an elevated window. Windows calls
+//! neither the hook nor the registration of a process that is not elevated
+//! while an elevated window is in front: `tests/e2e_hotkey_paths.rs` measures
+//! that with no Mochi involved (a medium process hears F13 through both over
+//! its own window, through neither over an elevated one) and holds Mochi to the
+//! same answer. Only a Mochi that is itself elevated hears those presses.
 //!
 //! Three kinds of binding stay with the hook alone, and `hook_only` is the
 //! one place that decides them:
@@ -46,9 +52,6 @@
 //! - F12, which Windows reserves for the debugger at all times.
 //! - A combination another program has already registered. That one is logged
 //!   by name, and the hook still catches it whenever it can see the press.
-//!
-//! Over an elevated window the masking keystroke cannot be sent either: the same
-//! rule refuses Mochi's input there.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -96,8 +99,8 @@ pub enum Via {
     /// The keyboard hook, which sees every press it is allowed to and gets the
     /// first look at it.
     Hook,
-    /// A `RegisterHotKey` registration: a press the hook did not see, which
-    /// in practice means an elevated window was in front.
+    /// A `RegisterHotKey` registration: a press the hook did not see. Not one
+    /// over an elevated window, which neither listener hears.
     Registered,
 }
 
@@ -662,8 +665,7 @@ fn sync_registrations(announce: bool) {
                         tracing::warn!(
                             %trigger,
                             "another program has registered this key combination, so only the \
-                             keyboard hook listens for it, and the hook hears nothing while an \
-                             elevated window is in front"
+                             keyboard hook listens for it"
                         );
                     } else {
                         tracing::warn!(
