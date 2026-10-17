@@ -37,7 +37,7 @@
 //! press takes is the same instructions it always was. A `WM_HOTKEY` arrives
 //! only for a press the hook did not see, and goes through the same matching.
 //!
-//! Three kinds of binding stay with the hook alone, and [`hook_only`] is the
+//! Three kinds of binding stay with the hook alone, and `hook_only` is the
 //! one place that decides them:
 //!
 //! - `ctrl + alt` chords. Windows reports AltGr as Ctrl+Alt to a registration,
