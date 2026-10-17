@@ -728,8 +728,21 @@ impl Workspace {
             if idx < self.resize_dimensions.len() {
                 self.resize_dimensions.remove(idx);
             }
+            self.forget_resize_of_a_lone_container();
         }
         window
+    }
+
+    /// Drops the delta of a container that is left alone in the ring.
+    ///
+    /// A delta pushes a boundary between two tiles, and a single tile has
+    /// none. Kept, it would wait for the next window and move the boundary
+    /// that window opens against, so a window that is closed and opened again
+    /// would come back to a split nobody asked for instead of its equal share.
+    fn forget_resize_of_a_lone_container(&mut self) {
+        if self.containers.len() == 1 {
+            self.clear_resize_dimensions();
+        }
     }
 
     /// Removes and returns the focused window.
@@ -745,6 +758,7 @@ impl Workspace {
         if idx < self.resize_dimensions.len() {
             self.resize_dimensions.remove(idx);
         }
+        self.forget_resize_of_a_lone_container();
         Some(container)
     }
 
@@ -1600,6 +1614,58 @@ mod tests {
         ws.remove_window(WindowId(1));
         assert_eq!(ws.resize_dimensions.len(), 2);
         assert_eq!(ws.resize_dimension(1), Some(Rect::new(0, 0, 100, 0)));
+    }
+
+    #[test]
+    fn a_window_that_comes_back_gets_its_equal_share_again() {
+        let mut ws = workspace_with(2);
+        ws.set_resize_dimension(0, Some(Rect::new(0, 0, 300, 0)));
+        ws.update_layout(WORK_AREA, 0, 0);
+        assert_eq!(ws.latest_layout()[0].width(), 1260);
+
+        ws.remove_window(WindowId(2));
+        assert_eq!(ws.resize_dimension(0), None, "a lone tile has no boundary");
+        ws.add_window(Window::new(2));
+        ws.update_layout(WORK_AREA, 0, 0);
+        assert_eq!(ws.latest_layout()[0].width(), 960);
+        assert_eq!(ws.latest_layout()[1].width(), 960);
+    }
+
+    #[test]
+    fn a_resize_between_the_tiles_that_stay_survives_a_window_closing() {
+        let mut ws = workspace_with(3);
+        ws.set_resize_dimension(0, Some(Rect::new(0, 0, 100, 0)));
+        ws.remove_window(WindowId(3));
+        assert_eq!(ws.resize_dimension(0), Some(Rect::new(0, 0, 100, 0)));
+    }
+
+    #[test]
+    fn moving_the_last_neighbour_away_forgets_the_lone_delta() {
+        let mut ws = workspace_with(2);
+        ws.set_resize_dimension(0, Some(Rect::new(0, 0, 300, 0)));
+        assert!(ws.remove_focused_container().is_some());
+        assert_eq!(ws.resize_dimension(0), None);
+    }
+
+    #[test]
+    fn two_windows_in_rows_on_a_portrait_panel_split_it_in_half() {
+        // His portrait panel: 1080 by 1920 at 100 percent with a 48 pixel
+        // taskbar, 14 pixels of workspace padding and 10 of container
+        // padding. A music player that accepts nothing under 800 by 600 and a
+        // mail client that says 120 by 63.
+        let work_area = Rect::new(3840, 120, 4920, 1992);
+        let mut ws = Workspace {
+            layout: Layout::Rows,
+            ..Workspace::new()
+        };
+        ws.add_window(Window::new(1).with_min_size(logical(800, 600)));
+        ws.add_window(Window::new(2).with_min_size(logical(120, 63)));
+        let rects = ws
+            .update_layout_scaled(work_area, 14, 10, 1.0, 1.0)
+            .to_vec();
+        assert_eq!(rects[0], Rect::new(3864, 144, 4896, 1046));
+        assert_eq!(rects[1], Rect::new(3864, 1066, 4896, 1968));
+        assert_eq!(rects[0].height(), rects[1].height());
     }
 
     #[test]
