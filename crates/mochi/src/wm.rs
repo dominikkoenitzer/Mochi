@@ -1028,17 +1028,7 @@ impl WindowManager {
         self.visuals.set_settings(&self.visual_config);
         self.session.app_config_path.clone_from(&loaded.app_path);
 
-        self.workspace_rules = loaded
-            .config
-            .workspace_rules(&self.core)
-            .into_iter()
-            .map(|(monitor, workspace, rule, initial_only)| WorkspaceRule {
-                monitor,
-                workspace,
-                rule,
-                initial_only,
-            })
-            .collect();
+        self.workspace_rules = Self::routing(&loaded.config, &self.core);
         // Same reasoning as the rules above: the file's list replaces this one
         // wholesale, so what a command added has to be put back.
         self.workspace_rules
@@ -1058,6 +1048,40 @@ impl WindowManager {
             "configuration applied"
         );
         Ok(())
+    }
+
+    /// The configured workspace rules, resolved against the monitors there
+    /// are right now.
+    ///
+    /// A rule names the monitor by the `monitors` entry it is written under,
+    /// and which monitor that entry configures depends on what is attached,
+    /// so the answer goes stale on every display change.
+    fn routing(config: &Config, core: &CoreState) -> Vec<WorkspaceRule> {
+        config
+            .workspace_rules(core)
+            .into_iter()
+            .map(|(monitor, workspace, rule, initial_only)| WorkspaceRule {
+                monitor,
+                workspace,
+                rule,
+                initial_only,
+            })
+            .collect()
+    }
+
+    /// Resolves the configured workspace rules again after the monitors
+    /// changed, keeping the ones a command added.
+    ///
+    /// Without this a rule written for a display that was off when the
+    /// configuration was read never came back: the daemon started with the
+    /// portrait panel asleep, the panel woke up and got its workspaces, and
+    /// the applications routed to it kept opening on the other screen until
+    /// the file was saved again. A rule resolved while the panels were
+    /// enumerated in a different order pointed at the wrong one.
+    fn reroute_after_display_change(&mut self) {
+        self.workspace_rules = Self::routing(&self.visual_config, &self.core);
+        self.workspace_rules
+            .extend(self.added_workspace_rules.iter().cloned());
     }
 
     /// Takes over every window that is already on the desktop.
@@ -3067,6 +3091,7 @@ impl WindowManager {
         // The indices the fullscreen windows were held by belong to the ring
         // that is gone, so each is asked again against the new one.
         self.recheck_fullscreen("the displays changed");
+        self.reroute_after_display_change();
 
         tracing::info!(
             monitors = self.core.monitors().len(),
@@ -7732,6 +7757,56 @@ alt + j : focus down
             wm.state().focused_monitor_idx(),
             panel,
             "the focus followed the name rather than the screen it was on"
+        );
+    }
+
+    #[test]
+    fn a_rule_for_a_panel_that_was_asleep_at_startup_routes_once_it_wakes() {
+        // The portrait panel is asleep when the configuration is read, so its
+        // entry configures nothing and its rule has nowhere to send a window.
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        let config = Config::from_json(
+            r#"{
+                "monitor_index_preferences": {
+                    "0": { "left": 3840, "top": 0, "right": 4920, "bottom": 1920 },
+                    "1": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 }
+                },
+                "monitors": [
+                    { "workspaces": [ {
+                        "name": "1",
+                        "layout": "Rows",
+                        "workspace_rules": [
+                            { "kind": "Title", "id": "Mail", "matching_strategy": "Equals" }
+                        ]
+                    } ] },
+                    { "workspaces": [ { "name": "1", "layout": "BSP" } ] }
+                ]
+            }"#,
+        )
+        .expect("the configuration parses");
+        config.apply_to(&mut wm.core);
+        wm.visual_config = config.clone();
+        wm.workspace_rules = WindowManager::routing(&config, &wm.core);
+        assert!(wm.workspace_rules.is_empty());
+
+        platform.set_monitors(vec![main_screen(), portrait_screen()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        let panel = wm
+            .state()
+            .monitors()
+            .position(|m| m.size == portrait_screen().size)
+            .expect("the portrait panel never arrived");
+        assert_eq!(
+            wm.state().workspace(panel, 0).unwrap().layout,
+            mochi_core::Layout::Rows
+        );
+
+        platform.windows.lock().unwrap().push(window(2, "Mail"));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(2));
+        assert_eq!(
+            wm.state().locate_window(WindowId(2)),
+            Some((panel, 0)),
+            "the rule stayed asleep with the panel"
         );
     }
 
