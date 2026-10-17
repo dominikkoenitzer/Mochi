@@ -14,9 +14,8 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, HTTRANSPARENT, RegisterClassExW, SW_HIDE,
-    SW_SHOWNA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WM_ERASEBKGND,
-    WM_NCHITTEST, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    SW_SHOWNA, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, ShowWindow, WM_ERASEBKGND, WM_NCHITTEST,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -257,10 +256,21 @@ impl BorderWindow {
         Ok(())
     }
 
-    /// Moves the window without touching its pixels.
+    /// Moves the window without touching its pixels, its visibility or its
+    /// place in the z-order.
+    ///
+    /// Only [`BorderWindow::restack`] puts a frame on screen, because only it
+    /// knows whether the frame may sit next to its target. A move that showed
+    /// the frame as well put it up behind `visible`'s back: when the restack
+    /// after it was refused, `hide` believed the frame was already hidden and
+    /// left it standing, and the spare went back to the pool still on screen,
+    /// a frame around nothing until the next window took it. It happened to
+    /// every elevated window Mochi tiled at the size of the spare's last frame.
     fn move_to(&mut self, window: Rect) -> Result<()> {
-        // SAFETY: the window belongs to this struct and this thread. No size
-        // change, no activation, no z-order change: restack does that.
+        // SAFETY: the window belongs to this struct and this thread. No
+        // activation, no showing, no z-order change: restack does those. A
+        // null `hWndInsertAfter` is HWND_TOP, so without SWP_NOZORDER every
+        // move would first raise the frame over every window on the desktop.
         unsafe {
             SetWindowPos(
                 self.hwnd,
@@ -269,7 +279,7 @@ impl BorderWindow {
                 window.top,
                 window.width(),
                 window.height(),
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                SWP_NOACTIVATE | SWP_NOZORDER,
             )
         }?;
         self.position = Some((window.left, window.top));
