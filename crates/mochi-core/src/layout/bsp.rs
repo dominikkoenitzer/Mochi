@@ -1,21 +1,36 @@
 //! Binary space partition, the daily driver layout.
 //!
-//! The first container takes half the area with a vertical cut, the second
-//! takes half of what is left with a horizontal cut, and so on, alternating.
-//! The last two containers share the final region evenly.
+//! The first container takes half the area, the second takes half of what is
+//! left with a cut the other way, and so on, alternating. The last two
+//! containers share the final region evenly.
+//!
+//! The first cut divides the longer side. On a landscape screen it runs top
+//! to bottom and the first two windows sit side by side; on a screen taller
+//! than it is wide it runs left to right and they are stacked, each a full
+//! width row, instead of two columns too narrow for most applications.
 
 use crate::geometry::{Axis, Rect};
 
 use super::MinSize;
 use super::split::{boundary_delta, rect_from_slice, split_two};
 
-/// The axis cut number `idx` divides: the first one runs top to bottom and
-/// they alternate from there.
-const fn cut_axis(idx: usize) -> Axis {
-    if idx.is_multiple_of(2) {
-        Axis::Horizontal
-    } else {
+/// The axis the first cut of `area` divides: the longer one, so a square or
+/// landscape area is cut top to bottom and a portrait one left to right.
+const fn first_cut_axis(area: Rect) -> Axis {
+    if area.height() > area.width() {
         Axis::Vertical
+    } else {
+        Axis::Horizontal
+    }
+}
+
+/// The axis cut number `idx` divides: `first` for the first one, alternating
+/// from there.
+const fn cut_axis(first: Axis, idx: usize) -> Axis {
+    if idx.is_multiple_of(2) {
+        first
+    } else {
+        first.other()
     }
 }
 
@@ -25,11 +40,11 @@ const fn cut_axis(idx: usize) -> Axis {
 /// region is cut again, so what it has to keep is not the floor of the next
 /// tile but of the whole branch: along the axis of a later cut the two sides
 /// add up, across it the larger of the two wins.
-fn branch_minimums(mins: &[MinSize]) -> Vec<MinSize> {
+fn branch_minimums(first_axis: Axis, mins: &[MinSize]) -> Vec<MinSize> {
     let mut need = mins.to_vec();
     for idx in (0..mins.len().saturating_sub(1)).rev() {
         let (first, rest) = (mins[idx], need[idx + 1]);
-        need[idx] = match cut_axis(idx) {
+        need[idx] = match cut_axis(first_axis, idx) {
             Axis::Horizontal => MinSize {
                 width: first.width.saturating_add(rest.width),
                 height: first.height.max(rest.height),
@@ -57,10 +72,11 @@ pub(crate) fn calculate(
     mins: &[MinSize],
     floor: MinSize,
 ) -> Vec<Rect> {
-    let need = branch_minimums(mins);
+    let first = first_cut_axis(area);
+    let need = branch_minimums(first, mins);
     // What the same branches need from the configured tile floor alone, which
     // every tile keeps even when a window asks for more than there is.
-    let floor_need = branch_minimums(&vec![floor; len]);
+    let floor_need = branch_minimums(first, &vec![floor; len]);
     let mut rects = Vec::with_capacity(len);
     let mut remaining = area;
 
@@ -70,7 +86,7 @@ pub(crate) fn calculate(
             break;
         }
 
-        let axis = cut_axis(idx);
+        let axis = cut_axis(first, idx);
         let delta = boundary_delta(resize, idx, idx + 1, axis);
         let start = remaining.start(axis);
         let end = remaining.end(axis);
@@ -218,6 +234,77 @@ mod tests {
         assert_eq!(rects[2], Rect::new(960, 440, 1920, 1080));
     }
 
+    // -- portrait areas -----------------------------------------------------
+
+    const PORTRAIT: Rect = Rect::new(0, 0, 1080, 1920);
+
+    #[test]
+    fn two_containers_on_a_portrait_area_are_stacked_in_equal_halves() {
+        let rects = Layout::Bsp.calculate(PORTRAIT, 2, 0, Flip::NONE, &[]);
+        assert_eq!(
+            rects,
+            vec![Rect::new(0, 0, 1080, 960), Rect::new(0, 960, 1080, 1920)]
+        );
+    }
+
+    #[test]
+    fn a_portrait_area_alternates_starting_with_a_left_right_cut() {
+        let rects = Layout::Bsp.calculate(PORTRAIT, 3, 0, Flip::NONE, &[]);
+        assert_eq!(rects[0], Rect::new(0, 0, 1080, 960));
+        assert_eq!(rects[1], Rect::new(0, 960, 540, 1920));
+        assert_eq!(rects[2], Rect::new(540, 960, 1080, 1920));
+    }
+
+    #[test]
+    fn a_square_area_is_cut_top_to_bottom_first_as_before() {
+        let square = Rect::new(0, 0, 1000, 1000);
+        let rects = Layout::Bsp.calculate(square, 2, 0, Flip::NONE, &[]);
+        assert_eq!(
+            rects,
+            vec![Rect::new(0, 0, 500, 1000), Rect::new(500, 0, 1000, 1000)]
+        );
+    }
+
+    #[test]
+    fn a_wide_window_on_a_portrait_area_no_longer_squeezes_its_neighbour() {
+        // A 1080 by 1920 panel at 100 percent: 14 pixels of workspace padding
+        // and a 48 pixel taskbar leave 1052 by 1844. A music player that
+        // accepts nothing under 800 by 600 used to take 820 of the 1052
+        // pixels of a left and right cut, leaving 232 for the mail client
+        // beside it. Stacked, both get the full width and half the height.
+        let area = Rect::new(14, 14, 1066, 1858);
+        let mins = [
+            MinSize {
+                width: 820,
+                height: 620,
+            },
+            MinSize {
+                width: 140,
+                height: 83,
+            },
+        ];
+        let rects = calculate(area, 2, &[], &mins);
+        assert_eq!(rects[0], Rect::new(14, 14, 1066, 936));
+        assert_eq!(rects[1], Rect::new(14, 936, 1066, 1858));
+    }
+
+    #[test]
+    fn a_resize_delta_on_a_portrait_area_moves_the_stacked_cut() {
+        let resize = vec![Some(Rect::new(0, 0, 0, 240)), None];
+        let rects = Layout::Bsp.calculate(PORTRAIT, 2, 0, Flip::NONE, &resize);
+        assert_eq!(rects[0], Rect::new(0, 0, 1080, 1200));
+        assert_eq!(rects[1], Rect::new(0, 1200, 1080, 1920));
+    }
+
+    #[test]
+    fn many_containers_still_tile_a_portrait_area() {
+        for len in 1..=20 {
+            let rects = Layout::Bsp.calculate(PORTRAIT, len, 0, Flip::NONE, &[]);
+            let covered: i64 = rects.iter().map(Rect::area).sum();
+            assert_eq!(covered, PORTRAIT.area(), "with {len} containers");
+        }
+    }
+
     #[test]
     fn many_containers_still_tile_the_area() {
         for len in 1..=20 {
@@ -261,7 +348,7 @@ mod tests {
     #[test]
     fn the_floor_of_a_branch_adds_along_its_cuts_and_takes_the_larger_across() {
         let mins = [wide(300), tall(200), wide(400), tall(500)];
-        let need = branch_minimums(&mins);
+        let need = branch_minimums(Axis::Horizontal, &mins);
         assert_eq!(need[3], tall(500));
         // Cut 2 runs top to bottom: widths add, the taller height wins.
         assert_eq!(
@@ -291,10 +378,10 @@ mod tests {
     #[test]
     fn branch_floors_saturate_instead_of_overflowing() {
         let mins = vec![MinSize::square(i32::MAX); 6];
-        for need in branch_minimums(&mins) {
+        for need in branch_minimums(Axis::Horizontal, &mins) {
             assert_eq!(need, MinSize::square(i32::MAX));
         }
-        assert!(branch_minimums(&[]).is_empty());
+        assert!(branch_minimums(Axis::Horizontal, &[]).is_empty());
     }
 
     #[test]
