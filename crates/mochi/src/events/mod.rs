@@ -244,6 +244,8 @@ pub enum Event {
         trigger: mochi_hotkey::Trigger,
         /// What the user bound them to.
         action: Box<mochi_hotkey::Action>,
+        /// Which of the two listeners caught it, for the log.
+        via: hotkey::Via,
     },
     /// A client sent a command and is waiting for the answer.
     Command {

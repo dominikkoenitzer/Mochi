@@ -258,6 +258,36 @@ mode move {
     }
 
     #[test]
+    fn the_bindings_live_in_a_mode_are_exactly_the_ones_a_press_can_match() {
+        // The daemon claims these keys from Windows ahead of time, so a key
+        // listed here that a press could not match would be taken from the
+        // desktop for nothing, and one missing would not fire over a window
+        // the keyboard hook cannot see.
+        let bindings = bindings();
+        let sources = |mode| -> Vec<String> {
+            bindings
+                .iter_in(mode)
+                .map(|binding| binding.source.clone())
+                .collect()
+        };
+        assert_eq!(
+            sources(ModeId::DEFAULT),
+            ["mode resize", "focus left"].map(str::to_owned)
+        );
+        let moving = bindings.mode_id("move").unwrap();
+        assert_eq!(
+            sources(moving),
+            ["move left", "mode default", "mode resize"].map(str::to_owned)
+        );
+        for binding in bindings.iter_in(moving) {
+            assert_eq!(bindings.get_in(moving, binding.trigger), Some(binding));
+        }
+        // An id from bigger bindings lists nothing rather than the wrong mode.
+        let small = Bindings::parse("alt + h : focus left").unwrap();
+        assert_eq!(small.iter_in(moving).count(), 0);
+    }
+
+    #[test]
     fn mode_ids_follow_the_file() {
         let bindings = bindings();
         assert_eq!(bindings.mode_id("default"), Some(ModeId::DEFAULT));
