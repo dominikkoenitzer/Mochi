@@ -406,10 +406,12 @@ impl Steps {
         match body() {
             Ok(()) => {
                 eprintln!("  ok    {name}");
+                record(name, "pass", "");
                 self.passed.push(name.to_owned());
             }
             Err(e) => {
                 eprintln!("  FAIL  {name}: {e}");
+                record(name, "fail", &e);
                 self.failed.push((name.to_owned(), e));
             }
         }
@@ -432,6 +434,29 @@ impl Steps {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
+    }
+}
+
+/// Appends one step outcome to `results.jsonl` next to the daemon logs, which
+/// CI turns into the pass and fail list of the run.
+fn record(step: &str, outcome: &str, detail: &str) {
+    use std::io::Write;
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .to_owned();
+    let line = serde_json::json!({
+        "test": test,
+        "step": step,
+        "outcome": outcome,
+        "detail": detail,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(temp_dir().join("results.jsonl"))
+    {
+        let _ = writeln!(file, "{line}");
     }
 }
 
