@@ -55,6 +55,10 @@ windows-core = { workspace = true }
 [dev-dependencies]
 mochi-testbed = { path = "../mochi-testbed" }
 
+# What the end-to-end suite reads about the daemon's process: memory, handles.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_System_ProcessStatus"] }
+
 [build-dependencies]
 embed-manifest = { workspace = true }
 winresource = { workspace = true }
