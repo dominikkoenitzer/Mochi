@@ -2466,6 +2466,8 @@ fn a_long_session_of_every_command_never_loses_a_window() {
 
 #[path = "e2e_testbed/borders.rs"]
 mod borders;
+#[path = "e2e_testbed/elevated.rs"]
+mod elevated;
 
 #[cfg(test)]
 mod pure {
