@@ -297,6 +297,19 @@ impl Bindings {
     pub fn iter(&self) -> impl Iterator<Item = &Binding> {
         self.table.iter()
     }
+
+    /// Every binding that is live while `mode` is active, in file order.
+    ///
+    /// The same set [`Bindings::get_in`] looks in, so a caller that claims
+    /// these keys ahead of time claims exactly the keys a press in that mode
+    /// can match. A [`ModeId`] from another set of bindings yields nothing.
+    pub fn iter_in(&self, mode: ModeId) -> impl Iterator<Item = &Binding> {
+        let table = match mode.index() {
+            None => Some(&self.table),
+            Some(index) => self.modes.get(index).map(|mode| &mode.table),
+        };
+        table.into_iter().flat_map(Table::iter)
+    }
 }
 
 /// Where the lines being read are going.

@@ -26,26 +26,56 @@
 //! `crates/mochi/tests/e2e_testbed.rs`: every `alt + key` binding used to leave
 //! the window sitting in its File menu. A swallowed press under Alt or Win now
 //! injects one masking keystroke, so the modifier is no longer a bare press.
+//!
+//! **Claim the keys from Windows too.** Every binding live in the active mode is
+//! also registered with `RegisterHotKey`. That makes a combination another
+//! program already holds visible: the registration fails and the log names it.
+//! It is also a second listener for a press the hook did not see, which goes
+//! through the same matching. The hook stays first in line: a press it sees, it
+//! swallows, and Windows never gets to match the registration, so nothing fires
+//! twice and the path every other press takes is the same instructions it
+//! always was.
+//!
+//! It does **not** make a binding fire over an elevated window. Windows calls
+//! neither the hook nor the registration of a process that is not elevated
+//! while an elevated window is in front: `tests/e2e_hotkey_paths.rs` measures
+//! that with no Mochi involved (a medium process hears F13 through both over
+//! its own window, through neither over an elevated one) and holds Mochi to the
+//! same answer. Only a Mochi that is itself elevated hears those presses.
+//!
+//! Three kinds of binding stay with the hook alone, and `hook_only` is the
+//! one place that decides them:
+//!
+//! - `ctrl + alt` chords. Windows reports AltGr as Ctrl+Alt to a registration,
+//!   so registering one would fire it every time AltGr types `@` or `{`. The
+//!   hook tells the two apart; a registration cannot.
+//! - F12, which Windows reserves for the debugger at all times.
+//! - A combination another program has already registered. That one is logged
+//!   by name, and the hook still catches it whenever it can see the press.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, anyhow};
 use mochi_hotkey::{Action, Bindings, Key, ModeState, Modifiers, Shell, Trigger};
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_HOTKEY_ALREADY_REGISTERED, HINSTANCE, LPARAM, LRESULT, WPARAM,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LWIN, VK_MENU,
+    GetAsyncKeyState, HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS,
+    KEYBDINPUT, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+    SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LWIN, VK_MENU,
     VK_RCONTROL, VK_RMENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN,
-    WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_HOTKEY,
+    WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use super::{Event, EventSender};
@@ -55,6 +85,34 @@ const HC_ACTION: i32 = 0;
 
 /// Hand the hook thread a new set of bindings. `wparam` is a leaked `Box`.
 const MSG_REPLACE: u32 = WM_APP + 1;
+
+/// Bring the registrations in line with the active mode and the gate.
+///
+/// Posted rather than done on the spot: a mode switch is matched inside the
+/// hook callback, and a callback that called `RegisterHotKey` dozens of times
+/// would be spending the desktop's input time on it.
+const MSG_SYNC: u32 = WM_APP + 2;
+
+/// Which listener caught a press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    /// The keyboard hook, which sees every press it is allowed to and gets the
+    /// first look at it.
+    Hook,
+    /// A `RegisterHotKey` registration: a press the hook did not see. Not one
+    /// over an elevated window, which neither listener hears.
+    Registered,
+}
+
+impl Via {
+    /// A short name for logs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hook => "hook",
+            Self::Registered => "registered",
+        }
+    }
+}
 
 /// Which bindings are live, as a [`Gate`] discriminant.
 ///
@@ -156,6 +214,17 @@ thread_local! {
     /// Sixteen slots is more than a keyboard can report at once. A press that
     /// does not fit is never swallowed: see [`record_press`].
     static PRESSES: RefCell<[(u16, bool); 16]> = const { RefCell::new([(0, false); 16]) };
+    /// The triggers registered with Windows right now, all by this thread.
+    ///
+    /// A registration with no window belongs to the thread that made it and
+    /// posts its `WM_HOTKEY` to that thread's queue, which is why they are
+    /// made, kept and removed here and nowhere else.
+    static REGISTERED: RefCell<HashSet<Trigger>> = RefCell::new(HashSet::new());
+    /// Triggers another program holds that have been logged already, so a
+    /// mode switch does not repeat the warning. Cleared on every reload.
+    static REFUSED: RefCell<HashSet<Trigger>> = RefCell::new(HashSet::new());
+    /// A [`MSG_SYNC`] is in the queue already.
+    static SYNC_POSTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// True while the key is physically down, according to the async key state.
@@ -391,26 +460,52 @@ fn press(vk: u16) -> Option<Modifiers> {
         modifiers: current_modifiers(),
         key: Key::new(vk),
     };
+    fire(trigger, Via::Hook).then_some(trigger.modifiers)
+}
 
+/// The mode the next press is matched in, after whatever the gate has done to
+/// it since the last one.
+///
+/// Game mode and hotkeys off belong to the top level. Whatever mode was active
+/// when either started is over: the one key game mode keeps lives at the top
+/// level, and coming back from either should not land the user in a mode they
+/// entered before it.
+fn settled_mode(gate: Gate) -> ModeState {
+    let mut mode = MODE.get();
+    let changes = GATE_CHANGES.load(Ordering::Relaxed);
+    if gate != Gate::All || changes != MODE_GATE.get() {
+        mode.reset();
+        MODE_GATE.set(changes);
+        MODE.set(mode);
+    }
+    mode
+}
+
+/// Matches one trigger in the active mode and, when it is a binding, hands it
+/// to the loop. Both listeners end here, so they cannot disagree about what a
+/// press means. True when the press was a binding.
+fn fire(trigger: Trigger, via: Via) -> bool {
     let gate = Gate::from_usize(GATE.load(Ordering::Relaxed));
-    let action = BINDINGS.with(|cell| {
+    let (action, switched) = BINDINGS.with(|cell| {
         let bindings = cell.borrow();
-        let mut mode = MODE.get();
-        // Game mode and hotkeys off belong to the top level. Whatever mode
-        // was active when either started is over: the one key game mode keeps
-        // lives at the top level, and coming back from either should not
-        // land the user in a mode they entered before it.
-        let changes = GATE_CHANGES.load(Ordering::Relaxed);
-        if gate != Gate::All || changes != MODE_GATE.get() {
-            mode.reset();
-            MODE_GATE.set(changes);
-        }
+        let mut mode = settled_mode(gate);
+        let before = mode.active();
         let binding = mode.press(&bindings, trigger, |action| gate.admits(action));
         MODE.set(mode);
-        binding.map(|binding| binding.action.clone())
+        (
+            binding.map(|binding| binding.action.clone()),
+            mode.active() != before,
+        )
     });
+    if switched {
+        // A mode lives on different keys. Its registrations follow once this
+        // callback has returned.
+        post_sync(unsafe { GetCurrentThreadId() });
+    }
 
-    let action = action?;
+    let Some(action) = action else {
+        return false;
+    };
 
     SENDER.with(|cell| {
         if let Some(tx) = cell.borrow().as_ref() {
@@ -420,10 +515,187 @@ fn press(vk: u16) -> Option<Modifiers> {
             let _ = tx.send(Event::Hotkey {
                 trigger,
                 action: Box::new(action),
+                via,
             });
         }
     });
-    Some(trigger.modifiers)
+    true
+}
+
+/// `VK_F12`.
+const VK_F12: u16 = 0x7B;
+
+/// Why a trigger is left to the keyboard hook alone, or `None` when it is
+/// registered with Windows as well. See the module documentation.
+fn hook_only(trigger: Trigger) -> Option<&'static str> {
+    let vk = trigger.key.vk();
+    if trigger.modifiers.ctrl && trigger.modifiers.alt {
+        return Some("Windows reports AltGr as ctrl + alt to a registration");
+    }
+    if vk == VK_F12 {
+        return Some("Windows reserves F12 for the debugger");
+    }
+    if vk == 0 || vk > 0xFE || is_modifier(vk) {
+        return Some("not a key RegisterHotKey takes");
+    }
+    None
+}
+
+/// The modifier bits `RegisterHotKey` and `WM_HOTKEY` spell modifiers with.
+fn modifier_bits(modifiers: Modifiers) -> u32 {
+    let mut bits = 0;
+    for (held, flag) in [
+        (modifiers.alt, MOD_ALT),
+        (modifiers.ctrl, MOD_CONTROL),
+        (modifiers.shift, MOD_SHIFT),
+        (modifiers.win, MOD_WIN),
+    ] {
+        if held {
+            bits |= flag.0;
+        }
+    }
+    bits
+}
+
+/// The registration id of a trigger: the trigger itself, packed.
+///
+/// Four modifier bits and an eight bit key fit under the `0xBFFF` an
+/// application may use, so the id needs no table to be read back.
+fn hotkey_id(trigger: Trigger) -> i32 {
+    let bits = modifier_bits(trigger.modifiers) & 0xF;
+    let packed = 0x1000 | (bits << 8) | u32::from(trigger.key.vk() & 0xFF);
+    // At most 0x1FFF, so the conversion cannot fail.
+    i32::try_from(packed).unwrap_or(0x1000)
+}
+
+/// The trigger a registration id was made from.
+fn trigger_of(id: usize) -> Option<Trigger> {
+    if !(0x1000..0x2000).contains(&id) {
+        return None;
+    }
+    let bits = u32::try_from((id >> 8) & 0xF).ok()?;
+    let held = |flag: HOT_KEY_MODIFIERS| bits & flag.0 != 0;
+    Some(Trigger {
+        modifiers: Modifiers::from_flags(
+            held(MOD_ALT),
+            held(MOD_CONTROL),
+            held(MOD_SHIFT),
+            held(MOD_WIN),
+        ),
+        key: Key::new(u16::try_from(id & 0xFF).ok()?),
+    })
+}
+
+/// Asks the hook thread for a [`MSG_SYNC`], once however often it is asked
+/// before it gets to it.
+fn post_sync(thread_id: u32) {
+    if SYNC_POSTED.get() {
+        return;
+    }
+    if unsafe { PostThreadMessageW(thread_id, MSG_SYNC, WPARAM(0), LPARAM(0)) }.is_ok() {
+        SYNC_POSTED.set(true);
+    }
+}
+
+/// Registers exactly the bindings a press could match right now, and lets go
+/// of every other one.
+///
+/// What a press could match is the active mode's bindings that the gate
+/// admits, minus the [`hook_only`] ones. In game mode that is the way out and
+/// nothing else, so the game in front keeps every other key, and with hotkeys
+/// off it is nothing at all. `announce` writes the summary line, for a start
+/// or a reload; a mode switch stays quiet.
+fn sync_registrations(announce: bool) {
+    SYNC_POSTED.set(false);
+    let gate = Gate::from_usize(GATE.load(Ordering::Relaxed));
+    let mut hook_only_count = 0usize;
+    let wanted: HashSet<Trigger> = BINDINGS.with(|cell| {
+        let bindings = cell.borrow();
+        let mode = settled_mode(gate);
+        bindings
+            .iter_in(mode.active())
+            .filter(|binding| gate.admits(&binding.action))
+            .filter(|binding| match hook_only(binding.trigger) {
+                None => true,
+                Some(reason) => {
+                    hook_only_count += 1;
+                    if announce {
+                        tracing::debug!(trigger = %binding.trigger, reason, "hook only");
+                    }
+                    false
+                }
+            })
+            .map(|binding| binding.trigger)
+            .collect()
+    });
+
+    REGISTERED.with(|cell| {
+        let mut held = cell.borrow_mut();
+        held.retain(|trigger| {
+            if wanted.contains(trigger) {
+                return true;
+            }
+            let _ = unsafe { UnregisterHotKey(None, hotkey_id(*trigger)) };
+            false
+        });
+        for &trigger in &wanted {
+            if held.contains(&trigger) {
+                continue;
+            }
+            let registered = unsafe {
+                RegisterHotKey(
+                    None,
+                    hotkey_id(trigger),
+                    HOT_KEY_MODIFIERS(modifier_bits(trigger.modifiers)),
+                    u32::from(trigger.key.vk()),
+                )
+            };
+            match registered {
+                Ok(()) => {
+                    held.insert(trigger);
+                    if REFUSED.with(|refused| refused.borrow_mut().remove(&trigger)) {
+                        tracing::info!(%trigger, "the key combination is free again and registered");
+                    }
+                }
+                Err(e) => {
+                    if !REFUSED.with(|refused| refused.borrow_mut().insert(trigger)) {
+                        continue;
+                    }
+                    if e.code() == ERROR_HOTKEY_ALREADY_REGISTERED.to_hresult() {
+                        tracing::warn!(
+                            %trigger,
+                            "another program has registered this key combination, so only the \
+                             keyboard hook listens for it"
+                        );
+                    } else {
+                        tracing::warn!(
+                            %trigger,
+                            error = %e,
+                            "could not register this key combination, so only the keyboard \
+                             hook listens for it"
+                        );
+                    }
+                }
+            }
+        }
+        if announce {
+            tracing::info!(
+                registered = held.len(),
+                refused = wanted.len() - held.len(),
+                hook_only = hook_only_count,
+                "hotkeys registered with Windows"
+            );
+        }
+    });
+}
+
+/// Lets go of every registration this thread holds.
+fn unregister_all() {
+    REGISTERED.with(|cell| {
+        for trigger in cell.borrow_mut().drain() {
+            let _ = unsafe { UnregisterHotKey(None, hotkey_id(trigger)) };
+        }
+    });
 }
 
 /// The keyboard hook and the thread that pumps it.
@@ -489,10 +761,19 @@ impl HotkeyDaemon {
     /// In force by the time this returns: the hook reads the gate on every key
     /// press, so there is no window in which a key the user just turned off
     /// still acts.
+    ///
+    /// The registrations follow a moment later on the hook thread. Until they
+    /// do, a registered key the gate now turns away is still taken from the
+    /// application in front, but it fires nothing.
     pub fn set_gate(&mut self, gate: Gate) {
         GATE.store(gate.as_usize(), Ordering::Relaxed);
         GATE_CHANGES.fetch_add(1, Ordering::Relaxed);
         tracing::info!(gate = gate.as_str(), "hotkey gate");
+        if let Err(e) =
+            unsafe { PostThreadMessageW(self.thread_id, MSG_SYNC, WPARAM(0), LPARAM(0)) }
+        {
+            tracing::warn!(error = %e, "could not ask the hotkey thread to follow the gate");
+        }
     }
 
     /// Removes the hook and joins the thread.
@@ -540,14 +821,19 @@ fn hotkey_thread(tx: EventSender, bindings: Bindings, ready: Sender<Result<u32, 
         }
     };
 
+    // In force before `start` returns, like the hook.
+    sync_registrations(true);
+
     let thread_id = unsafe { GetCurrentThreadId() };
     if ready.send(Ok(thread_id)).is_err() {
+        unregister_all();
         let _ = unsafe { UnhookWindowsHookEx(hook) };
         return;
     }
 
     let hook = pump(hook, instance.into());
 
+    unregister_all();
     let _ = unsafe { UnhookWindowsHookEx(hook) };
     SENDER.with(|cell| *cell.borrow_mut() = None);
     BINDINGS.with(|cell| *cell.borrow_mut() = Bindings::default());
@@ -593,6 +879,20 @@ fn pump(mut hook: HHOOK, instance: HINSTANCE) -> HHOOK {
                         hook = fresh;
                     }
                     Err(e) => tracing::error!(error = %e, "could not reinstall the keyboard hook"),
+                }
+
+                // A program that held a key may have let go of it since.
+                REFUSED.with(|refused| refused.borrow_mut().clear());
+                sync_registrations(true);
+            }
+            MSG_SYNC => sync_registrations(false),
+            WM_HOTKEY => {
+                // Only a press the hook did not see gets here: one it saw, it
+                // swallowed before Windows could match the registration.
+                if let Some(trigger) = trigger_of(message.wParam.0)
+                    && REGISTERED.with(|cell| cell.borrow().contains(&trigger))
+                {
+                    fire(trigger, Via::Registered);
                 }
             }
             _ => unsafe {
@@ -844,6 +1144,94 @@ mod tests {
         // The key: a modifier is never a trigger, so it is never swallowed.
         assert!(is_modifier(MASK_KEY));
         assert_eq!(MASK_KEY, VK_CONTROL.0);
+    }
+
+    fn trigger(text: &str) -> Trigger {
+        text.parse().expect("the test spells its triggers right")
+    }
+
+    #[test]
+    fn a_registration_id_reads_back_as_the_trigger_it_was_made_from() {
+        // WM_HOTKEY carries only the id, so the id has to be the whole trigger.
+        for text in [
+            "f13",
+            "alt + h",
+            "alt + shift + m",
+            "ctrl + shift + f15",
+            "win + shift + 9",
+            "alt + ctrl + shift + win + space",
+            "pause",
+        ] {
+            let trigger = trigger(text);
+            let id = hotkey_id(trigger);
+            assert!(
+                (0x1000..=0x1FFF).contains(&id),
+                "{text} packed to {id:#x}, outside the application range"
+            );
+            assert_eq!(
+                trigger_of(usize::try_from(id).unwrap()),
+                Some(trigger),
+                "{text} did not survive the round trip"
+            );
+        }
+        // An id this module never made is nobody's press.
+        assert_eq!(trigger_of(0), None);
+        assert_eq!(trigger_of(0x2000), None);
+        assert_eq!(trigger_of(0xBFFF), None);
+    }
+
+    #[test]
+    fn the_modifier_bits_are_the_ones_windows_spells() {
+        assert_eq!(modifier_bits(Modifiers::NONE), 0);
+        assert_eq!(modifier_bits(trigger("alt + a").modifiers), MOD_ALT.0);
+        assert_eq!(
+            modifier_bits(trigger("alt + shift + m").modifiers),
+            MOD_ALT.0 | MOD_SHIFT.0
+        );
+        assert_eq!(
+            modifier_bits(trigger("ctrl + win + a").modifiers),
+            MOD_CONTROL.0 | MOD_WIN.0
+        );
+    }
+
+    #[test]
+    fn only_what_a_registration_cannot_do_is_left_to_the_hook() {
+        // AltGr arrives at a registration as ctrl + alt, so one of those
+        // registered would fire while somebody types @ on a Swiss keyboard.
+        for text in [
+            "ctrl + alt + q",
+            "ctrl + alt + shift + 2",
+            "alt + ctrl + win + e",
+        ] {
+            assert!(hook_only(trigger(text)).is_some(), "{text} was registered");
+        }
+        // F12 is the debugger's under every modifier.
+        for text in ["f12", "alt + f12", "shift + win + f12"] {
+            assert!(hook_only(trigger(text)).is_some(), "{text} was registered");
+        }
+        // Everything else is registered, including keys with no modifier and
+        // chords with Ctrl or Alt alone.
+        for text in [
+            "alt + shift + m",
+            "alt + h",
+            "ctrl + shift + t",
+            "win + 1",
+            "pause",
+            "f13",
+            "alt + return",
+        ] {
+            assert_eq!(
+                hook_only(trigger(text)),
+                None,
+                "{text} was left to the hook"
+            );
+        }
+    }
+
+    #[test]
+    fn both_listeners_report_which_one_heard_the_press() {
+        assert_eq!(Via::Hook.as_str(), "hook");
+        assert_eq!(Via::Registered.as_str(), "registered");
     }
 
     #[test]

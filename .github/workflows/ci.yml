@@ -140,6 +140,24 @@ jobs:
               throw "only $ran end-to-end tests executed; the rest skipped and reported as passed. $(
                   '')Check the runner has an interactive desktop."
           }
+      # A runner is elevated, which is the one thing this test needs: it plays
+      # the administrator window and starts the daemon a level below itself.
+      # MOCHI_E2E_ELEVATED makes a runner that is not elevated a failure here
+      # rather than a silent skip, and the marker line is the proof it ran.
+      - name: Hotkeys over an elevated window
+        shell: pwsh
+        env:
+          MOCHI_E2E: "1"
+          MOCHI_E2E_ELEVATED: "1"
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Continue'
+          $output = cargo test --locked -p mochi --test e2e_hotkey_paths -- --test-threads 1 --nocapture 2>&1 | Out-String
+          Write-Output $output
+          if ($LASTEXITCODE -ne 0) { throw "the elevated hotkey test failed with $LASTEXITCODE" }
+          if ($output -notmatch 'hotkey paths proven: 6 steps passed') {
+              throw 'the elevated hotkey test did not run all of its steps'
+          }
       - name: No test windows left behind
         shell: pwsh
         run: |
@@ -177,6 +195,49 @@ jobs:
           # unnoticed.
           if-no-files-found: warn
           retention-days: 7
+
+  # What the hotkey path costs, for the base of a pull request and for its
+  # head, measured by the same instrument on the same runner. A reading, not a
+  # gate: the numbers are printed for the review, and the job fails only when
+  # the instrument itself breaks.
+  measure:
+    name: hotkey cost, base against head
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 45
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: measure
+      - name: Build both daemons
+        shell: pwsh
+        run: |
+          $base = Join-Path $env:RUNNER_TEMP 'base'
+          git worktree add $base '${{ github.event.pull_request.base.sha }}'
+          cargo build --locked --release -p mochi --manifest-path (Join-Path $base 'Cargo.toml') --target-dir (Join-Path $env:RUNNER_TEMP 'base-target')
+          if ($LASTEXITCODE -ne 0) { throw 'the base daemon did not build' }
+          cargo test --locked --release -p mochi --test e2e_hotkey_paths --no-run
+          if ($LASTEXITCODE -ne 0) { throw 'the head did not build' }
+      - name: Measure
+        shell: pwsh
+        env:
+          MOCHI_E2E: "1"
+          MOCHI_MEASURE: "1"
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $baseExe = Join-Path $env:RUNNER_TEMP 'base-target\release\mochi.exe'
+          # Base, head, base again: whatever the runner is doing meanwhile
+          # lands on both sides instead of on whichever went second.
+          foreach ($run in @('base', 'head', 'base')) {
+              if ($run -eq 'base') { $env:MOCHI_DAEMON_UNDER_TEST = $baseExe } else { Remove-Item Env:MOCHI_DAEMON_UNDER_TEST -ErrorAction SilentlyContinue }
+              $env:MOCHI_DAEMON_LABEL = $run
+              cargo test --locked --release -p mochi --test e2e_hotkey_paths what_each_path_costs -- --exact --nocapture --test-threads 1
+              if ($LASTEXITCODE -ne 0) { throw "the $run measurement failed" }
+          }
 
   # Only on the timer, because this is the job allowed to fail for a reason
   # that is not the code's fault: it compiles against the Rust that is coming

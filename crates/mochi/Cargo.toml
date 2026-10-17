@@ -54,6 +54,8 @@ windows-core = { workspace = true }
 
 [dev-dependencies]
 mochi-testbed = { path = "../mochi-testbed" }
+# QueryProcessCycleTime, for the hotkey path measurement only.
+windows = { workspace = true, features = ["Win32_System_WindowsProgramming"] }
 
 [build-dependencies]
 embed-manifest = { workspace = true }
