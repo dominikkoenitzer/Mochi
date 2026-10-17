@@ -393,12 +393,29 @@ fn wait_for_tiling(windows: &TestWindows, count: usize) -> Result<Vec<Rect>, Str
 // the step log
 // ---------------------------------------------------------------------------
 
+/// A defect this suite catches today, with the branch that fixes it.
+///
+/// A step marked with one is expected to fail. It is reported, and it does not
+/// turn the run red, because the run would then be red for a reason everyone
+/// already knows and nobody would look at it again. It is strict the other
+/// way: once the fix lands and the step passes, the test fails until the mark
+/// comes off, so a fixed defect cannot quietly lose its guard.
+#[derive(Debug, Clone, Copy)]
+struct Known {
+    /// The branch the fix is on.
+    branch: &'static str,
+    /// What goes wrong, in a few words.
+    defect: &'static str,
+}
+
 /// Records the outcome of every step so one run reports on all of them rather
 /// than stopping at the first surprise.
 #[derive(Default)]
 struct Steps {
     passed: Vec<String>,
     failed: Vec<(String, String)>,
+    known: Vec<(String, Known, String)>,
+    fixed: Vec<(String, Known)>,
 }
 
 impl Steps {
@@ -406,40 +423,67 @@ impl Steps {
         match body() {
             Ok(()) => {
                 eprintln!("  ok    {name}");
-                record(name, "pass", "");
+                record(name, "pass", "", None);
                 self.passed.push(name.to_owned());
             }
             Err(e) => {
                 eprintln!("  FAIL  {name}: {e}");
-                record(name, "fail", &e);
+                record(name, "fail", &e, None);
                 self.failed.push((name.to_owned(), e));
+            }
+        }
+    }
+
+    /// A step that fails today because of a known defect.
+    fn known(&mut self, name: &str, known: Known, body: impl FnOnce() -> Result<(), String>) {
+        match body() {
+            Ok(()) => {
+                eprintln!(
+                    "  FIXED {name}: passes now, take the known failure mark ({}) off",
+                    known.branch
+                );
+                record(name, "fixed", "", Some(known));
+                self.fixed.push((name.to_owned(), known));
+            }
+            Err(e) => {
+                eprintln!("  known {name}: {e} (fix on branch {})", known.branch);
+                record(name, "known", &e, Some(known));
+                self.known.push((name.to_owned(), known, e));
             }
         }
     }
 
     fn finish(self, log: &str) {
         eprintln!(
-            "{} steps passed, {} failed",
+            "{} steps passed, {} failed, {} known failures",
             self.passed.len(),
-            self.failed.len()
-        );
-        assert!(
-            self.failed.is_empty(),
-            "{} of {} steps failed against real windows (daemon log: {log})\n{}",
             self.failed.len(),
-            self.passed.len() + self.failed.len(),
-            self.failed
-                .iter()
-                .map(|(n, e)| format!("  {n}: {e}"))
-                .collect::<Vec<_>>()
-                .join("\n")
+            self.known.len()
+        );
+        let mut problems: Vec<String> = self
+            .failed
+            .iter()
+            .map(|(n, e)| format!("  {n}: {e}"))
+            .collect();
+        problems.extend(self.fixed.iter().map(|(n, k)| {
+            format!(
+                "  {n}: passes now; the known failure mark for branch {} ({}) has to come off",
+                k.branch, k.defect
+            )
+        }));
+        assert!(
+            problems.is_empty(),
+            "{} of {} steps went wrong against real windows (daemon log: {log})\n{}",
+            problems.len(),
+            self.passed.len() + self.failed.len() + self.known.len() + self.fixed.len(),
+            problems.join("\n")
         );
     }
 }
 
 /// Appends one step outcome to `results.jsonl` next to the daemon logs, which
 /// CI turns into the pass and fail list of the run.
-fn record(step: &str, outcome: &str, detail: &str) {
+fn record(step: &str, outcome: &str, detail: &str, known: Option<Known>) {
     use std::io::Write;
     let test = std::thread::current()
         .name()
@@ -450,6 +494,8 @@ fn record(step: &str, outcome: &str, detail: &str) {
         "step": step,
         "outcome": outcome,
         "detail": detail,
+        "branch": known.map(|k| k.branch),
+        "defect": known.map(|k| k.defect),
     });
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -2468,6 +2514,8 @@ fn a_long_session_of_every_command_never_loses_a_window() {
 mod borders;
 #[path = "e2e_testbed/elevated.rs"]
 mod elevated;
+#[path = "e2e_testbed/monitors.rs"]
+mod monitors;
 
 #[cfg(test)]
 mod pure {
