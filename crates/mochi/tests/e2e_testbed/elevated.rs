@@ -123,14 +123,15 @@ mod integrity {
 
     /// The integrity level of a token.
     fn of_token(token: HANDLE) -> Option<u32> {
-        let mut buffer = [0u8; 128];
+        // u64s, so the label read out of it is aligned for its pointer.
+        let mut buffer = [0u64; 16];
         let mut length = 0u32;
         unsafe {
             GetTokenInformation(
                 token,
                 TokenIntegrityLevel,
                 Some(buffer.as_mut_ptr().cast::<c_void>()),
-                buffer.len() as u32,
+                size_of_val(&buffer) as u32,
                 &raw mut length,
             )
             .ok()?;
