@@ -31,9 +31,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWLP_USERDATA, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo,
     GetLayeredWindowAttributes, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, MONITORINFOF_PRIMARY,
-    PostMessageW, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, WM_CLOSE,
+    PostMessageW, SW_HIDE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, WM_CLOSE,
 };
 use windows::core::PCWSTR;
 
@@ -589,6 +589,30 @@ pub fn minimize_window(hwnd: i64) -> Result<()> {
     Ok(())
 }
 
+/// Hides a window the way an application hides itself, `ShowWindow(SW_HIDE)`.
+///
+/// # Errors
+/// When the handle is not a window.
+pub fn hide_window(hwnd: i64) -> Result<()> {
+    if !window_exists(hwnd) {
+        return Err(Error::not_found(format!("hwnd 0x{hwnd:x}")));
+    }
+    let _ = unsafe { ShowWindow(as_hwnd(hwnd), SW_HIDE) };
+    Ok(())
+}
+
+/// Shows a hidden window again without activating it.
+///
+/// # Errors
+/// When the handle is not a window.
+pub fn show_window(hwnd: i64) -> Result<()> {
+    if !window_exists(hwnd) {
+        return Err(Error::not_found(format!("hwnd 0x{hwnd:x}")));
+    }
+    let _ = unsafe { ShowWindow(as_hwnd(hwnd), SW_SHOWNA) };
+    Ok(())
+}
+
 /// Restores a minimized or maximized window.
 ///
 /// # Errors
@@ -788,4 +812,76 @@ mod tests {
             assert_eq!(w.class, TEST_WINDOW_CLASS);
         }
     }
+}
+
+/// A top-level window of some other class, as [`windows_of_class`] reports it.
+///
+/// This is how a test looks at what the window manager draws itself, its
+/// border frames above all: they are top-level windows of the daemon's own,
+/// and whether one is still on screen after the window it framed has gone is
+/// the question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassWindow {
+    /// The handle.
+    pub hwnd: i64,
+    /// The process that owns it.
+    pub pid: u32,
+    /// `IsWindowVisible`.
+    pub visible: bool,
+    /// `GetWindowRect`.
+    pub rect: Rect,
+}
+
+/// Every top-level window of `class`, whichever process created it.
+///
+/// # Errors
+/// When `EnumWindows` fails outright.
+pub fn windows_of_class(class: &str) -> Result<Vec<ClassWindow>> {
+    let mut handles: Vec<HWND> = Vec::new();
+    unsafe {
+        EnumWindows(
+            Some(collect_any),
+            LPARAM(std::ptr::from_mut(&mut handles) as isize),
+        )
+        .map_err(|e| Error::win32("EnumWindows", &e))?;
+    }
+    Ok(handles
+        .into_iter()
+        .filter(|&hwnd| unsafe { class_name(hwnd) } == class)
+        .filter_map(|hwnd| {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut pid)) };
+            let mut r = RECT::default();
+            unsafe { GetWindowRect(hwnd, &raw mut r) }.ok()?;
+            Some(ClassWindow {
+                hwnd: as_i64(hwnd),
+                pid,
+                visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
+                rect: Rect::new(r.left, r.top, r.right, r.bottom),
+            })
+        })
+        .collect())
+}
+
+unsafe extern "system" fn collect_any(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+    unsafe {
+        let handles = &mut *(lparam.0 as *mut Vec<HWND>);
+        handles.push(hwnd);
+    }
+    true.into()
+}
+
+/// Posts `WM_DISPLAYCHANGE` to one window, as Windows does to every top-level
+/// window when a monitor is attached, removed or changes mode.
+///
+/// Only that window hears it. A daemon running on simulated monitors re-reads
+/// them on this message, so a test can unplug a screen without touching the
+/// real display configuration of the machine.
+///
+/// # Errors
+/// When the message could not be posted, which means the window is gone.
+pub fn post_display_change(hwnd: i64) -> Result<()> {
+    const WM_DISPLAYCHANGE: u32 = 0x007E;
+    unsafe { PostMessageW(Some(as_hwnd(hwnd)), WM_DISPLAYCHANGE, WPARAM(32), LPARAM(0)) }
+        .map_err(|e| Error::win32("PostMessageW", &e))
 }
