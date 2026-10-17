@@ -62,7 +62,7 @@ anything, and it names the line and the column. Run it after every edit.
 | container | One slot in the layout. It holds one window, or several as a stack. Padding and resizing are about containers, not windows. |
 | workspace | One set of containers on one monitor. Switching workspace takes every window of the old one off screen. Nine per monitor. |
 | stack | Several windows sharing one container, one visible at a time, cycled with a key. |
-| BSP | Binary space partitioning, the default layout: each new window splits the space of the one it lands next to, so windows halve as you add them. |
+| BSP | Binary space partitioning, the default layout: each new window splits the space of the one it lands next to, so windows halve as you add them. The first cut divides the longer side, so on a screen taller than it is wide the first two windows are stacked rather than put side by side. |
 | the ring | The containers of a workspace in creation order. `cycle-focus` steps along it by position, which is what a layout with no obvious left and right needs. |
 | monocle | One window filling the whole workspace, the others still there underneath. |
 | float | A window left at its own size and position, ignored by the layout, drawn above the tiled ones. |
@@ -258,8 +258,9 @@ if that is what you see, pin by rectangle.
 An entry whose display or rectangle is not attached configures nothing at all
 rather than falling back to the screen that happens to be there. That is the
 point: applying a portrait panel's workspaces to a landscape one is the failure
-being prevented, not a lesser outcome. The entry takes effect at the next
-configuration load once its screen is back.
+being prevented, not a lesser outcome. The entry takes effect as soon as its
+screen is back: the screen gets the entry's workspaces, and the entry's
+`workspace_rules` send new windows to it again.
 
 An entry that names neither key keeps the old behaviour and takes the screen at
 its own position, among those no pin has claimed.
@@ -386,7 +387,7 @@ Each entry of `workspaces`:
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `name` | string | index | Workspace name, shown by bars and `mochic state`. |
-| `layout` | layout | `BSP` | Layout this workspace starts with. |
+| `layout` | layout | `BSP`, `Rows` on a portrait screen | Layout this workspace starts with. |
 | `workspace_padding` | integer | `default_workspace_padding` | Gap to the screen edge. |
 | `container_padding` | integer | `default_container_padding` | Gap between containers. |
 | `layout_rules` | object | none | Window count to layout, for example `{"1": "BSP", "3": "VerticalStack"}`. The highest count that is not above the current one wins. |
@@ -450,6 +451,14 @@ conditions like "class equals X and title does not contain Y".
 `UltrawideVerticalStack`, `Grid`.
 
 `mochic cycle-layout next` walks through them in that order.
+
+A workspace whose `layout` the file does not name starts in `BSP` on a
+landscape or square screen and in `Rows` on a screen taller than it is wide.
+`Rows` gives every window the full width and the same height, so two windows on
+a portrait screen split it in half along a horizontal line, and three get a
+third each. A resize moves the line between two rows; once a workspace is down
+to a single window that resize is forgotten, so the next window to open there
+gets its equal share again.
 
 ## Easing styles
 
