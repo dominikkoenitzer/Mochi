@@ -298,6 +298,13 @@ impl Borders {
                 .unwrap_or_else(PoisonError::into_inner)
                 .forget(WindowHandle(key));
             tracing::warn!(target = %WindowHandle(key), %error, "could not draw a border");
+            // And the frame comes down with the record. A failed paint or move
+            // leaves the old frame up, in the old colour and maybe in the old
+            // place, and kept in `active` it outlives its window: the diff no
+            // longer names it, so no later pass takes it down when the window
+            // closes or leaves the layout.
+            self.recycle(window);
+            return;
         }
         if let Some(duplicate) = self.active.insert(key, window) {
             self.recycle(duplicate);
