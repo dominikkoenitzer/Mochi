@@ -144,7 +144,7 @@ jobs:
           # requiring it is the difference between coverage and a badge.
           $ran = ([regex]::Matches($output, 'steps passed')).Count
           Write-Output "tests that really executed: $ran"
-          if ($ran -lt 21) {
+          if ($ran -lt 22) {
               throw "only $ran end-to-end tests executed; the rest skipped and reported as passed. $(
                   '')Check the runner has an interactive desktop."
           }
@@ -180,6 +180,7 @@ jobs:
                       'fail' { '**FAIL**' }
                       'known' { "known failure, fixed on ``$($r.branch)``" }
                       'fixed' { "**passes now**, take the ``$($r.branch)`` mark off" }
+                      'measured' { 'measured' }
                   }
                   $detail = & $cell $r.detail
                   if ($detail.Length -gt 240) { $detail = $detail.Substring(0, 240) + ' ...' }
