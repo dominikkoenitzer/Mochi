@@ -126,11 +126,16 @@ pub(super) fn wait_for_borders(daemon: u32, unframed: &[i64]) -> Result<(), Stri
     borders_match(daemon, &framed())
 }
 
-/// No border sits where `frame` was.
+/// No border is left where `frame` was, unless another window has since moved
+/// into that same tile and the border is its own.
 pub(super) fn no_border_at(daemon: u32, frame: Rect) -> Result<(), String> {
-    wait_for(STEP, || !borders(daemon).iter().any(|b| frames(*b, frame))).map_err(|_| {
+    let orphaned = || {
+        borders(daemon).iter().any(|b| frames(*b, frame))
+            && !shown().iter().any(|w| frames(w.frame, frame))
+    };
+    wait_for(STEP, || !orphaned()).map_err(|_| {
         format!(
-            "a border is still drawn at {frame}, where the window was: {:?}",
+            "a border is still drawn at {frame}, where the window was, and no window is there: {:?}",
             borders(daemon)
         )
     })
