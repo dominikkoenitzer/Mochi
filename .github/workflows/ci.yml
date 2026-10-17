@@ -155,7 +155,7 @@ jobs:
           $output = cargo test --locked -p mochi --test e2e_hotkey_paths -- --test-threads 1 --nocapture 2>&1 | Out-String
           Write-Output $output
           if ($LASTEXITCODE -ne 0) { throw "the elevated hotkey test failed with $LASTEXITCODE" }
-          if ($output -notmatch 'hotkey paths proven: 5 steps passed') {
+          if ($output -notmatch 'hotkey paths proven: 6 steps passed') {
               throw 'the elevated hotkey test did not run all of its steps'
           }
       - name: No test windows left behind
