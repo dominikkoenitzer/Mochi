@@ -457,3 +457,123 @@ fn windows_opened_and_closed_in_quick_succession_leave_nothing_behind() {
     drop(daemon);
     steps.finish(&log);
 }
+
+#[test]
+fn application_windows_leave_no_border_however_they_close() {
+    skip_unless_allowed!("application_windows_leave_no_border_however_they_close");
+    // Taskbar windows, the kind every real application has: the shell cloaks
+    // them, which no tool window can be. Only where nothing else manages the
+    // desktop, as for the cloak test.
+    if !cloak_test_allowed() {
+        eprintln!(
+            "skipping application_windows_leave_no_border_however_they_close: \
+             set MOCHI_E2E_CLOAK=1 on a desktop no other window manager runs on"
+        );
+        return;
+    }
+
+    let config = write_json("mochi-app-borders.json", &rice());
+    let daemon = Daemon::start_with_config("app-borders", &config, &["--no-hotkeys"]);
+    let log = daemon.log();
+    let pid = daemon.child.id();
+    let spawn = |count: u32| {
+        TestWindows::spawn_with(&SpawnOptions {
+            taskbar: true,
+            ..SpawnOptions::new(count, 0)
+        })
+        .expect("could not spawn the test windows")
+    };
+    let stay = spawn(2);
+
+    let mut steps = Steps::default();
+
+    steps.step("two application windows are tiled with borders", || {
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} managed windows", managed_count()))?;
+        wait_for_tiling(&stay, 2)?;
+        wait_for_borders(pid, &[])
+    });
+
+    steps.step(
+        "a window closed while the layout still animates leaves no border",
+        || {
+            let mut quick = spawn(1);
+            // Well inside the 250 ms the animation of the new layout takes.
+            std::thread::sleep(Duration::from_millis(60));
+            quick.close_all().map_err(|e| e.to_string())?;
+            wait_for(STEP, || managed_count() == 2)
+                .map_err(|_| format!("state shows {} windows", managed_count()))?;
+            wait_for_tiling(&stay, 2)?;
+            wait_for_borders(pid, &[])
+        },
+    );
+
+    steps.step("the focused window closed leaves no border", || {
+        let mut focused = spawn(1);
+        let hwnd = focused.handles()[0];
+        wait_for(STEP, || managed_count() == 3).map_err(|e| e.to_string())?;
+        mochi_testbed::focus_window(hwnd).map_err(|e| e.to_string())?;
+        wait_for(STEP, || focused_window() == Some(hwnd))
+            .map_err(|_| "the new window never took the focus".to_owned())?;
+        wait_until_still(&stay);
+        focused.close_all().map_err(|e| e.to_string())?;
+        wait_for(STEP, || managed_count() == 2)
+            .map_err(|_| format!("state shows {} windows", managed_count()))?;
+        wait_for_tiling(&stay, 2)?;
+        wait_for_borders(pid, &[])
+    });
+
+    steps.step(
+        "a window closed on a hidden workspace leaves no border on return",
+        || {
+            let mut away = spawn(1);
+            let hwnd = away.handles()[0];
+            wait_for(STEP, || managed_count() == 3).map_err(|e| e.to_string())?;
+            mochi_testbed::focus_window(hwnd).map_err(|e| e.to_string())?;
+            wait_for(STEP, || focused_window() == Some(hwnd)).map_err(|e| e.to_string())?;
+            command(&Command::MoveToWorkspace { index: 1 })?;
+            command(&Command::FocusWorkspace { index: 1 })?;
+            wait_for(STEP, || {
+                mochi_testbed::window_info(hwnd).is_ok_and(|w| w.visible && !w.cloaked)
+            })
+            .map_err(|_| "the moved window never showed on workspace 1".to_owned())?;
+            command(&Command::FocusWorkspace { index: 0 })?;
+            wait_for_tiling(&stay, 2)?;
+            away.close_all().map_err(|e| e.to_string())?;
+            wait_for(STEP, || managed_count() == 2)
+                .map_err(|_| format!("state shows {} windows", managed_count()))?;
+            command(&Command::FocusWorkspace { index: 1 })?;
+            std::thread::sleep(Duration::from_millis(400));
+            let empty = borders_match(pid, &shown());
+            command(&Command::FocusWorkspace { index: 0 })?;
+            empty?;
+            wait_for_tiling(&stay, 2)?;
+            wait_for_borders(pid, &[])
+        },
+    );
+
+    steps.step(
+        "a focused window whose process is killed leaves no border",
+        || {
+            let mut victim = Foreign::spawn("Victim")?;
+            wait_for(Duration::from_secs(10), || managed_count() == 3)
+                .map_err(|_| format!("state shows {} windows", managed_count()))?;
+            mochi_testbed::focus_window(victim.hwnd).map_err(|e| e.to_string())?;
+            wait_for(STEP, || focused_window() == Some(victim.hwnd))
+                .map_err(|_| "the window to kill never took the focus".to_owned())?;
+            wait_until_still(&stay);
+            let frame = mochi_testbed::frame_bounds(victim.hwnd).map_err(|e| e.to_string())?;
+            victim.kill();
+            mochi_testbed::wait_until_gone(&[victim.hwnd], STEP).map_err(|e| e.to_string())?;
+            wait_for(STEP, || managed_count() == 2)
+                .map_err(|_| format!("state still shows {} windows", managed_count()))?;
+            no_border_at(pid, frame)?;
+            wait_for_tiling(&stay, 2)?;
+            wait_for_borders(pid, &[])
+        },
+    );
+
+    drop(stay);
+    drop(daemon);
+    steps.finish(&log);
+}
