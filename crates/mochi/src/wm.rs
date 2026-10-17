@@ -1930,7 +1930,11 @@ impl WindowManager {
                 }
                 Flow::Continue
             }
-            Event::Hotkey { trigger, action } => self.on_hotkey(trigger, *action),
+            Event::Hotkey {
+                trigger,
+                action,
+                via,
+            } => self.on_hotkey(trigger, *action, via),
             Event::Command { command, reply } => {
                 let name = command.name();
                 let (response, flow) = self.handle_command(*command);
@@ -1962,27 +1966,34 @@ impl WindowManager {
     /// The press never reached the desktop, so a command that fails has to say
     /// so in the log: there is no shell to print an error to and no window that
     /// saw the key.
-    fn on_hotkey(&mut self, trigger: mochi_hotkey::Trigger, action: mochi_hotkey::Action) -> Flow {
+    fn on_hotkey(
+        &mut self,
+        trigger: mochi_hotkey::Trigger,
+        action: mochi_hotkey::Action,
+        via: crate::events::hotkey::Via,
+    ) -> Flow {
+        let via = via.as_str();
         match action {
             mochi_hotkey::Action::Command(command) => {
                 let name = command.name();
                 let (response, flow) = self.handle_command(command);
                 match response.error_message() {
                     Some(message) => {
-                        tracing::warn!(%trigger, command = name, message, "hotkey was refused");
+                        tracing::warn!(%trigger, command = name, via, message, "hotkey was refused");
                     }
-                    None => tracing::info!(%trigger, command = name, "hotkey"),
+                    None => tracing::info!(%trigger, command = name, via, "hotkey"),
                 }
                 flow
             }
             mochi_hotkey::Action::Shell { shell, line } => {
+                tracing::debug!(%trigger, via, "hotkey runs a shell line");
                 crate::events::hotkey::run_shell(shell, &line);
                 Flow::Continue
             }
             // The hook thread owns the active mode and switched it on the
             // press; this is the record of it in the log.
             mochi_hotkey::Action::Mode(mode) => {
-                tracing::info!(%trigger, mode, "hotkey mode");
+                tracing::info!(%trigger, mode, via, "hotkey mode");
                 Flow::Continue
             }
         }
