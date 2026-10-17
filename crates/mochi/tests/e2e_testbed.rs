@@ -2458,6 +2458,15 @@ fn a_long_session_of_every_command_never_loses_a_window() {
 // the pure helpers, which run everywhere
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// the cases from a real desk, one module each: borders and the windows that
+// take them away, a window that outranks the daemon, and a portrait screen
+// beside a landscape one with monitors coming and going
+// ---------------------------------------------------------------------------
+
+#[path = "e2e_testbed/borders.rs"]
+mod borders;
+
 #[cfg(test)]
 mod pure {
     use super::*;
