@@ -406,3 +406,43 @@ unsafe extern "system" fn border_wndproc(
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::Graphics::Direct2D::D2D1_FACTORY_TYPE_SINGLE_THREADED;
+    use windows::Win32::Graphics::Direct2D::D2D1CreateFactory;
+
+    use super::*;
+
+    fn frame() -> BorderWindow {
+        // SAFETY: a single threaded factory, used only on this test's thread,
+        // which is also the thread the window is created and destroyed on.
+        let factory: ID2D1Factory =
+            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }
+                .expect("a Direct2D factory");
+        BorderWindow::new(&factory, BorderConfig::default()).expect("a border window")
+    }
+
+    /// A spare comes back hidden and still painted for its last frame, so a
+    /// target of the same size takes the move path in `track`, and the
+    /// restack after it is the call an elevated target refuses. Whatever the
+    /// move did is then all that is on screen, and `hide` only takes down
+    /// what `visible` says is up.
+    #[test]
+    fn a_move_leaves_a_hidden_frame_hidden() {
+        let mut frame = frame();
+        frame
+            .move_to(Rect::new(0, 0, 64, 64))
+            .expect("a move of our own window");
+        assert!(
+            !is_window_visible(frame.hwnd),
+            "the move put the frame on screen before the restack said it may sit next to its target"
+        );
+
+        frame.hide();
+        assert!(
+            !is_window_visible(frame.hwnd),
+            "a frame that was refused its target stayed on screen"
+        );
+    }
+}
