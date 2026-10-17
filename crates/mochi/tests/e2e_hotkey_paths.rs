@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 
 use mochi_client::{Command, QueryTarget, Response, send};
 use mochi_testbed::TestWindows;
-use windows::Win32::Foundation::{CloseHandle, FILETIME, GENERIC_WRITE, HANDLE, HWND};
+use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE, HANDLE, HWND};
 use windows::Win32::Security::{
     DuplicateTokenEx, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, PSID,
     SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES, SecurityImpersonation, SetTokenInformation,
@@ -50,10 +50,11 @@ use windows::Win32::Storage::FileSystem::{
     CREATE_ALWAYS, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CreateProcessAsUserW, GetCurrentProcess, GetProcessTimes, OpenProcess,
-    OpenProcessToken, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESTDHANDLES,
-    STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CreateProcessAsUserW, GetCurrentProcess, OpenProcess, OpenProcessToken,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
+    TerminateProcess, WaitForSingleObject,
 };
+use windows::Win32::System::WindowsProgramming::QueryProcessCycleTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_KEYUP, RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY,
@@ -293,24 +294,15 @@ impl Daemon {
             .count()
     }
 
-    /// User plus kernel time the daemon has used so far.
-    fn cpu(&self) -> Duration {
-        let mut created = FILETIME::default();
-        let mut exited = FILETIME::default();
-        let mut kernel = FILETIME::default();
-        let mut user = FILETIME::default();
-        unsafe {
-            GetProcessTimes(
-                self.handle(),
-                &raw mut created,
-                &raw mut exited,
-                &raw mut kernel,
-                &raw mut user,
-            )
-        }
-        .expect("GetProcessTimes failed");
-        let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
-        Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+    /// CPU cycles the daemon has used so far, every thread, user and kernel.
+    ///
+    /// Cycles rather than `GetProcessTimes`, which only moves in whole timer
+    /// ticks of 15.6 ms and reads one press as either nothing or a tick.
+    fn cycles(&self) -> u64 {
+        let mut cycles = 0u64;
+        unsafe { QueryProcessCycleTime(self.handle(), &raw mut cycles) }
+            .expect("QueryProcessCycleTime failed");
+        cycles
     }
 
     fn stop(&mut self) {
@@ -730,41 +722,38 @@ const UNBOUND_PRESSES: usize = 400;
 fn measure_cpu(daemon: &Daemon, label: &str, bound: u16) {
     // Idle: nothing pressed, nothing asked, for half a minute.
     std::thread::sleep(Duration::from_secs(3));
-    let before = daemon.cpu();
+    let before = daemon.cycles();
     std::thread::sleep(IDLE);
-    let idle = daemon.cpu() - before;
+    let idle = daemon.cycles() - before;
     eprintln!(
-        "  {label}: idle CPU {:.3} ms over {}s ({:.4} %)",
-        idle.as_secs_f64() * 1000.0,
-        IDLE.as_secs(),
-        idle.as_secs_f64() / IDLE.as_secs_f64() * 100.0
+        "  {label}: idle {:.3} Mcycles over {}s",
+        idle as f64 / 1e6,
+        IDLE.as_secs()
     );
 
     // A key nobody bound, which is what nearly every press on a desktop is.
-    let before = daemon.cpu();
+    let before = daemon.cycles();
     for _ in 0..UNBOUND_PRESSES {
         press(keys::F16);
     }
     std::thread::sleep(Duration::from_millis(500));
-    let unbound = daemon.cpu() - before;
+    let unbound = daemon.cycles() - before;
     eprintln!(
-        "  {label}: {UNBOUND_PRESSES} unbound presses cost the daemon {:.3} ms ({:.2} us each)",
-        unbound.as_secs_f64() * 1000.0,
-        unbound.as_secs_f64() * 1e6 / UNBOUND_PRESSES as f64
+        "  {label}: an unbound press costs the daemon {:.1} kcycles ({UNBOUND_PRESSES} presses)",
+        unbound as f64 / 1e3 / UNBOUND_PRESSES as f64
     );
 
     // A bound key, carried out, with nobody polling the daemon meanwhile.
-    let before = daemon.cpu();
+    let before = daemon.cycles();
     for _ in 0..SAMPLES {
         press(bound);
         std::thread::sleep(Duration::from_millis(25));
     }
     std::thread::sleep(Duration::from_millis(500));
-    let fired = daemon.cpu() - before;
+    let fired = daemon.cycles() - before;
     eprintln!(
-        "  {label}: {SAMPLES} bound presses cost the daemon {:.3} ms ({:.1} us each, command included)",
-        fired.as_secs_f64() * 1000.0,
-        fired.as_secs_f64() * 1e6 / SAMPLES as f64
+        "  {label}: a bound press costs the daemon {:.1} kcycles, command included ({SAMPLES} presses)",
+        fired as f64 / 1e3 / SAMPLES as f64
     );
     // An even count of toggles leaves the flag where it was.
     let _ = wait_for(Duration::from_secs(2), || paused() == Some(false));
