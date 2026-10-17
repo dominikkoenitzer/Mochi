@@ -110,6 +110,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e
+      # The window that is killed and the windows at another integrity level
+      # live in mochi-testwin processes of their own, and `cargo test -p mochi`
+      # does not build another package's binaries.
+      - name: Build the test window host
+        run: cargo build --locked -p mochi-testbed --bin mochi-testwin
       # These tests start the real daemon against real windows, so they need an
       # interactive window station. They are opt-in through MOCHI_E2E, which
       # means the ordinary test job reports them as passed without running one
@@ -126,9 +131,12 @@ jobs:
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Continue'
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:TEMP 'mochi-e2e/results.jsonl')
           $output = cargo test --locked -p mochi --test e2e_testbed -- --test-threads 1 --nocapture 2>&1 | Out-String
+          $code = $LASTEXITCODE
           Write-Output $output
-          if ($LASTEXITCODE -ne 0) { throw "the end-to-end suite failed with $LASTEXITCODE" }
+          $output | Out-File -FilePath e2e-output.txt -Encoding utf8
+          if ($code -ne 0) { throw "the end-to-end suite failed with $code" }
 
           # A test that skips still reports as passed, so a runner without a
           # desktop would turn this job green having run nothing at all. The
@@ -136,10 +144,54 @@ jobs:
           # requiring it is the difference between coverage and a badge.
           $ran = ([regex]::Matches($output, 'steps passed')).Count
           Write-Output "tests that really executed: $ran"
-          if ($ran -lt 9) {
+          if ($ran -lt 23) {
               throw "only $ran end-to-end tests executed; the rest skipped and reported as passed. $(
                   '')Check the runner has an interactive desktop."
           }
+      # One line per step of every test that ran, from the results file the
+      # harness appends to, so a red run says which step went wrong and a green
+      # one still lists the defects it caught on purpose.
+      - name: List what passed and what failed
+        if: always()
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $cell = { param($text) (($text -replace '\|', '/') -replace '\s+', ' ').Trim() }
+          $out = [System.Collections.Generic.List[string]]::new()
+          $out.Add('## End to end')
+          $out.Add('')
+          $out.Add('| Test | Result |')
+          $out.Add('| --- | --- |')
+          $tests = if (Test-Path e2e-output.txt) {
+              [regex]::Matches((Get-Content -Raw e2e-output.txt), '(?m)^test (\S+) \.\.\. (\w+)')
+          } else { @() }
+          foreach ($t in $tests) { $out.Add("| $($t.Groups[1].Value) | $($t.Groups[2].Value) |") }
+          $out.Add('')
+          $out.Add('| Test | Step | Result | Detail |')
+          $out.Add('| --- | --- | --- | --- |')
+          $file = Join-Path $env:TEMP 'mochi-e2e/results.jsonl'
+          $counts = @{ pass = 0; fail = 0; known = 0; fixed = 0 }
+          if (Test-Path $file) {
+              foreach ($line in Get-Content $file) {
+                  $r = $line | ConvertFrom-Json
+                  $counts[$r.outcome]++
+                  $result = switch ($r.outcome) {
+                      'pass' { 'pass' }
+                      'fail' { '**FAIL**' }
+                      'known' { "known failure, fixed on ``$($r.branch)``" }
+                      'fixed' { "**passes now**, take the ``$($r.branch)`` mark off" }
+                      'measured' { 'measured' }
+                  }
+                  $detail = & $cell $r.detail
+                  if ($detail.Length -gt 240) { $detail = $detail.Substring(0, 240) + ' ...' }
+                  if ($r.defect) { $detail = "$(& $cell $r.defect). $detail" }
+                  $out.Add("| $($r.test) | $(& $cell $r.step) | $result | $detail |")
+              }
+          }
+          $out.Insert(1, '')
+          $out.Insert(2, "$($counts.pass) steps passed, $($counts.fail) failed, $($counts.known) known failures, $($counts.fixed) fixed and still marked.")
+          $out | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          $out | Write-Output
       - name: No test windows left behind
         shell: pwsh
         run: |

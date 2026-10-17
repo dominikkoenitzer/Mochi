@@ -95,7 +95,7 @@ fn main() -> Result<()> {
     tracing::info!(config = %config_path.display(), exists = config_path.exists(), "configuration");
 
     let (tx, rx) = std::sync::mpsc::channel::<Event>();
-    let platform = platform::new(args.dry_run);
+    let platform = platform::new(args.dry_run, args.simulate_monitors.as_deref())?;
     let mut session = state::State::new(config_path.clone(), args.dry_run);
     session.manage_classes.clone_from(&args.manage_class);
     if !session.manage_classes.is_empty() {

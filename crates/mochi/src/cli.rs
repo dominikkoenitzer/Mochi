@@ -51,6 +51,17 @@ pub struct Args {
     /// tool window rejection is the only manageability rule it overrides.
     #[arg(long, value_name = "CLASS")]
     pub manage_class: Vec<String>,
+
+    /// Take the monitors from this JSON file instead of from Windows.
+    ///
+    /// The second testbed switch, for a machine with fewer displays than the
+    /// case under test: a CI runner has one, and a portrait screen beside a
+    /// landscape one is what needs proving. Windows are still real and are
+    /// tiled into the rectangles the file lists. The file is read again on
+    /// every display change, so rewriting it and sending `WM_DISPLAYCHANGE`
+    /// simulates a monitor coming and going.
+    #[arg(long, value_name = "PATH")]
+    pub simulate_monitors: Option<PathBuf>,
 }
 
 impl Args {
