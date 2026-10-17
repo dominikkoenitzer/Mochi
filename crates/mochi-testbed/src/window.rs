@@ -72,6 +72,10 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// asks for an application that does fight back.
 const DEFAULT_MIN_SIZE: (i32, i32) = (120, 80);
 
+/// The largest size a test window accepts, in physical pixels, on either axis.
+/// Larger than any monitor, real or simulated.
+const MAX_TRACK_SIZE: i32 = 16_384;
+
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(((b as u32) << 16) | ((g as u32) << 8) | (r as u32))
 }
@@ -819,6 +823,16 @@ unsafe extern "system" fn window_proc(
                         .filter(|state| state.enforce_min)
                         .map_or((0, 0), |state| state.min_size);
                     (*info).ptMinTrackSize = POINT { x, y };
+                    // And as large as it likes. `DefWindowProc` caps the track
+                    // size at the virtual screen, which on a one display CI
+                    // runner is smaller than the monitors a simulated layout
+                    // tiles into: a 1080x1920 portrait tile would come back cut
+                    // to the runner's height, and the test would be measuring
+                    // the cap.
+                    (*info).ptMaxTrackSize = POINT {
+                        x: MAX_TRACK_SIZE,
+                        y: MAX_TRACK_SIZE,
+                    };
                 }
                 result
             }
