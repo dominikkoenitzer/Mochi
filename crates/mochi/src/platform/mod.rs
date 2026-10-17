@@ -14,10 +14,12 @@ pub mod wide;
 
 mod appview;
 mod dry_run;
+mod simulated;
 mod win32;
 
 pub use appview::disconnect as disconnect_shell;
 pub use dry_run::DryRunPlatform;
+pub use simulated::SimulatedMonitors;
 pub use types::{
     FRAME_HOST, Hwnd, MonitorInfo, Unmanageable, WindowInfo, WindowShape, is_frame_host,
     is_fullscreen, is_manageable, is_manageable_with,
@@ -247,11 +249,23 @@ pub trait Platform: Send + Sync {
 /// Builds the platform the daemon should use.
 ///
 /// With `dry_run` the reads are still real; only the writes become log lines.
-/// The result is shared with the mouse tracker, hence the `Arc`.
-pub fn new(dry_run: bool) -> std::sync::Arc<dyn Platform> {
-    if dry_run {
+/// With `simulated_monitors` the monitors are read from that file and
+/// everything else stays real. The result is shared with the mouse tracker,
+/// hence the `Arc`.
+///
+/// # Errors
+/// When the simulated monitors cannot be read.
+pub fn new(
+    dry_run: bool,
+    simulated_monitors: Option<&std::path::Path>,
+) -> Result<std::sync::Arc<dyn Platform>> {
+    let platform: std::sync::Arc<dyn Platform> = if dry_run {
         std::sync::Arc::new(DryRunPlatform::new(Win32Platform::new()))
     } else {
         std::sync::Arc::new(Win32Platform::new())
-    }
+    };
+    Ok(match simulated_monitors {
+        Some(path) => std::sync::Arc::new(SimulatedMonitors::new(platform, path)?),
+        None => platform,
+    })
 }
