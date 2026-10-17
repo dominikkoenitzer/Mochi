@@ -144,7 +144,7 @@ jobs:
           # requiring it is the difference between coverage and a badge.
           $ran = ([regex]::Matches($output, 'steps passed')).Count
           Write-Output "tests that really executed: $ran"
-          if ($ran -lt 22) {
+          if ($ran -lt 23) {
               throw "only $ran end-to-end tests executed; the rest skipped and reported as passed. $(
                   '')Check the runner has an interactive desktop."
           }
