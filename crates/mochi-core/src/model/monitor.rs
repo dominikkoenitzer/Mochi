@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Offset, Rect};
+use crate::layout::Layout;
 
 use super::ring::Ring;
 use super::window::WindowId;
@@ -87,16 +88,17 @@ impl Default for Monitor {
 }
 
 impl Monitor {
-    /// A monitor with one empty workspace.
+    /// A monitor with one empty workspace in the layout that suits its shape.
     #[must_use]
     pub fn new(id: isize, size: Rect, work_area: Rect) -> Self {
-        Self {
+        let mut monitor = Self {
             id,
             size,
             work_area,
-            workspaces: Ring::from_vec(vec![Workspace::new()]),
             ..Self::default()
-        }
+        };
+        monitor.workspaces = Ring::from_vec(vec![monitor.new_workspace()]);
+        monitor
     }
 
     /// Sets the friendly name, builder style.
@@ -142,6 +144,29 @@ impl Monitor {
         self.size.height() > self.size.width()
     }
 
+    /// The layout a workspace created on this display starts with, until a
+    /// configuration or a command names another.
+    ///
+    /// Rows on a portrait display: every window a full width row and every
+    /// row the same height, so two windows split the screen in half along a
+    /// horizontal line. The BSP default would cut a tall, narrow screen into
+    /// columns that most applications refuse to shrink into.
+    #[must_use]
+    pub fn default_layout(&self) -> Layout {
+        if self.is_portrait() {
+            Layout::Rows
+        } else {
+            Layout::default()
+        }
+    }
+
+    /// An empty workspace in [`Monitor::default_layout`].
+    fn new_workspace(&self) -> Workspace {
+        let mut workspace = Workspace::new();
+        workspace.layout = self.default_layout();
+        workspace
+    }
+
     /// The workspaces on this monitor.
     #[must_use]
     pub fn workspaces(&self) -> &Ring<Workspace> {
@@ -185,13 +210,14 @@ impl Monitor {
     }
 
     /// Makes sure there are at least `count` workspaces, creating empty ones
-    /// with numeric names as needed.
+    /// with numeric names as needed, each in [`Monitor::default_layout`].
     ///
     /// Returns the number that were created.
     pub fn ensure_workspaces(&mut self, count: usize) -> usize {
         let mut created = 0;
         while self.workspaces.len() < count {
-            self.workspaces.push(Workspace::new());
+            let workspace = self.new_workspace();
+            self.workspaces.push(workspace);
             created += 1;
         }
         created
@@ -260,6 +286,27 @@ mod tests {
             .with_dpi(144);
         m.ensure_workspaces(9);
         m
+    }
+
+    #[test]
+    fn a_portrait_monitor_starts_its_workspaces_in_rows() {
+        let size = Rect::new(3840, 120, 4920, 2040);
+        let mut m = Monitor::new(2, size, size);
+        assert!(m.is_portrait());
+        m.ensure_workspaces(9);
+        assert!(m.workspaces().iter().all(|w| w.layout == Layout::Rows));
+    }
+
+    #[test]
+    fn a_landscape_or_square_monitor_starts_its_workspaces_in_bsp() {
+        for size in [SIZE, Rect::new(0, 0, 1200, 1200)] {
+            let mut m = Monitor::new(1, size, size);
+            m.ensure_workspaces(3);
+            assert!(
+                m.workspaces().iter().all(|w| w.layout == Layout::Bsp),
+                "{size:?}"
+            );
+        }
     }
 
     #[test]

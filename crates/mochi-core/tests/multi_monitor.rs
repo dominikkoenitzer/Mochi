@@ -74,12 +74,13 @@ fn focus_right_from_the_rightmost_window_lands_on_the_portrait_monitor() {
     assert!(changes.focused_monitor_changed);
     assert_eq!(state.focused_window_id(), Some(WindowId(51)));
 
-    // Left again walks the portrait monitor first...
-    state.focus_direction(Direction::Left).unwrap();
+    // The portrait monitor stacks its windows in rows, so up walks it...
+    state.focus_direction(Direction::Up).unwrap();
     assert_eq!(state.focused_monitor_idx(), 1);
     assert_eq!(state.focused_window_id(), Some(WindowId(50)));
 
-    // ...and only crosses back from its leftmost window.
+    // ...and left crosses back from any of them, every row being as wide as
+    // the screen.
     let changes = state.focus_direction(Direction::Left).unwrap();
     assert_eq!(state.focused_monitor_idx(), 0);
     assert!(changes.focused_monitor_changed);
@@ -97,14 +98,28 @@ fn focus_up_and_down_inside_the_portrait_monitor() {
     state.focus_monitor(1).unwrap();
     state.focus_window(WindowId(50)).unwrap();
 
-    // BSP on a portrait panel still cuts vertically first, so 50 is on the
-    // left, 51 top right and 52 bottom right.
-    state.focus_direction(Direction::Right).unwrap();
+    // A portrait panel starts its workspaces in rows: 50 on top, 51 in the
+    // middle and 52 at the bottom, each as wide as the screen.
+    assert!(state.focus_direction(Direction::Right).unwrap().is_empty());
+    state.focus_direction(Direction::Down).unwrap();
     assert_eq!(state.focused_window_id(), Some(WindowId(51)));
     state.focus_direction(Direction::Down).unwrap();
     assert_eq!(state.focused_window_id(), Some(WindowId(52)));
     state.focus_direction(Direction::Up).unwrap();
     assert_eq!(state.focused_window_id(), Some(WindowId(51)));
+}
+
+#[test]
+fn two_windows_on_the_portrait_monitor_split_it_in_half_along_a_horizontal_line() {
+    let mut state = two_monitors();
+    fill(&mut state, 1, 0, &[50, 51]);
+    state.focus_monitor(1).unwrap();
+    let workspace = state.workspace(1, 0).unwrap();
+    let rows = workspace.latest_tiles();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].width(), rows[1].width());
+    assert_eq!(rows[0].height(), rows[1].height());
+    assert!(rows[0].bottom <= rows[1].top, "{rows:?}");
 }
 
 #[test]
