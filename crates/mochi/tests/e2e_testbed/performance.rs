@@ -11,9 +11,11 @@
 //!   private memory, kernel handles, GDI and USER objects, border windows.
 //!
 //! Animations are off, so the times are the daemon's own and not the length of
-//! an animation. The ceilings sit well above what a runner measures, because a
-//! shared runner is noisy and a check that fails at random gets ignored; they
-//! still sit far below what any real regression costs. Every measurement is
+//! an animation. The ceilings are two to five times what a runner measured on
+//! the debug build (17.10.2026: idle CPU 0.000% of a core, open to tiled 27 ms
+//! median and 29 ms slowest, a retile of six 13 ms and 14 ms, +112 KiB and no
+//! object after a hundred windows): room for a noisy shared runner, and still
+//! well below what a real regression costs. Every measurement is
 //! printed and recorded, so the summary of each run shows the numbers as well
 //! as the verdict.
 
@@ -32,21 +34,21 @@ use super::borders::write_json;
 use super::*;
 
 /// Average CPU of the idle daemon, in percent of one core.
-const IDLE_CPU_PERCENT: f64 = 0.5;
+const IDLE_CPU_PERCENT: f64 = 0.2;
 /// How long the idle daemon is watched.
 const IDLE_WINDOW: Duration = Duration::from_secs(30);
 /// From a window being created to resting in its tile, the median of the samples.
-const OPEN_TO_TILED_MEDIAN: Duration = Duration::from_millis(250);
+const OPEN_TO_TILED_MEDIAN: Duration = Duration::from_millis(60);
 /// The same, the slowest sample.
-const OPEN_TO_TILED_MAX: Duration = Duration::from_millis(600);
+const OPEN_TO_TILED_MAX: Duration = Duration::from_millis(150);
 /// A retile of six windows, the median.
-const RETILE_MEDIAN: Duration = Duration::from_millis(120);
+const RETILE_MEDIAN: Duration = Duration::from_millis(35);
 /// The same, the slowest sample.
-const RETILE_MAX: Duration = Duration::from_millis(400);
+const RETILE_MAX: Duration = Duration::from_millis(100);
 /// What a hundred windows that came and went may leave in private memory.
-const CHURN_MEMORY_BYTES: i64 = 2 * 1024 * 1024;
+const CHURN_MEMORY_BYTES: i64 = 1024 * 1024;
 /// And in kernel handles, GDI objects and USER objects, each.
-const CHURN_OBJECTS: i64 = 16;
+const CHURN_OBJECTS: i64 = 4;
 
 /// How many windows the open sample and the retile sample take.
 const SAMPLES: usize = 12;
