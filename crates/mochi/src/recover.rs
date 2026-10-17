@@ -447,7 +447,7 @@ mod tests {
         std::fs::write(&path, b"{ this is not json").unwrap();
         assert_eq!(load(&path), None);
 
-        let platform = crate::platform::new(true);
+        let platform = crate::platform::new(true, None).expect("a dry-run platform");
         assert!(recover(platform.as_ref(), &path).back.is_empty());
 
         // Kept, under a name of its own. It used to be left exactly where it
@@ -585,7 +585,7 @@ mod tests {
         let path = temp("kept");
         save(&path, &[entry(4242, HidingBehaviour::Cloak)]);
 
-        let platform = crate::platform::new(true);
+        let platform = crate::platform::new(true, None).expect("a dry-run platform");
         assert!(recover(platform.as_ref(), &path).back.is_empty());
         assert_eq!(
             load(&path).unwrap().len(),
@@ -606,7 +606,7 @@ mod tests {
         let path = temp("handover");
         save(&path, &[entry(4242, HidingBehaviour::Cloak)]);
 
-        let platform = crate::platform::new(true);
+        let platform = crate::platform::new(true, None).expect("a dry-run platform");
         let recovered = recover(platform.as_ref(), &path);
         assert!(recovered.back.is_empty());
         assert_eq!(
@@ -635,7 +635,7 @@ mod tests {
         // The dry-run platform cannot read the window, so the uncloak is not
         // even attempted and the whole entry survives; that much the sibling
         // test already covers. What matters here is the shape of what is kept.
-        let platform = crate::platform::new(true);
+        let platform = crate::platform::new(true, None).expect("a dry-run platform");
         let recovered = recover(platform.as_ref(), &path);
         assert_eq!(recovered.unfinished.len(), 1);
         assert!(
