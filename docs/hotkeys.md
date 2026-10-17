@@ -238,25 +238,24 @@ AltGr is not Ctrl+Alt. On a Swiss, German or any other layout where AltGr
 reports itself as right Alt plus left Ctrl, that pair counts as neither, so a
 `ctrl + alt` binding cannot eat `@`, `[`, `]`, `{`, `}` or `|`.
 
-A binding fires over a window running as administrator too. Windows does not
-call the keyboard hook of a program that is not elevated while such a window is
-in front, so Mochi also registers every binding of the active mode with Windows
-(`RegisterHotKey`), and Windows hands those to it whatever is in front. The hook
-still gets the first look at every press it can see, so a press fires once, and
-the path an ordinary press takes is the same as before.
+Windows will not deliver a key press that happened over a window running as
+administrator to a program that is not. Neither the keyboard hook nor a
+registered hotkey hears it: the end to end suite measures this with no Mochi
+involved, and Mochi gives the same answer. That is the same limit that stops
+Mochi managing those windows, and there is no way around it short of running
+Mochi elevated.
 
-Three kinds of binding are left to the hook alone, and so do nothing while an
-elevated window is in front:
+Mochi also registers every binding of the active mode with Windows
+(`RegisterHotKey`). The hook still gets the first look at every press it can
+see, so a press fires once and the path an ordinary press takes is the same as
+before; the registration makes a combination another program already holds
+visible in the log. Three kinds of binding are left to the hook alone:
 
 - `ctrl + alt` chords. Windows reports AltGr as Ctrl+Alt to a registration, so
   registering one would fire it every time AltGr types a character.
 - Anything on `f12`, which Windows reserves for the debugger.
 - A combination another program registered first. The log names it:
   `another program has registered this key combination`.
-
-Over an elevated window the masking Ctrl that keeps an Alt binding from opening
-a menu cannot be sent either, because the same rule refuses Mochi's input
-there. Mochi still does not manage elevated windows.
 
 ## Commands
 
@@ -308,8 +307,8 @@ alt + shift + t : toggle-scratchpad term
   installed keyboard hook first, so between Mochi and another hotkey daemon
   with a hook on the same key, whichever started last wins and the other one
   never sees the press. Stop the old one.
-- An elevated window may be in front, and the binding is one of the three
-  above that only the hook hears. The log line of every press that fired says
+- An elevated window may be in front: nothing of a Mochi that is not elevated
+  hears a press over it. The log line of every press that did fire says
   `via="hook"` or `via="registered"`.
 - Windows drops a hook whose callback is too slow. Mochi's does a hash lookup
   and nothing else, but a machine that was frozen long enough (a debugger on the
