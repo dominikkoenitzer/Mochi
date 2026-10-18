@@ -164,11 +164,11 @@
     "code": "{\n  \"mcpServers\": {\n    \"mochi\": {\n      \"command\": \"C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Programs\\\\Mochi\\\\bin\\\\mochic.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}"
   },
   "new": {
-    "version": "0.1.25",
+    "version": "0.1.26",
     "items": [
-      "A window that cannot shrink below a size of its own gets a tile it fits, instead of spilling over its neighbour.",
-      "Direction keys, drags and resize keys keep working around such a window, and <code>mochic retile</code> asks every window again.",
-      "A window that two quick layouts move away and back stays where the second one put it."
+      "On a screen taller than it is wide, windows stack in rows of equal height, and a window left alone there forgets its old resize.",
+      "Workspace rules for a screen that was switched off apply again as soon as it is back.",
+      "A border leaves with its window, however the window is moved or closed."
     ]
   },
   "requirements": [
