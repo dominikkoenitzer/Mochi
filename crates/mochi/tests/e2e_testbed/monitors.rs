@@ -20,13 +20,6 @@ use super::*;
 /// The class of the daemon's hidden message window, which hears display changes.
 const EVENT_WINDOW_CLASS: &str = "MochiEventWindow";
 
-/// BSP makes its first cut top to bottom whatever the shape of the screen, so
-/// two windows on a portrait one are two tall strips side by side.
-const SIDE_BY_SIDE: Known = Known {
-    branch: "portrait",
-    defect: "BSP splits a portrait screen side by side",
-};
-
 /// The portrait screen of the desk, right of the landscape one, as Windows
 /// reports it there.
 const PORTRAIT: Rect = Rect::new(3840, 120, 4920, 2040);
@@ -331,9 +324,8 @@ fn the_default_layout_stacks_two_windows_on_a_portrait_screen() {
     let mut steps = Steps::default();
     let windows = spawn_on(PORTRAIT, 2);
 
-    steps.known(
+    steps.step(
         "two windows on the portrait screen split it 50/50, stacked",
-        SIDE_BY_SIDE,
         || {
             wait_for(Duration::from_secs(10), || managed_count() == 2)
                 .map_err(|_| format!("state shows {} managed windows", managed_count()))?;
