@@ -401,6 +401,7 @@ fn wait_for_tiling(windows: &TestWindows, count: usize) -> Result<Vec<Rect>, Str
 /// way: once the fix lands and the step passes, the test fails until the mark
 /// comes off, so a fixed defect cannot quietly lose its guard.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code, reason = "kept for the next defect caught before its fix")]
 struct Known {
     /// The branch the fix is on.
     branch: &'static str,
@@ -435,6 +436,7 @@ impl Steps {
     }
 
     /// A step that fails today because of a known defect.
+    #[allow(dead_code, reason = "kept for the next defect caught before its fix")]
     fn known(&mut self, name: &str, known: Known, body: impl FnOnce() -> Result<(), String>) {
         match body() {
             Ok(()) => {
