@@ -356,7 +356,65 @@ fn start(
     if no_hotkeys {
         args.push("--no-hotkeys".to_owned());
     }
-    process::start(&process::System, &args, dry_run)
+    let administrator = (!dry_run && wants_elevation(config))
+        .then(|| administrator_args(config, hotkeys, no_hotkeys));
+    process::start(&process::System, &args, dry_run, administrator.as_deref())
+}
+
+/// Whether the configuration the daemon would load asks for `"elevated": true`.
+///
+/// A file that cannot be read or parsed asks for nothing: the daemon is started
+/// the ordinary way and reports the file itself, as it always has.
+fn wants_elevation(explicit: Option<&Path>) -> bool {
+    let Ok((path, _)) = resolve_config_path(explicit) else {
+        return false;
+    };
+    read_config(&path)
+        .ok()
+        .and_then(|text| Config::from_json(&text).ok())
+        .is_some_and(|config| config.elevated == Some(true))
+}
+
+/// The arguments for a start as administrator.
+///
+/// The elevated process gets its environment from Windows, not from this shell,
+/// and starts in another directory, so a file named by `MOCHI_CONFIG` or
+/// `MOCHI_HOTKEYS`, or by a relative path, would silently be a different file
+/// there. Every file is passed with an absolute path instead.
+fn administrator_args(
+    config: Option<&Path>,
+    hotkeys: Option<&Path>,
+    no_hotkeys: bool,
+) -> Vec<String> {
+    let from_env = |name: &str| {
+        std::env::var_os(name)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let absolute = |path: PathBuf| {
+        std::path::absolute(&path)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    };
+    let mut args = Vec::new();
+    if let Some(path) = config
+        .map(Path::to_path_buf)
+        .or_else(|| from_env("MOCHI_CONFIG"))
+    {
+        args.push("--config".to_owned());
+        args.push(absolute(path));
+    }
+    if no_hotkeys {
+        args.push("--no-hotkeys".to_owned());
+    } else if let Some(path) = hotkeys
+        .map(Path::to_path_buf)
+        .or_else(|| from_env("MOCHI_HOTKEYS"))
+    {
+        args.push("--hotkeys".to_owned());
+        args.push(absolute(path));
+    }
+    args
 }
 
 fn quickstart() -> Result<()> {
@@ -2138,6 +2196,50 @@ mod tests {
         assert!(!looks_like_app_rules(
             r#"{ "ignore_rules": [{ "kind": "Exe", "id": "x.exe" }] }"#
         ));
+    }
+
+    #[test]
+    fn only_a_file_that_says_elevated_true_asks_for_the_prompt() {
+        let dir = std::env::temp_dir().join(format!("mochic-elevated-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        assert!(super::wants_elevation(Some(&file(
+            "on.json",
+            r#"{ "elevated": true }"#
+        ))));
+        assert!(!super::wants_elevation(Some(&file(
+            "off.json",
+            r#"{ "elevated": false }"#
+        ))));
+        assert!(!super::wants_elevation(Some(&file("unset.json", "{}"))));
+        assert!(
+            !super::wants_elevation(Some(&file("broken.json", r#"{ "elevated": tru"#))),
+            "a file the daemon will reject asks for nothing; the daemon reports it as before"
+        );
+        assert!(!super::wants_elevation(Some(&dir.join("missing.json"))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_administrator_start_names_every_file_absolutely() {
+        let args = super::administrator_args(
+            Some(std::path::Path::new("mochi.json")),
+            Some(std::path::Path::new(r"keys\hotkeys")),
+            false,
+        );
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert_eq!(args[0], "--config");
+        assert!(std::path::Path::new(&args[1]).is_absolute(), "{args:?}");
+        assert!(args[1].ends_with("mochi.json"), "{args:?}");
+        assert_eq!(args[2], "--hotkeys");
+        assert!(std::path::Path::new(&args[3]).is_absolute(), "{args:?}");
+
+        let quiet = super::administrator_args(Some(std::path::Path::new(r"C:\m.json")), None, true);
+        assert_eq!(quiet, ["--config", r"C:\m.json", "--no-hotkeys"]);
     }
 
     #[test]

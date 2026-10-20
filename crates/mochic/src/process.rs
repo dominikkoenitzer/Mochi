@@ -66,6 +66,20 @@ pub trait Launch {
     fn daemon(&self, args: &[String]) -> Result<()>;
     /// Runs `mochi` on this console and returns once it has exited.
     fn attached(&self, args: &[String]) -> Result<ExitStatus>;
+    /// True when this process runs with an elevated token.
+    fn is_elevated(&self) -> bool;
+    /// Starts the daemon as administrator through the Windows prompt and waits
+    /// until it answers on its pipe, or reports that the prompt was declined.
+    fn daemon_as_administrator(&self, args: &[String]) -> Result<Administrator>;
+}
+
+/// How a start as administrator ended, short of an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Administrator {
+    /// The prompt was accepted and the daemon answers on its pipe.
+    Started,
+    /// The prompt was declined; nothing was started.
+    Declined,
 }
 
 /// The real processes and the real pipe.
@@ -78,6 +92,14 @@ impl Launch for System {
 
     fn daemon(&self, args: &[String]) -> Result<()> {
         start_daemon(args)
+    }
+
+    fn is_elevated(&self) -> bool {
+        win::is_elevated()
+    }
+
+    fn daemon_as_administrator(&self, args: &[String]) -> Result<Administrator> {
+        start_daemon_as_administrator(args)
     }
 
     fn attached(&self, args: &[String]) -> Result<ExitStatus> {
@@ -106,10 +128,25 @@ impl Launch for System {
 /// ends it, and `start` returns only after it has exited. It also does not
 /// look for a running daemon first, because a dry run is safe beside one.
 ///
+/// `administrator` carries the arguments for a start as administrator when the
+/// configuration asks for one (`"elevated": true`). They differ from `args` in
+/// naming every file with an absolute path, because an elevated process
+/// inherits neither this shell's environment nor its working directory. The
+/// prompt is shown only when this process is not elevated already: an elevated
+/// `mochic` starts the daemon the ordinary way and the daemon inherits its
+/// token. A declined prompt is not an error. Mochi is the user's only window
+/// manager, so it still has to come up, with normal rights, and the watchdog
+/// must not meet a failure it would answer with the next prompt.
+///
 /// # Errors
 ///
 /// When `mochi` cannot be started, or a dry run ends with a failure.
-pub fn start(launch: &impl Launch, args: &[String], dry_run: bool) -> Result<()> {
+pub fn start(
+    launch: &impl Launch,
+    args: &[String],
+    dry_run: bool,
+    administrator: Option<&[String]>,
+) -> Result<()> {
     if dry_run {
         let mut args = args.to_vec();
         args.insert(0, "--dry-run".to_owned());
@@ -122,6 +159,18 @@ pub fn start(launch: &impl Launch, args: &[String], dry_run: bool) -> Result<()>
     if launch.daemon_is_running() {
         println!("mochi is already running");
         return Ok(());
+    }
+    if let Some(administrator) = administrator
+        && !launch.is_elevated()
+    {
+        match launch.daemon_as_administrator(administrator)? {
+            Administrator::Started => return Ok(()),
+            Administrator::Declined => {
+                println!(
+                    "the administrator prompt was declined, starting mochi with normal rights"
+                );
+            }
+        }
     }
     launch.daemon(args)
 }
@@ -146,20 +195,50 @@ fn start_daemon(args: &[String]) -> Result<()> {
     let exe = mochi_executable()?;
     let mut child = spawn_detached(&exe, args)?;
     let pid = child.id();
+    wait_for_pipe(&format!("mochi (pid {pid})"), || {
+        child
+            .try_wait()
+            .with_context(|| format!("could not check on mochi (pid {pid})"))
+            .map(|status| status.map(exit_code))
+    })?;
+    // Printed only now: a line on stdout is what a script reads to decide the
+    // start worked.
+    println!("started {} (pid {pid})", exe.display());
+    Ok(())
+}
 
+/// Starts the daemon as administrator and waits until it answers on its pipe.
+///
+/// The daemon is started through `conhost.exe --headless`, as the Watchdog task
+/// and the Start menu entry start it: `mochi.exe` is a console program, and one
+/// relaunched bare through the prompt gets a terminal window on Windows 11 that
+/// takes the focus from whatever the user was doing. The handle waited on is
+/// conhost's, which lives as long as the daemon it hosts and exits with its
+/// code.
+fn start_daemon_as_administrator(args: &[String]) -> Result<Administrator> {
+    let exe = mochi_executable()?;
+    let Some(process) = win::run_as_administrator(&exe, args)? else {
+        return Ok(Administrator::Declined);
+    };
+    wait_for_pipe("mochi (as administrator)", || {
+        Ok(process.exit_code().map(|code| format!("code {code}")))
+    })?;
+    println!("started {} as administrator", exe.display());
+    Ok(Administrator::Started)
+}
+
+/// Waits until a daemon that was just started answers on the pipe. `exited`
+/// says whether that daemon has already ended, and with which code.
+fn wait_for_pipe(name: &str, mut exited: impl FnMut() -> Result<Option<String>>) -> Result<()> {
     let deadline = std::time::Instant::now() + START_TIMEOUT;
     loop {
         // Asked before the pipe, so a daemon that was refused is reported as
         // the exit it is instead of costing the whole timeout, and instead of
         // being covered up by whichever daemon does hold the pipe.
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("could not check on mochi (pid {pid})"))?
-        {
-            let code = exit_code(status);
+        if let Some(code) = exited()? {
             if mochi_client::is_running() {
                 bail!(
-                    "mochi (pid {pid}) exited with {code}; another mochi already holds {}, so nothing was started here",
+                    "{name} exited with {code}; another mochi already holds {}, so nothing was started here",
                     mochi_client::PIPE_NAME
                 );
             }
@@ -170,15 +249,12 @@ fn start_daemon(args: &[String]) -> Result<()> {
             // and `check` finds exactly that, offline, naming the file, the line
             // and the column.
             bail!(
-                "mochi (pid {pid}) exited with {code} without opening {}.
+                "{name} exited with {code} without opening {}.
 Run `mochic check` to test your configuration, or read the log in %LOCALAPPDATA%\\mochi",
                 mochi_client::PIPE_NAME
             );
         }
         if mochi_client::is_running() {
-            // Printed only now: a line on stdout is what a script reads to
-            // decide the start worked.
-            println!("started {} (pid {pid})", exe.display());
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
@@ -187,11 +263,182 @@ Run `mochic check` to test your configuration, or read the log in %LOCALAPPDATA%
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     bail!(
-        "mochi (pid {pid}) is running but did not open {} within {} seconds.
+        "{name} is running but did not open {} within {} seconds.
 Run `mochic check` to test your configuration, or read the log in %LOCALAPPDATA%\\mochi",
         mochi_client::PIPE_NAME,
         START_TIMEOUT.as_secs()
     )
+}
+
+/// Quotes one argument the way the C runtime splits a command line back into
+/// arguments: the prompt takes all parameters as a single string.
+fn quote_argument(argument: &str) -> String {
+    if !argument.is_empty() && !argument.contains([' ', '\t', '\n', '\u{b}', '"']) {
+        return argument.to_owned();
+    }
+    let mut quoted = String::with_capacity(argument.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0usize;
+    for c in argument.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes));
+                quoted.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+/// The Windows calls behind a start as administrator.
+mod win {
+    use std::ffi::{OsStr, c_void};
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use anyhow::{Context, Result, bail};
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_CANCELLED, HANDLE, STILL_ACTIVE, WAIT_OBJECT_0,
+    };
+    use windows::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
+    use windows::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+    };
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, WaitForSingleObject,
+    };
+    use windows::Win32::UI::Shell::{
+        SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+        ShellExecuteExW,
+    };
+    use windows::core::PCWSTR;
+
+    use super::quote_argument;
+
+    /// Whether this process runs with an elevated token. Asked of the token,
+    /// never guessed from a path or a group membership.
+    pub fn is_elevated() -> bool {
+        // SAFETY: the token handle is opened here, read with a buffer of the
+        // size the call is told, and closed before returning.
+        unsafe {
+            let mut token = HANDLE::default();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token).is_err() {
+                return false;
+            }
+            let mut elevation = TOKEN_ELEVATION::default();
+            let mut length = 0;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                Some((&raw mut elevation).cast::<c_void>()),
+                u32::try_from(size_of::<TOKEN_ELEVATION>()).unwrap_or(u32::MAX),
+                &raw mut length,
+            )
+            .is_ok();
+            let _ = CloseHandle(token);
+            ok && elevation.TokenIsElevated != 0
+        }
+    }
+
+    /// A process started through the prompt. The handle closes with it.
+    pub struct Started(HANDLE);
+
+    impl Started {
+        /// The exit code once the process has ended, `None` while it runs.
+        pub fn exit_code(&self) -> Option<u32> {
+            // SAFETY: the handle is owned by `self` and open until drop.
+            unsafe {
+                if WaitForSingleObject(self.0, 0) != WAIT_OBJECT_0 {
+                    return None;
+                }
+                let mut code = 0u32;
+                if GetExitCodeProcess(self.0, &raw mut code).is_err()
+                    || code == STILL_ACTIVE.0.cast_unsigned()
+                {
+                    return None;
+                }
+                Some(code)
+            }
+        }
+    }
+
+    impl Drop for Started {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from ShellExecuteExW and is closed once.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    fn wide(text: &OsStr) -> Vec<u16> {
+        text.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    /// Shows the administrator prompt for `conhost.exe --headless <exe> <args>`
+    /// and returns the started process, or `None` when the prompt was declined.
+    pub fn run_as_administrator(exe: &Path, args: &[String]) -> Result<Option<Started>> {
+        let system = std::env::var_os("SystemRoot")
+            .filter(|v| !v.is_empty())
+            .context("SystemRoot is not set, so conhost.exe cannot be found")?;
+        let conhost = Path::new(&system).join("System32").join("conhost.exe");
+        let mut parameters = vec![
+            "--headless".to_owned(),
+            quote_argument(&exe.display().to_string()),
+        ];
+        parameters.extend(args.iter().map(|a| quote_argument(a)));
+        let parameters = parameters.join(" ");
+        // An elevated process starts in System32 unless told otherwise. The
+        // files are named absolutely already; this keeps the rest predictable.
+        let directory = std::env::current_dir().ok();
+
+        let verb = wide(OsStr::new("runas"));
+        let file = wide(conhost.as_os_str());
+        let params = wide(OsStr::new(&parameters));
+        let dir = directory.as_deref().map(|d| wide(d.as_os_str()));
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: u32::try_from(size_of::<SHELLEXECUTEINFOW>()).unwrap_or(u32::MAX),
+            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+            lpVerb: PCWSTR(verb.as_ptr()),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(params.as_ptr()),
+            lpDirectory: dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+            nShow: 0,
+            ..Default::default()
+        };
+        // SAFETY: every string the structure points at outlives the call.
+        unsafe {
+            // The shell wants an apartment. A failure only means this thread
+            // has one already, which serves just as well.
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            if let Err(error) = ShellExecuteExW(&raw mut info) {
+                if error.code() == ERROR_CANCELLED.to_hresult() {
+                    return Ok(None);
+                }
+                return Err(error).with_context(|| {
+                    format!("could not start {} as administrator", exe.display())
+                });
+            }
+        }
+        if info.hProcess.is_invalid() {
+            bail!(
+                "the administrator start of {} returned no process to wait for",
+                exe.display()
+            );
+        }
+        Ok(Some(Started(info.hProcess)))
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +461,8 @@ mod tests {
     struct Fake {
         running: bool,
         exit: u32,
+        elevated: bool,
+        prompt: Administrator,
         calls: std::cell::RefCell<Vec<String>>,
     }
 
@@ -222,8 +471,20 @@ mod tests {
             Self {
                 running,
                 exit,
+                elevated: false,
+                prompt: Administrator::Started,
                 calls: std::cell::RefCell::default(),
             }
+        }
+
+        fn elevated(mut self) -> Self {
+            self.elevated = true;
+            self
+        }
+
+        fn declining(mut self) -> Self {
+            self.prompt = Administrator::Declined;
+            self
         }
 
         fn calls(&self) -> Vec<String> {
@@ -244,6 +505,18 @@ mod tests {
             Ok(())
         }
 
+        fn is_elevated(&self) -> bool {
+            self.calls.borrow_mut().push("token".to_owned());
+            self.elevated
+        }
+
+        fn daemon_as_administrator(&self, args: &[String]) -> Result<Administrator> {
+            self.calls
+                .borrow_mut()
+                .push(format!("administrator {}", args.join(" ")));
+            Ok(self.prompt)
+        }
+
         fn attached(&self, args: &[String]) -> Result<ExitStatus> {
             use std::os::windows::process::ExitStatusExt;
             self.calls
@@ -260,7 +533,7 @@ mod tests {
     #[test]
     fn a_dry_run_runs_on_this_console_and_is_waited_for() {
         let fake = Fake::new(false, 0);
-        start(&fake, &args(), true).expect("the dry run should succeed");
+        start(&fake, &args(), true, None).expect("the dry run should succeed");
         assert_eq!(
             fake.calls(),
             [r"attached --dry-run --config D:\mochi.json"],
@@ -271,7 +544,7 @@ mod tests {
     #[test]
     fn a_dry_run_runs_beside_a_running_daemon() {
         let fake = Fake::new(true, 0);
-        start(&fake, &args(), true).expect("the dry run should succeed");
+        start(&fake, &args(), true, None).expect("the dry run should succeed");
         assert_eq!(
             fake.calls(),
             [r"attached --dry-run --config D:\mochi.json"],
@@ -282,7 +555,7 @@ mod tests {
     #[test]
     fn a_dry_run_that_fails_is_reported() {
         let fake = Fake::new(false, 2);
-        let error = start(&fake, &args(), true).expect_err("an exit code 2 is not a success");
+        let error = start(&fake, &args(), true, None).expect_err("an exit code 2 is not a success");
         assert!(error.to_string().contains("code 2"), "{error}");
         assert_eq!(fake.calls().len(), 1);
     }
@@ -290,14 +563,108 @@ mod tests {
     #[test]
     fn a_start_goes_detached_when_no_daemon_runs() {
         let fake = Fake::new(false, 0);
-        start(&fake, &args(), false).expect("the start should succeed");
+        start(&fake, &args(), false, None).expect("the start should succeed");
         assert_eq!(fake.calls(), ["pipe", r"detached --config D:\mochi.json"]);
     }
 
     #[test]
     fn a_start_next_to_a_running_daemon_starts_nothing() {
         let fake = Fake::new(true, 0);
-        start(&fake, &args(), false).expect("already running is not an error");
+        start(&fake, &args(), false, None).expect("already running is not an error");
         assert_eq!(fake.calls(), ["pipe"]);
+    }
+
+    /// What `main` hands over when the file asks for rights: every file named.
+    fn administrator_args() -> Vec<String> {
+        vec![
+            "--config".to_owned(),
+            r"D:\mochi.json".to_owned(),
+            "--hotkeys".to_owned(),
+            r"D:\keys.txt".to_owned(),
+        ]
+    }
+
+    #[test]
+    fn a_file_that_asks_for_rights_starts_the_daemon_through_the_prompt() {
+        let fake = Fake::new(false, 0);
+        start(&fake, &args(), false, Some(&administrator_args()))
+            .expect("the start should succeed");
+        assert_eq!(
+            fake.calls(),
+            [
+                "pipe",
+                "token",
+                r"administrator --config D:\mochi.json --hotkeys D:\keys.txt"
+            ],
+            "the elevated daemon inherits nothing from this shell, so every file is named"
+        );
+    }
+
+    #[test]
+    fn a_declined_prompt_starts_mochi_with_normal_rights() {
+        let fake = Fake::new(false, 0).declining();
+        start(&fake, &args(), false, Some(&administrator_args()))
+            .expect("a declined prompt is not an error");
+        assert_eq!(
+            fake.calls(),
+            [
+                "pipe",
+                "token",
+                r"administrator --config D:\mochi.json --hotkeys D:\keys.txt",
+                r"detached --config D:\mochi.json",
+            ],
+            "the only window manager must still come up, with the ordinary arguments"
+        );
+    }
+
+    #[test]
+    fn an_elevated_mochic_starts_the_daemon_without_a_prompt() {
+        let fake = Fake::new(false, 0).elevated();
+        start(&fake, &args(), false, Some(&administrator_args()))
+            .expect("the start should succeed");
+        assert_eq!(
+            fake.calls(),
+            ["pipe", "token", r"detached --config D:\mochi.json"],
+            "the daemon inherits an elevated token, so a prompt would only ask twice"
+        );
+    }
+
+    #[test]
+    fn a_running_daemon_is_not_started_again_as_administrator() {
+        let fake = Fake::new(true, 0);
+        start(&fake, &args(), false, Some(&administrator_args()))
+            .expect("already running is not an error");
+        assert_eq!(fake.calls(), ["pipe"], "no prompt for a daemon that runs");
+    }
+
+    #[test]
+    fn a_dry_run_never_asks_for_rights() {
+        let fake = Fake::new(false, 0);
+        start(&fake, &args(), true, Some(&administrator_args()))
+            .expect("the dry run should succeed");
+        assert_eq!(fake.calls(), [r"attached --dry-run --config D:\mochi.json"]);
+    }
+
+    #[test]
+    fn arguments_are_quoted_the_way_the_c_runtime_reads_them() {
+        assert_eq!(quote_argument(r"C:\mochi\mochi.exe"), r"C:\mochi\mochi.exe");
+        assert_eq!(
+            quote_argument(r"C:\Program Files\Mochi\mochi.exe"),
+            r#""C:\Program Files\Mochi\mochi.exe""#
+        );
+        assert_eq!(
+            quote_argument(r"D:\my files\"),
+            r#""D:\my files\\""#,
+            "a trailing backslash must not escape the closing quote"
+        );
+        assert_eq!(quote_argument(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(quote_argument(""), r#""""#);
+    }
+
+    #[test]
+    fn the_token_of_this_process_can_be_read() {
+        // CI runs elevated and a desk does not; either way the answer comes
+        // from the token and the call does not fail
+        let _ = win::is_elevated();
     }
 }
