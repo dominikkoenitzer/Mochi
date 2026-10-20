@@ -66,7 +66,14 @@ pub fn default_path() -> PathBuf {
 /// and the windows it should have named stay invisible. `ReplaceFile` semantics
 /// on NTFS make the rename atomic, so the file on disk is always one whole
 /// record, either the old one or the new one.
+///
+/// A Mochi running as administrator writes it with the desktop user's
+/// rights, because it lives in the user's profile.
 pub fn save(path: &Path, entries: &[Entry]) {
+    crate::platform::user::as_user(|| save_as_is(path, entries));
+}
+
+fn save_as_is(path: &Path, entries: &[Entry]) {
     if entries.is_empty() {
         let _ = std::fs::remove_file(path);
         return;

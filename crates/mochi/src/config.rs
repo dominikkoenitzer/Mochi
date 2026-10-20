@@ -180,7 +180,14 @@ pub fn write_default_hotkeys(path: &Path) -> Result<bool> {
 }
 
 /// Creates the parent directory and writes `contents`, never clobbering.
+///
+/// With the desktop user's rights when Mochi runs as administrator: the
+/// file belongs in the user's profile, and to the user.
 fn write_if_absent(path: &Path, contents: &str) -> Result<bool> {
+    crate::platform::user::as_user(|| write_if_absent_as_is(path, contents))
+}
+
+fn write_if_absent_as_is(path: &Path, contents: &str) -> Result<bool> {
     if path.exists() {
         return Ok(false);
     }

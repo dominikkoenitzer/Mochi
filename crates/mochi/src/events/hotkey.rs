@@ -609,11 +609,44 @@ fn pump(mut hook: HHOOK, instance: HINSTANCE) -> HHOOK {
 /// Nothing is waited for and nothing is read back: a hotkey that starts a
 /// program has done its job the moment the program is running. The child is
 /// reaped by the system, not by Mochi.
+///
+/// A Mochi running as administrator starts the command with the desktop
+/// shell's rights, not its own: the hotkey file is the user's to change, and
+/// a binding must not become a way to run a program elevated. With no shell
+/// to take those rights from, it starts nothing.
 pub fn run_shell(shell: Shell, line: &str) {
     use std::os::windows::process::CommandExt;
 
+    use crate::platform::user::{self, Rights};
+
     /// `CREATE_NO_WINDOW`: no console flashes up for a `cmd` or `pwsh` line.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    match user::launch_rights() {
+        Rights::Own => {}
+        Rights::Shell(parent) => {
+            match user::spawn_as_shell(parent, &command_line(shell, line)) {
+                Ok(pid) => tracing::info!(
+                    pid,
+                    shell = %shell,
+                    line,
+                    "hotkey ran a command with the desktop user's rights"
+                ),
+                Err(e) => {
+                    tracing::error!(error = %e, shell = %shell, line, "hotkey command did not start")
+                }
+            }
+            return;
+        }
+        Rights::None => {
+            tracing::error!(
+                shell = %shell,
+                line,
+                "hotkey command not started: mochi runs as administrator and there is no desktop shell to start it with the user's own rights"
+            );
+            return;
+        }
+    }
 
     let mut command = std::process::Command::new(shell.program());
     match shell.raw_tail(line) {
@@ -628,8 +661,39 @@ pub fn run_shell(shell: Shell, line: &str) {
     }
 }
 
+/// The whole command line that makes `shell` run `line`, for a process
+/// started without `std::process::Command`.
+fn command_line(shell: Shell, line: &str) -> String {
+    let tail = shell.raw_tail(line).unwrap_or_else(|| {
+        shell
+            .args_for(line)
+            .iter()
+            .map(|argument| crate::platform::user::quote_argument(argument))
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    format!("{} {tail}", shell.program())
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_command_line_for_the_shell_keeps_the_line_as_typed() {
+        let line = r#"echo ran > "C:\a b\c.txt""#;
+        assert_eq!(
+            super::command_line(super::Shell::Cmd, line),
+            format!("cmd.exe /C {line}")
+        );
+        assert_eq!(
+            super::command_line(super::Shell::Pwsh, "Get-Date"),
+            "pwsh.exe -NoProfile -Command Get-Date"
+        );
+        assert_eq!(
+            super::command_line(super::Shell::Bash, r#"echo "a b""#),
+            r#"bash.exe -c "echo \"a b\"""#
+        );
+    }
 
     #[test]
     fn a_key_whose_release_never_arrived_does_not_hold_its_slot_for_ever() {

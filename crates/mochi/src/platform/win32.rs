@@ -438,7 +438,7 @@ fn window_class(h: HWND) -> String {
 /// normal process is granted both `PROCESS_QUERY_LIMITED_INFORMATION` and
 /// `TOKEN_QUERY` against an elevated one, so a refusal there means something
 /// else and an absence of refusal means nothing at all.
-fn process_is_elevated(pid: u32) -> Option<bool> {
+pub(super) fn process_is_elevated(pid: u32) -> Option<bool> {
     if pid == 0 {
         return None;
     }
@@ -464,7 +464,7 @@ fn process_is_elevated(pid: u32) -> Option<bool> {
 }
 
 /// Whether Mochi itself is elevated. Asked once; it cannot change.
-fn we_are_elevated() -> bool {
+pub(super) fn we_are_elevated() -> bool {
     static ELEVATED: LazyLock<bool> =
         LazyLock::new(|| process_is_elevated(unsafe { GetCurrentProcessId() }).unwrap_or(false));
     *ELEVATED
@@ -897,6 +897,10 @@ impl Platform for Win32Platform {
             return false;
         }
         process_is_elevated(owner_pid(hwnd(h))).unwrap_or(false)
+    }
+
+    fn is_elevated(&self) -> bool {
+        we_are_elevated()
     }
 
     fn is_on_screen(&self, h: Hwnd) -> bool {

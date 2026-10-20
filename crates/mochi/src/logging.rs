@@ -31,14 +31,35 @@ impl LogGuard {
 }
 
 /// `%LOCALAPPDATA%\mochi`, created if it is not there yet.
+///
+/// Created with the desktop user's rights when Mochi runs as administrator,
+/// like every file it writes in there ([`crate::platform::user`]).
 pub fn log_directory() -> Result<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .context("LOCALAPPDATA is not set, so there is nowhere to write logs")?;
     let dir = base.join(LOG_DIR_NAME);
-    std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    crate::platform::user::as_user(|| std::fs::create_dir_all(&dir))
+        .with_context(|| format!("could not create {}", dir.display()))?;
     Ok(dir)
+}
+
+/// A writer that writes with the desktop user's rights.
+///
+/// The rolling appender opens the next day's file and deletes the oldest one
+/// from inside `write`, so every call goes through
+/// [`crate::platform::user::as_user`], not only the first open.
+struct AsUser<W>(W);
+
+impl<W: std::io::Write> std::io::Write for AsUser<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        crate::platform::user::as_user(|| self.0.write(buf))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        crate::platform::user::as_user(|| self.0.flush())
+    }
 }
 
 /// Installs the global subscriber.
@@ -51,13 +72,15 @@ pub fn init() -> Result<LogGuard> {
     // lines that matter after something goes wrong are a rounding error inside
     // it. A fortnight is long enough to explain a problem someone noticed a
     // few days late.
-    let appender = tracing_appender::rolling::Builder::new()
-        .filename_prefix(LOG_FILE_NAME)
-        .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .max_log_files(14)
-        .build(&directory)
-        .with_context(|| format!("could not open a log file in {}", directory.display()))?;
-    let (writer, worker) = tracing_appender::non_blocking(appender);
+    let appender = crate::platform::user::as_user(|| {
+        tracing_appender::rolling::Builder::new()
+            .filename_prefix(LOG_FILE_NAME)
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .max_log_files(14)
+            .build(&directory)
+    })
+    .with_context(|| format!("could not open a log file in {}", directory.display()))?;
+    let (writer, worker) = tracing_appender::non_blocking(AsUser(appender));
 
     let console_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
