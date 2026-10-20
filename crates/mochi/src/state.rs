@@ -158,6 +158,12 @@ pub struct State {
     pub settings: Settings,
     /// Registered subscriber pipe names.
     pub subscribers: Vec<String>,
+    /// Whether the configuration file asks for the daemon to run as
+    /// administrator (`"elevated": true`).
+    pub elevated_configured: bool,
+    /// Whether this process does run as administrator. Fixed at start: the
+    /// file can ask for it live, and only the next `mochic start` can answer.
+    pub elevated: bool,
 }
 
 impl State {
@@ -171,6 +177,8 @@ impl State {
             manage_classes: Vec::new(),
             settings: Settings::default(),
             subscribers: Vec::new(),
+            elevated_configured: false,
+            elevated: false,
         }
     }
 
@@ -223,6 +231,10 @@ pub fn snapshot(
         "focused_workspace": core.focused_indices().map(|(_, w)| w).ok(),
         "focused_window": core.focused_window_id().map(mochi_core::WindowId::get),
         "foreground_window": foreground.map(Hwnd::as_i64),
+        "elevated": {
+            "configured": session.elevated_configured,
+            "running": session.elevated,
+        },
         "window_count": core.all_window_ids().count(),
         "monitors": core
             .monitors()
@@ -496,6 +508,8 @@ mod tests {
         assert_eq!(json["focused_monitor"], 0);
         assert_eq!(json["focused_window"], 0x222);
         assert_eq!(json["foreground_window"], 0x222);
+        assert_eq!(json["elevated"]["configured"], false);
+        assert_eq!(json["elevated"]["running"], false);
 
         let monitor = &json["monitors"][0];
         assert_eq!(monitor["name"], "DISPLAY1");

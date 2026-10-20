@@ -81,6 +81,10 @@ impl<P: Platform> Platform for DryRunPlatform<P> {
         self.inner.outranks_us(hwnd)
     }
 
+    fn is_elevated(&self) -> bool {
+        self.inner.is_elevated()
+    }
+
     fn is_on_screen(&self, hwnd: Hwnd) -> bool {
         // A read, so it passes through: a dry run reports the desktop as it is.
         self.inner.is_on_screen(hwnd)

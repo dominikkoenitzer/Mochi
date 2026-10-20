@@ -1603,13 +1603,22 @@ fn doctor_report(doctor: &serde_json::Value) -> String {
         } else {
             title
         };
-        out.push_str(&format!("  {named}  [{} {}]\n", text("exe"), text("hwnd")));
+        // A finding about the daemon itself names no window.
+        if text("hwnd").is_empty() {
+            out.push_str("  Mochi itself\n");
+        } else {
+            out.push_str(&format!("  {named}  [{} {}]\n", text("exe"), text("hwnd")));
+        }
         out.push_str(&field("", text("detail")));
     }
     // Only where it could help. Telling someone to retile because Windows is
-    // swallowing their key presses is advice that wastes their time and
+    // swallowing their key presses, or because the daemon was started without
+    // the rights the file asks for, is advice that wastes their time and
     // teaches them the command does nothing.
-    if findings.iter().any(|f| f["kind"] != "hotkeys-blocked") {
+    if findings
+        .iter()
+        .any(|f| f["kind"] != "hotkeys-blocked" && f["kind"] != "not-elevated")
+    {
         out.push_str(
             "\nA layout that is merely stale is fixed by `mochic retile`. A finding that\n",
         );
@@ -1714,6 +1723,20 @@ mod tests {
                 "no explanation for the verdict {reason}"
             );
         }
+    }
+
+    #[test]
+    fn a_finding_about_the_daemon_itself_names_no_window_and_no_retile() {
+        let out = super::doctor_report(&serde_json::json!({
+            "managed": 2, "off_screen": 0, "elevated": false,
+            "findings": [{
+                "kind": "not-elevated", "hwnd": "", "title": "", "exe": "",
+                "detail": "mochi.json asks for Mochi to run as administrator",
+            }],
+        }));
+        assert!(out.contains("Mochi itself"), "{out}");
+        assert!(!out.contains("(no title)"), "{out}");
+        assert!(!out.contains("retile"), "{out}");
     }
 
     #[test]
