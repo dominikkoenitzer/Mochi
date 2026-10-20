@@ -11,7 +11,7 @@
 //! opens. So every pipe is created with an explicit descriptor instead:
 //!
 //! ```text
-//! D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;<the SID this process runs as>)
+//! D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;<the SID this process runs as>)S:(ML;;NW;;;ME)
 //! ```
 //!
 //! `D:P` is a protected DACL, so nothing is inherited on top of those three
@@ -21,6 +21,11 @@
 //!
 //! Administrators are on the list because they can take ownership of the object
 //! anyway; leaving them out buys nothing and breaks tooling.
+//!
+//! The medium integrity label is spelled out for a daemon that runs as
+//! administrator. The user's own `mochic` runs at medium integrity, and the
+//! label is what says such a process may write to the pipe; a daemon that
+//! is not elevated gets the same label it would have had anyway.
 
 use std::io;
 
@@ -55,7 +60,7 @@ impl PipeSecurity {
     /// See the module documentation for the exact DACL.
     pub fn current_user_only() -> io::Result<Self> {
         let sddl = format!(
-            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{})",
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{})S:(ML;;NW;;;ME)",
             current_user_sid()?
         );
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
