@@ -145,7 +145,7 @@ If a scheduled watchdog task is registered (`MochiWatchdog`), it starts Mochi ag
 
 - Run `mochic hotkeys`. A typo shows up as a missing binding or a parse error with its line number.
 - A mode may be on. In the shipped resize mode, `esc` leaves.
-- A window that runs as administrator has the focus. Windows does not deliver its key presses to Mochi, which runs as a normal user.
+- A window that runs as administrator has the focus. Windows does not deliver its key presses to Mochi, which runs as a normal user unless `"elevated": true` is set in `mochi.json` and the daemon was started with `mochic start` and the Windows prompt accepted.
 - Another program may hold the same key. Between two keyboard hooks on one key, the one installed last wins.
 - Windows may have dropped the hook after a long freeze. A reload (`mochic reload-configuration`) installs it again.
 - `numpad0` to `numpad9` only fire while NumLock is on. With it off the keys report as `insert`, `end`, arrows and so on.

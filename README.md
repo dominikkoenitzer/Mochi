@@ -257,7 +257,11 @@ in Mochi's state to explain it; the windows of hidden workspaces stay hidden.
 Mochi runs as a normal user and wants no admin rights. Windows therefore will
 not let it move a window that belongs to a program running as administrator. It
 notices, says so once in the log, and leaves that window alone instead of
-tiling around a hole it cannot fill.
+tiling around a hole it cannot fill. To tile those windows too, set
+`"elevated": true` in `mochi.json`: `mochic start` then starts the daemon as
+administrator after the usual Windows prompt, once per start and so at every
+logon. Declining the prompt starts Mochi with normal rights as before. The
+details are under `elevated` in [docs/configuration.md](docs/configuration.md).
 
 When a window is not being tiled and it is not obvious why, ask:
 

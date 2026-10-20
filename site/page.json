@@ -268,7 +268,7 @@
     {
       "q": "A window is not being tiled. Why?",
       "a": [
-        "Run <code>mochic why</code> with that window in front. It says what Mochi makes of the window and what you can do about it. A program running as administrator cannot be moved, because Mochi runs without admin rights."
+        "Run <code>mochic why</code> with that window in front. It says what Mochi makes of the window and what you can do about it. A program running as administrator cannot be moved, because Mochi runs without admin rights. Set <code>\"elevated\": true</code> in <code>mochi.json</code> and start Mochi again to have it ask for those rights once per start and tile such windows too."
       ]
     },
     {

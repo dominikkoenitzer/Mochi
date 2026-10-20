@@ -67,6 +67,7 @@ failure come out as an error document. The top level fields:
 | `rules` | number | Number of window rules loaded, across every rule list. |
 | `subscribers` | array of strings | The pipes that receive notifications. |
 | `fullscreen` | array | One object per fullscreen window: `window` (number, its handle), `monitor` (number, the monitor it holds) and `frozen` (boolean, true while the window is on screen and so holds its monitor). |
+| `elevated` | object | `configured` (boolean, what the `elevated` key in the file says) and `running` (boolean, whether this daemon process runs as administrator). The two differ after the prompt was declined, or when the key was changed while the daemon runs. |
 
 A window handle is a number here, the `HWND` value. `why` and `doctor` write
 handles as hex strings instead.
@@ -266,17 +267,27 @@ A file that cannot be written is an error document with the code `io`.
 |---|---|---|
 | `managed` | number | Number of managed windows. |
 | `off_screen` | number | Number of windows Mochi has taken off screen. |
+| `elevated` | boolean | True when this daemon process runs as administrator. |
 | `findings` | array | One object per finding. Empty when nothing is wrong. |
 
 Each finding:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `kind` | string | `gone`, `unreachable`, `hole`, `stale-record`, `wrong-record`, `cannot-restore` or `hotkeys-blocked`. |
+| `kind` | string | `gone`, `unreachable`, `hole`, `stale-record`, `wrong-record`, `cannot-restore`, `hotkeys-blocked` or `not-elevated`. |
 | `hwnd` | string | The window handle. |
 | `title` | string | The window title. |
 | `exe` | string | The executable name. |
 | `detail` | string | What is wrong, in a sentence. |
+
+`hotkeys-blocked` and the `elevated, out of reach` reason of `why` only occur
+while the daemon is not elevated. `not-elevated` is the other way round: the
+`elevated` key in the file is on and this daemon runs with normal rights, either
+because the prompt was declined or because the key was switched on while the
+daemon was running. It names no window, so `hwnd`, `title` and `exe` are empty
+strings, and `detail` says that windows running as administrator stay out of
+reach until the daemon is stopped and started again with `mochic start` and the
+prompt is accepted.
 
 ### why
 
@@ -323,7 +334,7 @@ and when one does, `why` goes on to `rule` or `unknown`.
 | `too small` | false | It is too small in at least one direction. |
 | `shell class` | false | Its class belongs to the Windows shell. |
 | `shell process` | false | Its process belongs to the Windows shell. |
-| `elevated, out of reach` | false | It runs as administrator and Mochi does not, so Windows refuses every call against it. |
+| `elevated, out of reach` | false | It runs as administrator and Mochi does not (the `elevated` setting is off, or the daemon was started with normal rights anyway), so Windows refuses every call against it. |
 | `always on top` | true | An always-on-top overlay that does not ask for a taskbar button. |
 | `click-through overlay` | true | Mouse input falls straight through it. |
 

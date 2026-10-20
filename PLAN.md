@@ -99,11 +99,14 @@ BSP, Columns, Rows, VerticalStack, HorizontalStack, UltrawideVerticalStack, Grid
 
 ## Known limits
 
-- Elevated windows cannot be managed from a non admin process. One that refuses
+- Elevated windows cannot be managed from a non admin process, which is what
+  the daemon is while the `elevated` key is off (the default). One that refuses
   to move no longer takes the rest of the layout with it: the batch falls back
   to one window at a time and reports only the windows it could not place. The
   same boundary applies to the keyboard: a key pressed over an elevated window
-  is not delivered to a hook in a process that is not.
+  is not delivered to a hook in a process that is not. With the key on,
+  `mochic start` starts the daemon as administrator after the Windows prompt
+  and the limit goes away; declining the prompt leaves it in place.
 - Mixed DPI (4K main plus 1080p portrait) is the primary test bed.
 - UWP windows belong to `ApplicationFrameHost.exe`, which would make every UWP
   app the same program to an `exe` rule. `read_window` walks the host's children

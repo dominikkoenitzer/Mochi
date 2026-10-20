@@ -12,12 +12,12 @@ It ships two programs:
 - `mochi.exe` is the daemon that does the tiling and binds the keys itself.
 - `mochic.exe` is the client. It starts and stops the daemon and sends it commands over a named pipe.
 
-Mochi runs as a normal user and needs no admin rights. Windows does not let it move windows of programs that run as administrator, so it leaves those alone.
+Mochi runs as a normal user and needs no admin rights. Windows does not let it move windows of programs that run as administrator, so it leaves those alone. The opt-in key `"elevated": true` in `mochi.json` changes that: `mochic start` then starts the daemon as administrator after the Windows prompt (once per start, so at every logon too), and those windows are tiled as well; declining the prompt starts Mochi with normal rights as before.
 
 ## Rules for the assistant
 
 1. Before you start Mochi or run the installer, tell the user the way out: `Pause` (or `alt + f12`) turns tiling off and on, and `alt + shift + e` stops Mochi and puts every window back. Starting Mochi rearranges every window on screen.
-2. Never start Mochi from a terminal that runs as administrator. The daemon inherits the elevation. Use a normal terminal or the Mochi entry in the Start menu.
+2. Never start Mochi from a terminal that runs as administrator. The daemon inherits the elevation. Use a normal terminal or the Mochi entry in the Start menu. The one intended way to an elevated daemon is `"elevated": true` in `mochi.json` and `mochic start` from a normal terminal, which asks through the Windows prompt.
 3. Before you edit `mochi.json` or the hotkey file, copy it to a backup next to it.
 4. After every edit, run `mochic check` and fix every error it reports before the change is used.
 5. Stop Mochi only with `mochic stop` or `alt + shift + e`. Never end `mochi.exe` with Task Manager, `Stop-Process` or `taskkill` unless the daemon no longer answers, and then tell the user first how the windows come back (see [Recover](#recover-a-stuck-layout-or-a-missing-window)).
@@ -252,7 +252,7 @@ Work down the list and stop at the first step that fixes it.
    - It may sit on another workspace, which Mochi hides. `mochic state` lists every monitor, workspace and window; switch there with `alt + 1` to `alt + 9` or `mochic focus-workspace <index>`.
    - Mochi may have hidden it and lost track of it. `mochic restore-windows` shows every such window without stopping Mochi.
 6. Keys do nothing:
-   - A window that runs as administrator has the focus. Windows does not pass its key presses to Mochi. Click a normal window.
+   - A window that runs as administrator has the focus. Windows does not pass its key presses to Mochi. Click a normal window, or set `"elevated": true` in `mochi.json` and restart with `mochic start`, accepting the prompt; `mochic doctor` reports `not-elevated` while the key is on but the running daemon has normal rights.
    - A binding mode is on. Press `Esc` to leave the shipped resize mode.
    - Game mode is on. Press `alt + shift + g` or run `mochic toggle-game-mode`.
    - Keys were disabled: `mochic set-hotkeys enable`.
