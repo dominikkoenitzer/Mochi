@@ -84,6 +84,7 @@ anything, and it names the line and the column. Run it after every edit.
 | `fullscreen_passthrough` | boolean | `true` | Leave a window alone while it covers its whole monitor with no title bar: a borderless game, a video in F11, a slideshow. That monitor is not retiled and loses its borders and fading until the window leaves fullscreen. See below. |
 | `focus_follows_mouse` | `Windows`, `Mochi` | unset | Focus whatever window the cursor moves over, and with which implementation. See below: this is not a boolean. |
 | `float_override` | boolean | `false` | Make every new window float. |
+| `elevated` | boolean | `false` | Have `mochic start` start the daemon as administrator, after the Windows prompt, so that windows of programs running as administrator are tiled too. See below. |
 | `resize_delta` | integer | `50` | How many pixels one `mochic resize-axis` step moves a boundary. |
 | `default_workspace_padding` | integer | `10` | Gap between a workspace and the screen edge, in pixels. See the note on DPI below. |
 | `default_container_padding` | integer | `10` | Gap between tiled containers, in pixels. See the note on DPI below. |
@@ -194,6 +195,38 @@ to its minimum and kept inside the workspace. It overlaps its neighbour instead
 of running off the screen, and the focused border is drawn around the window
 rather than around a tile it does not fill. That is the one case where the
 tiles do not cover the area exactly.
+
+## elevated
+
+Off by default, and then Mochi runs with the rights of the user who started it.
+Windows does not let a normal program move, hide or focus a window that belongs
+to a program running as administrator, and does not deliver the key presses made
+over such a window either. Mochi leaves those windows alone and `mochic why`
+answers `elevated, out of reach` for them. With `"elevated": true`, `mochic
+start` starts the daemon as administrator instead, and those windows are tiled
+like any other and the keys work over them.
+
+The price is the Windows administrator prompt, the dimmed screen asking whether
+the app may make changes to the device. It names Console Window Host and
+Microsoft Windows as the publisher, because the daemon is started through
+`conhost.exe --headless`. It comes once per start, so also at every logon while
+Mochi autostarts. Declining it is not an error: `mochic start` says that the
+prompt was declined and starts Mochi with normal rights as before. `mochic
+doctor` then reports `not-elevated`, so the mismatch between the file and the
+running daemon is visible. The same finding appears when the key is switched on
+while a daemon is running: the file is reloaded live, but rights cannot change
+in a running process, so the setting takes effect at the next start.
+
+Only `mochic start` reads the key, and the Start menu entry and the autostart
+both go through it. The daemon never elevates itself and installs no scheduled
+task; a `mochi.exe` started directly runs with the rights of whoever started it.
+
+While it runs as administrator, Mochi writes its own files (the log under
+`%LOCALAPPDATA%\mochi`, the off-screen record, the files a quickstart writes)
+with the desktop user's ordinary rights, and a hotkey line that starts a program
+starts it through the desktop shell, so the program gets the user's normal
+rights and not administrator rights. When no desktop shell is running, such a
+command is not started and the log says so.
 
 ## Rules that are read but not acted on
 

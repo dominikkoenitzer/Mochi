@@ -257,4 +257,6 @@ rects of two perfectly tiled windows always overlap by the invisible border.
   handler only a few seconds; killing the process instead is still safe, since
   the windows die with it.
 * **Elevation.** Everything here runs unelevated. A daemon running elevated can
-  move these windows, but not the other way round.
+  move these windows, but not the other way round. CI runs elevated, and the
+  end-to-end suite covers the `elevated` setting of the daemon; the test windows
+  themselves never ask for more rights than the process that spawned them.

@@ -240,8 +240,11 @@ reports itself as right Alt plus left Ctrl, that pair counts as neither, so a
 
 Windows will not deliver a key press that happened over a window running as
 administrator to a program that is not. That is the same limit that stops Mochi
-managing those windows, and there is no way around it short of running Mochi
-elevated.
+managing those windows, and the way around it is the `elevated` key in
+`mochi.json`: with it on, `mochic start` starts the daemon as administrator
+after the Windows prompt, and the keys work over those windows. A hotkey line
+that starts a program still starts it with the user's normal rights. See
+[configuration.md](configuration.md).
 
 ## Commands
 

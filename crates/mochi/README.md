@@ -22,6 +22,7 @@ platform/
   appview.rs     cloaking other processes' windows through the shell's application views
   dry_run.rs     reads through, writes become log lines
   dpi.rs         SetProcessDpiAwarenessContext fallback behind the manifest
+  user.rs        the desktop user's rights for an elevated daemon: impersonation for profile writes, programs started through the shell
   wide.rs        UTF-16 helpers
 
 events/
