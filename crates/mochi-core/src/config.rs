@@ -478,6 +478,16 @@ pub struct Config {
     pub mouse_follows_focus: Option<bool>,
     /// Make every new window float.
     pub float_override: Option<bool>,
+    /// Start the daemon as administrator, so that it can tile the windows of
+    /// programs that run as administrator and hear key presses over them.
+    /// Off by default.
+    ///
+    /// Read by `mochic start`, which then asks for the rights the usual way,
+    /// with the administrator prompt Windows shows for any program: once per
+    /// start, so at every logon as well. The daemon never raises its own
+    /// rights, and a declined prompt starts it with normal rights as before.
+    /// A change to this key takes effect at the next start.
+    pub elevated: Option<bool>,
     /// How many pixels one `resize-axis` step moves a boundary.
     pub resize_delta: Option<i32>,
     /// The width below which a tile is not allowed to shrink.
@@ -2018,6 +2028,7 @@ mod tests {
             "window_hiding_behaviour",
             "cross_monitor_move_behaviour",
             "mouse_follows_focus",
+            "elevated",
             "fullscreen_passthrough",
             "fullscreen_passthrough_ignore_rules",
             "default_workspace_padding",

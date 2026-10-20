@@ -14,9 +14,11 @@ fn main() {
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         let manifest = new_manifest("Mochi.WindowManager")
             .dpi_awareness(DpiAwareness::PerMonitorV2)
-            // Mochi is deliberately not elevated: it cannot manage elevated
-            // windows, but asking for elevation would put a UAC prompt in front
-            // of every login.
+            // As invoker, never a demand for administrator rights: that would
+            // put a prompt in front of every login for everyone. A user who
+            // wants the windows of administrator programs tiled sets
+            // `"elevated": true` in mochi.json, and `mochic start` asks for
+            // the rights then, through the prompt Windows shows for it.
             .requested_execution_level(ExecutionLevel::AsInvoker);
         embed_manifest(manifest).expect("could not embed the application manifest");
         winresource::WindowsResource::new()
