@@ -6,7 +6,9 @@
 //! have, and one manager per interactive session is exactly the right rule.
 
 use anyhow::{Result, bail};
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows::Win32::Foundation::{
+    CloseHandle, E_ACCESSDENIED, ERROR_ALREADY_EXISTS, GetLastError, HANDLE,
+};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::core::HSTRING;
 
@@ -25,8 +27,18 @@ impl SingleInstance {
     }
 
     /// Same as [`SingleInstance::acquire`] with an explicit name, for tests.
+    ///
+    /// A daemon running as administrator holds a mutex an ordinary process
+    /// may not open at all, and that refusal is the same answer: someone has
+    /// it.
     pub fn acquire_named(name: &str) -> Result<Self> {
-        let handle = unsafe { CreateMutexW(None, true, &HSTRING::from(name)) }?;
+        let handle = match unsafe { CreateMutexW(None, true, &HSTRING::from(name)) } {
+            Ok(handle) => handle,
+            Err(e) if e.code() == E_ACCESSDENIED => {
+                bail!("another mochi is already running in this session, as administrator")
+            }
+            Err(e) => return Err(e.into()),
+        };
         // CreateMutexW succeeds either way; the last error says who won.
         let already = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
         if already {
