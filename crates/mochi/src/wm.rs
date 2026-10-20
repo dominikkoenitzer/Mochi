@@ -1027,6 +1027,15 @@ impl WindowManager {
         self.visual_config = keeping_visuals(loaded.config.clone(), &self.visual_config);
         self.visuals.set_settings(&self.visual_config);
         self.session.app_config_path.clone_from(&loaded.app_path);
+        // Only `mochic start` can act on this key; here it is written down so
+        // that `state` and `doctor` can say what the file asks for and what
+        // the process got.
+        self.session.elevated_configured = loaded.config.elevated.unwrap_or(false);
+        if self.session.elevated_configured && !self.session.elevated {
+            tracing::warn!(
+                "the configuration asks for administrator rights and this daemon runs without them: stop it and start it again with mochic start"
+            );
+        }
 
         self.workspace_rules = Self::routing(&loaded.config, &self.core);
         // Same reasoning as the rules above: the file's list replaces this one
@@ -3758,10 +3767,24 @@ impl WindowManager {
             }
         }
 
+        // The file asks for rights this process does not have: it was started
+        // directly, or the prompt was declined, or the key was turned on while
+        // it ran. Nothing here can change that, and nothing else says so.
+        if self.session.elevated_configured && !self.session.elevated {
+            findings.push(serde_json::json!({
+                "kind": "not-elevated",
+                "hwnd": "",
+                "title": "",
+                "exe": "",
+                "detail": "mochi.json asks for Mochi to run as administrator and this daemon runs with normal rights, so windows of programs running as administrator stay out of reach and their key presses are withheld: stop it and start it again with mochic start, and accept the prompt".to_owned(),
+            }));
+        }
+
         Response::Doctor {
             doctor: serde_json::json!({
                 "managed": self.core.all_window_ids().count(),
                 "off_screen": record(&self.hidden).handles().len(),
+                "elevated": self.session.elevated,
                 "findings": findings,
             }),
         }
@@ -6686,6 +6709,32 @@ alt + j : focus down
             .collect();
         assert_eq!(blocked.len(), 1, "{doctor:#}");
         assert_eq!(blocked[0]["title"], "Administrator: Terminal");
+    }
+
+    #[test]
+    fn the_doctor_says_when_the_file_asks_for_rights_the_daemon_does_not_have() {
+        let (mut wm, _platform) = manager(vec![window(1, "Editor")]);
+        wm.session.elevated_configured = true;
+        wm.session.elevated = false;
+
+        let Response::Doctor { doctor } = wm.diagnose() else {
+            panic!("doctor answered with the wrong kind of response");
+        };
+        assert_eq!(doctor["elevated"], false);
+        let findings = doctor["findings"].as_array().expect("a list");
+        assert_eq!(findings.len(), 1, "{doctor:#}");
+        assert_eq!(findings[0]["kind"], "not-elevated");
+
+        // Started with the rights the file asks for: nothing to report.
+        wm.session.elevated = true;
+        let Response::Doctor { doctor } = wm.diagnose() else {
+            panic!("doctor answered with the wrong kind of response");
+        };
+        assert_eq!(doctor["elevated"], true);
+        assert!(
+            doctor["findings"].as_array().expect("a list").is_empty(),
+            "{doctor:#}"
+        );
     }
 
     #[test]

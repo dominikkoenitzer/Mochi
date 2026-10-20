@@ -98,6 +98,17 @@ fn main() -> Result<()> {
     let platform = platform::new(args.dry_run, args.simulate_monitors.as_deref())?;
     let mut session = state::State::new(config_path.clone(), args.dry_run);
     session.manage_classes.clone_from(&args.manage_class);
+    // Whatever started this process decided this; `mochic start` asks for
+    // the rights when the file says so. Written down for `state`, `doctor`
+    // and the log, which is where "why is my admin terminal not tiled" is
+    // answered.
+    session.elevated = platform.is_elevated();
+    if session.elevated {
+        tracing::info!(
+            commands = ?platform::user::launch_rights(),
+            "running as administrator: windows of programs that run as administrator are tiled too"
+        );
+    }
     if !session.manage_classes.is_empty() {
         tracing::warn!(
             classes = ?session.manage_classes,
