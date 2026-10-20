@@ -1484,7 +1484,7 @@ fn advice(reason: &str, exe: &str) -> (String, Option<String>) {
         ),
         "elevated, out of reach" => (
             "it belongs to a program running as administrator, and Mochi does not. Windows turns down every request a normal program makes to move such a window, so Mochi leaves it where it is rather than tiling around a hole it cannot fill.".into(),
-            Some("start that program without administrator rights. Running Mochi as administrator would also work and is a poor trade: it would hand a window manager the run of the whole machine.".into()),
+            Some("start that program without administrator rights, or let Mochi run as administrator too: set \"elevated\": true in mochi.json and run mochic start, which asks once through the Windows administrator prompt. Programs that Mochi starts from a hotkey keep normal rights either way.".into()),
         ),
         "click-through overlay" => (
             "mouse clicks pass straight through it. That is how overlays are drawn, and an overlay is meant to sit over the other windows rather than take a place among them.".into(),
@@ -1612,7 +1612,7 @@ fn keyboard_note(why: &serde_json::Value) -> String {
     let mut out = String::from("\n");
     out.push_str(&field(
         "Keys",
-        "it runs as administrator and Mochi does not, so Windows gives Mochi none of the keys pressed while it has the focus. Every Mochi binding is dead in this window, including the one that turns tiling off. Start the program without administrator rights and they all come back; running Mochi as administrator would also work, and gives a window manager the run of the machine.",
+        "it runs as administrator and Mochi does not, so Windows gives Mochi none of the keys pressed while it has the focus. Every Mochi binding is dead in this window, including the one that turns tiling off. Start the program without administrator rights and they all come back, or set \"elevated\": true in mochi.json and run mochic start so Mochi runs as administrator too.",
     ));
     out
 }
