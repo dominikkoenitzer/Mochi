@@ -10,6 +10,7 @@ use mochi_core::layout::MinSize;
 
 pub mod dpi;
 pub mod types;
+pub mod user;
 pub mod wide;
 
 mod appview;
@@ -176,6 +177,15 @@ pub trait Platform: Send + Sync {
     /// holds the focus, Windows delivers it none of the key presses, so every
     /// binding silently stops working and nothing on screen says why.
     fn outranks_us(&self, hwnd: Hwnd) -> bool;
+
+    /// Whether this daemon process runs as administrator.
+    ///
+    /// Decided when the process was started and never changes, so it is read
+    /// once. With it true no window outranks Mochi; a platform that has no
+    /// such notion answers false.
+    fn is_elevated(&self) -> bool {
+        false
+    }
 
     /// Whether the window is on screen right now: visible, and not cloaked.
     ///
