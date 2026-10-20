@@ -129,6 +129,14 @@
         }
       }
     },
+    "elevated": {
+      "description": "Start the daemon as administrator, so that it can tile the windows of\nprograms that run as administrator and hear key presses over them.\nOff by default.\n\nRead by `mochic start`, which then asks for the rights the usual way,\nwith the administrator prompt Windows shows for any program: once per\nstart, so at every logon as well. The daemon never raises its own\nrights, and a declined prompt starts it with normal rights as before.\nA change to this key takes effect at the next start.",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": null
+    },
     "float_override": {
       "description": "Make every new window float.",
       "type": [
