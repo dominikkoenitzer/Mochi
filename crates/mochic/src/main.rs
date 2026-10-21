@@ -101,7 +101,11 @@ fn run(cli: Cli) -> Result<()> {
             // user to create. Writing it ourselves takes the shell out of it.
             match output {
                 Some(path) => {
-                    std::fs::write(path, schema.as_bytes()).map_err(|e| {
+                    // The same bytes the printed form gives, final newline
+                    // included: CI compares the committed file with
+                    // `mochic schema > file`, and a file written here
+                    // without it failed that check.
+                    std::fs::write(path, format!("{schema}\n")).map_err(|e| {
                         anyhow::Error::new(e).context(Coded::new(
                             ErrorCode::Io,
                             format!("could not write {}", path.display()),
