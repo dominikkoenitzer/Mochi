@@ -96,6 +96,203 @@ fn an_elevated_window_is_left_alone_and_the_rest_tile_around_it() {
     steps.finish(&log);
 }
 
+/// What the daemon says about its own rights: `state.elevated`.
+fn rights() -> Option<(bool, bool)> {
+    let state = state()?;
+    let elevated = &state["elevated"];
+    Some((
+        elevated["configured"].as_bool()?,
+        elevated["running"].as_bool()?,
+    ))
+}
+
+/// The daemon's findings about itself.
+fn doctor() -> Option<Value> {
+    match send(&Command::Doctor) {
+        Ok(Response::Doctor { doctor }) => Some(doctor),
+        _ => None,
+    }
+}
+
+/// What the daemon makes of the window in front.
+fn why() -> Option<Value> {
+    match send(&Command::Why) {
+        Ok(Response::Why { why }) => Some(why),
+        _ => None,
+    }
+}
+
+fn findings_of(doctor: &Value, kind: &str) -> usize {
+    doctor["findings"]
+        .as_array()
+        .map_or(0, |all| all.iter().filter(|f| f["kind"] == kind).count())
+}
+
+/// The setting on, with the daemon started the way `mochic start` leaves it
+/// after an accepted prompt: at this process's rights. On the runner, which is
+/// elevated, that is the case the setting exists for: the test's own windows
+/// run as administrator, and the daemon reaches them and hears the keys
+/// pressed over them. Started unelevated, the same daemon has to say that the
+/// file asks for rights it lacks, and still tile what it can reach.
+#[test]
+fn with_the_setting_on_the_windows_of_an_administrator_are_tiled_and_keep_their_keys() {
+    skip_unless_allowed!(
+        "with_the_setting_on_the_windows_of_an_administrator_are_tiled_and_keep_their_keys"
+    );
+    let high = integrity::current_is_high();
+
+    let mut on = rice();
+    on["elevated"] = Value::Bool(true);
+    let config = write_json("mochi-elevated-on.json", &on);
+    let scratch = temp_dir().join("elevated-hotkeys");
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).expect("could not make the hotkey scratch directory");
+    let keys = scratch.join("hotkeys");
+    std::fs::write(&keys, ".shell cmd\n\nf13 : toggle-pause\n")
+        .expect("could not write the hotkey file");
+
+    let daemon = Daemon::start_with_config(
+        "elevated-on",
+        &config,
+        &["--hotkeys", &keys.to_string_lossy()],
+    );
+    let log = daemon.log();
+    // Opened by this process, so they run at its rights: as administrator on
+    // the runner, which is exactly what an unelevated Mochi cannot reach.
+    let windows = TestWindows::spawn_with(&SpawnOptions {
+        title_prefix: "Admin".to_owned(),
+        ..SpawnOptions::new(2, 0)
+    })
+    .expect("could not spawn the test windows");
+
+    let mut steps = Steps::default();
+
+    steps.step("the daemon reports the setting and its own rights", || {
+        let read = wait_some(STEP, rights).ok_or("state carries no elevated block")?;
+        check(
+            read == (true, high),
+            format!("state says configured/running {read:?}, expected (true, {high})"),
+        )
+    });
+
+    steps.step("both windows are tiled", || {
+        wait_for_tiling(&windows, 2).map(|_| ())
+    });
+
+    steps.step(
+        "the doctor names the mismatch only when there is one",
+        || {
+            let doctor = doctor().ok_or("no doctor answer")?;
+            check(
+                doctor["elevated"] == Value::Bool(high),
+                format!(
+                    "doctor says elevated {}, the process is {high}",
+                    doctor["elevated"]
+                ),
+            )?;
+            let not_elevated = findings_of(&doctor, "not-elevated");
+            check(
+                not_elevated == usize::from(!high),
+                format!(
+                    "{not_elevated} not-elevated findings, expected {}",
+                    usize::from(!high)
+                ),
+            )?;
+            check(
+                findings_of(&doctor, "hotkeys-blocked") == 0,
+                format!("a window is reported out of the keyboard's reach: {doctor}"),
+            )
+        },
+    );
+
+    let front = windows.handles()[0];
+    steps.step(
+        "the window in front is managed and its keys are not withheld",
+        || {
+            mochi_testbed::focus_window(front).map_err(|e| e.to_string())?;
+            wait_for(STEP, || mochi_testbed::foreground_window() == front)
+                .map_err(|_| "the test window never came to the front".to_owned())?;
+            let why = why().ok_or("no why answer")?;
+            check(
+                why["managed"] == Value::Bool(true),
+                format!("why says {why}"),
+            )?;
+            check(
+                why.get("hotkeys_blocked").is_none(),
+                format!("the keys pressed over the window are withheld: {why}"),
+            )
+        },
+    );
+
+    steps.step("a key pressed over that window reaches the daemon", || {
+        check(paused() == Some(false), "the daemon came up paused")?;
+        tap(keys::F13, None);
+        check(
+            paused() == Some(true),
+            "F13 over the window did not pause tiling".to_owned(),
+        )?;
+        tap(keys::F13, None);
+        check(
+            paused() == Some(false),
+            "the second F13 did not resume tiling".to_owned(),
+        )
+    });
+
+    drop(windows);
+    drop(daemon);
+    steps.finish(&log);
+}
+
+/// The setting off, by default and spelled out: nothing about the daemon's
+/// rights changes, and the doctor has nothing to say about them.
+#[test]
+fn the_elevated_setting_off_leaves_the_daemon_as_it_was() {
+    skip_unless_allowed!("the_elevated_setting_off_leaves_the_daemon_as_it_was");
+    let high = integrity::current_is_high();
+    let mut off = rice();
+    off["elevated"] = Value::Bool(false);
+    let explicit = write_json("mochi-elevated-off.json", &off);
+
+    let mut steps = Steps::default();
+    let mut logs = Vec::new();
+    for (name, config) in [("by default", config_path()), ("spelled out", explicit)] {
+        let daemon = Daemon::start_with_config(
+            &format!("elevated-off-{}", logs.len()),
+            &config,
+            &["--no-hotkeys"],
+        );
+        logs.push(daemon.log());
+        let windows = TestWindows::spawn(2, 0).expect("could not spawn the test windows");
+
+        steps.step(
+            &format!("{name}: the daemon reports the setting off"),
+            || {
+                let read = wait_some(STEP, rights).ok_or("state carries no elevated block")?;
+                check(
+                    read == (false, high),
+                    format!("state says configured/running {read:?}, expected (false, {high})"),
+                )
+            },
+        );
+        steps.step(
+            &format!("{name}: the doctor finds nothing about rights"),
+            || {
+                let doctor = doctor().ok_or("no doctor answer")?;
+                check(
+                    findings_of(&doctor, "not-elevated") == 0,
+                    format!("a not-elevated finding with the setting off: {doctor}"),
+                )
+            },
+        );
+        steps.step(&format!("{name}: both windows are tiled"), || {
+            wait_for_tiling(&windows, 2).map(|_| ())
+        });
+        drop(windows);
+        drop(daemon);
+    }
+    steps.finish(&logs.join(" and "));
+}
+
 /// Integrity levels, and a daemon started one below this process.
 mod integrity {
     use std::ffi::c_void;
