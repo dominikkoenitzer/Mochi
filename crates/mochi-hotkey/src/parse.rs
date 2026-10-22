@@ -56,6 +56,29 @@ pub enum Action {
     Mode(String),
 }
 
+impl Action {
+    /// Whether a held key runs this again on every auto-repeat. Only the
+    /// commands that take one step at a time do; anything else runs once per
+    /// press, so a held toggle does not flip back and forth.
+    pub const fn repeats(&self) -> bool {
+        matches!(
+            self,
+            Self::Command(
+                Command::Focus { .. }
+                    | Command::CycleFocus { .. }
+                    | Command::Move { .. }
+                    | Command::CycleMove { .. }
+                    | Command::ResizeAxis { .. }
+                    | Command::ResizeEdge { .. }
+                    | Command::CycleStack { .. }
+                    | Command::CycleLayout { .. }
+                    | Command::CycleWorkspace { .. }
+                    | Command::CycleMonitor { .. }
+            )
+        )
+    }
+}
+
 /// One binding: a trigger, what it does, and where it came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
@@ -1010,6 +1033,39 @@ mod tests {
         Action::Command(Command::Focus {
             direction: Direction::Left,
         })
+    }
+
+    #[test]
+    fn only_the_commands_that_step_repeat_while_held() {
+        for line in [
+            "focus left",
+            "cycle-focus next",
+            "move left",
+            "cycle-move previous",
+            "resize-axis horizontal increase",
+            "resize-edge left decrease",
+            "cycle-stack next",
+            "cycle-layout next",
+            "cycle-workspace previous",
+            "cycle-monitor next",
+        ] {
+            let text = format!("alt + a : {line}");
+            assert!(action(&text, "alt + a").repeats(), "{line}");
+        }
+        for line in [
+            "toggle-float",
+            "toggle-maximize",
+            "toggle-monocle",
+            "toggle-pause",
+            "toggle-game-mode",
+            "close",
+            "focus-workspace 1",
+            "start notepad",
+        ] {
+            let text = format!("alt + a : {line}");
+            assert!(!action(&text, "alt + a").repeats(), "{line}");
+        }
+        assert!(!Action::Mode("resize".to_owned()).repeats());
     }
 
     #[test]
