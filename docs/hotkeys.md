@@ -228,6 +228,11 @@ is swallowed with it so no application sees half a keystroke. Everything else,
 including a chord that merely starts with the right modifiers, goes to the
 desktop untouched.
 
+Holding a bound key repeats only the commands that take one step at a time:
+`focus`, `move`, `resize-axis`, `resize-edge` and the `cycle-` commands. Any
+other binding runs once per press, so a held `toggle-float` does not flip the
+window back and forth.
+
 An Alt binding does not leave the application in a menu. A window that sees Alt
 go down and come back up with nothing in between opens its menu bar, and
 swallowing the key would have created exactly that gap, so one harmless Ctrl
