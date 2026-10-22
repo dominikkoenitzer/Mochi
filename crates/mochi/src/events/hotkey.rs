@@ -384,6 +384,53 @@ fn mask_the_modifier() {
     }
 }
 
+/// Whether this press is auto-repeat: the key's last press is recorded and
+/// Windows still has it down.
+fn is_repeat(vk: u16) -> bool {
+    is_repeat_with(vk, |vk| down(VIRTUAL_KEY(vk)))
+}
+
+/// [`is_repeat`] with the "is this key still held" question injected, so it
+/// can be tested without a keyboard.
+fn is_repeat_with(vk: u16, still_down: impl Fn(u16) -> bool) -> bool {
+    // The hook runs before the key's own state changes, so a slot left by a
+    // release that went to the secure desktop reads as up and counts as fresh.
+    PRESSES.with(|cell| cell.borrow().iter().any(|slot| slot.0 == vk)) && still_down(vk)
+}
+
+/// What the hook does with one press.
+#[derive(Debug, Clone, PartialEq)]
+enum Press {
+    /// Not a binding of the active mode: the application gets it.
+    Theirs,
+    /// A binding's: swallowed, and its action runs.
+    Run(Action),
+    /// A held key repeating a binding that runs once per press: swallowed,
+    /// and nothing runs.
+    Held,
+}
+
+/// Matches one press in the active mode, through the gate. A repeat runs only
+/// an action that [`Action::repeats`]; any other is swallowed and switches no
+/// mode.
+fn decide(
+    bindings: &Bindings,
+    mode: &mut ModeState,
+    gate: Gate,
+    trigger: Trigger,
+    repeat: bool,
+) -> Press {
+    let mut next = *mode;
+    let Some(binding) = next.press(bindings, trigger, |action| gate.admits(action)) else {
+        return Press::Theirs;
+    };
+    if repeat && !binding.action.repeats() {
+        return Press::Held;
+    }
+    *mode = next;
+    Press::Run(binding.action.clone())
+}
+
 /// Matches one key press and reports it. The modifiers that were held when it
 /// matched, or `None` when the press was not ours.
 fn press(vk: u16) -> Option<Modifiers> {
@@ -391,9 +438,10 @@ fn press(vk: u16) -> Option<Modifiers> {
         modifiers: current_modifiers(),
         key: Key::new(vk),
     };
+    let repeat = is_repeat(vk);
 
     let gate = Gate::from_usize(GATE.load(Ordering::Relaxed));
-    let action = BINDINGS.with(|cell| {
+    let decided = BINDINGS.with(|cell| {
         let bindings = cell.borrow();
         let mut mode = MODE.get();
         // Game mode and hotkeys off belong to the top level. Whatever mode
@@ -405,12 +453,16 @@ fn press(vk: u16) -> Option<Modifiers> {
             mode.reset();
             MODE_GATE.set(changes);
         }
-        let binding = mode.press(&bindings, trigger, |action| gate.admits(action));
+        let decided = decide(&bindings, &mut mode, gate, trigger, repeat);
         MODE.set(mode);
-        binding.map(|binding| binding.action.clone())
+        decided
     });
 
-    let action = action?;
+    let action = match decided {
+        Press::Theirs => return None,
+        Press::Held => return Some(trigger.modifiers),
+        Press::Run(action) => action,
+    };
 
     SENDER.with(|cell| {
         if let Some(tx) = cell.borrow().as_ref() {
@@ -884,6 +936,119 @@ mod tests {
         assert_eq!(record_press(0x48, true), Some(false));
         assert!(take_press(0x48));
         assert!(!take_press(0x48));
+    }
+
+    /// Holds `key` through five auto-repeats in `gate`: what each press did.
+    fn hold(bindings: &Bindings, mode: &mut ModeState, gate: Gate, key: &str) -> Vec<Press> {
+        let trigger: Trigger = key.parse().expect("the test spells its keys right");
+        (0..6)
+            .map(|i| decide(bindings, mode, gate, trigger, i > 0))
+            .collect()
+    }
+
+    fn runs(presses: &[Press]) -> usize {
+        presses
+            .iter()
+            .filter(|p| matches!(p, Press::Run(_)))
+            .count()
+    }
+
+    #[test]
+    fn a_held_toggle_runs_once_per_press() {
+        let bindings = bindings(
+            "alt + shift + space : toggle-float\n\
+             alt + plus : toggle-maximize\n\
+             alt + shift + f : toggle-monocle\n\
+             pause : toggle-pause\n\
+             alt + shift + g : toggle-game-mode\n\
+             alt + shift + q : close\n\
+             alt + enter : start notepad\n",
+        );
+        for key in [
+            "alt + shift + space",
+            "alt + plus",
+            "alt + shift + f",
+            "pause",
+            "alt + shift + g",
+            "alt + shift + q",
+            "alt + enter",
+        ] {
+            let presses = hold(&bindings, &mut ModeState::new(), Gate::All, key);
+            assert_eq!(runs(&presses), 1, "{key} ran on auto-repeat: {presses:?}");
+            assert!(
+                !presses.contains(&Press::Theirs),
+                "a repeat of {key} reached the application"
+            );
+        }
+        // The one key that works while the game has the keyboard.
+        let presses = hold(
+            &bindings,
+            &mut ModeState::new(),
+            Gate::GameMode,
+            "alt + shift + g",
+        );
+        assert_eq!(runs(&presses), 1, "{presses:?}");
+        // Pressed again after the release, it runs again.
+        let trigger: Trigger = "alt + shift + f".parse().unwrap();
+        let mut mode = ModeState::new();
+        for _ in 0..2 {
+            assert!(matches!(
+                decide(&bindings, &mut mode, Gate::All, trigger, false),
+                Press::Run(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_held_focus_move_or_resize_key_keeps_repeating() {
+        let bindings = bindings(
+            "alt + h : focus left\n\
+             alt + shift + h : move left\n\
+             alt + shift + u : resize-axis horizontal decrease\n\
+             alt + shift + y : resize-edge left increase\n\
+             alt + tab : cycle-focus next\n\
+             alt + shift + s : mode resize\n\
+             mode resize {\n\
+                 l : resize-axis horizontal increase\n\
+                 esc : mode default\n\
+             }\n",
+        );
+        for key in [
+            "alt + h",
+            "alt + shift + h",
+            "alt + shift + u",
+            "alt + shift + y",
+            "alt + tab",
+        ] {
+            let presses = hold(&bindings, &mut ModeState::new(), Gate::All, key);
+            assert_eq!(
+                runs(&presses),
+                6,
+                "{key} stopped on auto-repeat: {presses:?}"
+            );
+        }
+        // Inside a mode, too.
+        let mut mode = ModeState::new();
+        hold(&bindings, &mut mode, Gate::All, "alt + shift + s");
+        assert_eq!(bindings.mode_name(mode.active()), "resize");
+        assert_eq!(runs(&hold(&bindings, &mut mode, Gate::All, "l")), 6);
+    }
+
+    #[test]
+    fn only_a_key_down_since_its_recorded_press_is_a_repeat() {
+        assert!(
+            !is_repeat_with(0x46, |_| true),
+            "a first press read as a repeat"
+        );
+        assert_eq!(record_press(0x46, true), Some(true));
+        assert!(is_repeat_with(0x46, |_| true));
+        // Its release went to the secure desktop and the slot stayed behind.
+        assert!(
+            !is_repeat_with(0x46, |_| false),
+            "a fresh press after a lost release read as a repeat"
+        );
+        assert!(take_press(0x46));
+        assert!(!is_repeat_with(0x46, |_| true));
     }
 
     #[test]
