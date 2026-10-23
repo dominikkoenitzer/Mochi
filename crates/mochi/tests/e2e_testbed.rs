@@ -1960,6 +1960,16 @@ mod keys {
 
 /// Presses a key, with one modifier held around it, the way a person would.
 fn tap(vk: u16, modifier: Option<u16>) {
+    let mut events = Vec::with_capacity(4);
+    events.extend(modifier.map(|m| (m, false)));
+    events.push((vk, false));
+    events.push((vk, true));
+    events.extend(modifier.map(|m| (m, true)));
+    inject(&events);
+}
+
+/// Sends key events, each a key and whether it goes up, and gives the daemon time for them.
+fn inject(events: &[(u16, bool)]) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
         VIRTUAL_KEY,
@@ -1984,11 +1994,7 @@ fn tap(vk: u16, modifier: Option<u16>) {
         }
     }
 
-    let mut inputs = Vec::with_capacity(4);
-    inputs.extend(modifier.map(|m| event(m, false)));
-    inputs.push(event(vk, false));
-    inputs.push(event(vk, true));
-    inputs.extend(modifier.map(|m| event(m, true)));
+    let inputs: Vec<INPUT> = events.iter().map(|&(vk, up)| event(vk, up)).collect();
 
     let size = std::mem::size_of::<INPUT>() as i32;
     let sent = unsafe { SendInput(&inputs, size) } as usize;
@@ -2069,6 +2075,28 @@ fn hotkeys_drive_the_daemon_and_stay_out_of_the_way() {
         check(
             paused() == Some(false),
             "the second F13 did not resume tiling".to_owned(),
+        )
+    });
+
+    steps.step("a held toggle key runs once", || {
+        // Auto-repeat sends key downs and no up until the key is let go.
+        inject(&[(keys::F13, false)]);
+        let ran = paused() == Some(true);
+        let mut ran_again = false;
+        for _ in 0..5 {
+            inject(&[(keys::F13, false)]);
+            ran_again |= paused() != Some(true);
+        }
+        inject(&[(keys::F13, true)]);
+        check(ran, "a held F13 did not reach toggle-pause".to_owned())?;
+        check(
+            !ran_again,
+            "a repeat of a held F13 ran toggle-pause again".to_owned(),
+        )?;
+        tap(keys::F13, None);
+        check(
+            paused() == Some(false),
+            "F13 pressed again after its release did not resume tiling".to_owned(),
         )
     });
 
