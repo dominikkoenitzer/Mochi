@@ -50,6 +50,8 @@ pub mod raw {
     pub const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
     /// A window finished restoring from minimized.
     pub const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
+    /// The input desktop changed, to or from the secure desktop.
+    pub const EVENT_SYSTEM_DESKTOPSWITCH: u32 = 0x0020;
 
     /// `OBJID_WINDOW`: the event is about the window itself, not a control in it.
     pub const OBJID_WINDOW: i32 = 0;
