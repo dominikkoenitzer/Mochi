@@ -7,7 +7,7 @@ No code is taken from any existing window manager.
 
 - Name: Mochi. Crates `mochi`, `mochic`, `mochi-core`, `mochi-client`,
   `mochi-hotkey`, `mochi-render`.
-- License: none yet, all rights reserved. Repo private for now.
+- License: GPL-3.0-only.
 - Config: JSON, key names follow the common tiling window manager conventions so an existing config imports with a rename.
 - Hotkeys: Mochi's own, in process. The file format follows the same
   conventions, so an existing hotkey file is read as it stands.
@@ -33,7 +33,7 @@ No code is taken from any existing window manager.
 
 ## Milestones
 
-1. Scaffold. Workspace, CI, private repo, README. Done.
+1. Scaffold. Workspace, CI, repo, README. Done.
 2. Observe. Enumerate monitors and windows, log every WinEvent, `mochic state`
    prints JSON. Moves nothing, safe to run next to another window manager. Done.
 3. Tile. Core model, BSP first, rules, apply layout to real windows, restore on exit.
