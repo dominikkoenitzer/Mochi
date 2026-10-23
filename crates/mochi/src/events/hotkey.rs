@@ -37,6 +37,7 @@ use mochi_hotkey::{Action, Bindings, Key, ModeState, Modifiers, Shell, Trigger};
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LWIN, VK_MENU,
@@ -48,7 +49,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
-use super::{Event, EventSender};
+use super::{Event, EventSender, raw};
 
 /// `HC_ACTION`: the hook has a real key event to look at.
 const HC_ACTION: i32 = 0;
@@ -384,18 +385,67 @@ fn mask_the_modifier() {
     }
 }
 
-/// Whether this press is auto-repeat: the key's last press is recorded and
-/// Windows still has it down.
+/// Whether this press is auto-repeat: the key's last press is recorded and its
+/// release has not come yet.
+///
+/// Not the async key state: Windows never marks a swallowed key down, so every
+/// repeat of a bound key would read as a fresh press.
 fn is_repeat(vk: u16) -> bool {
-    is_repeat_with(vk, |vk| down(VIRTUAL_KEY(vk)))
+    PRESSES.with(|cell| cell.borrow().iter().any(|slot| slot.0 == vk))
 }
 
-/// [`is_repeat`] with the "is this key still held" question injected, so it
-/// can be tested without a keyboard.
-fn is_repeat_with(vk: u16, still_down: impl Fn(u16) -> bool) -> bool {
-    // The hook runs before the key's own state changes, so a slot left by a
-    // release that went to the secure desktop reads as up and counts as fresh.
-    PRESSES.with(|cell| cell.borrow().iter().any(|slot| slot.0 == vk)) && still_down(vk)
+/// Forgets every recorded press, for a switch of the input desktop.
+///
+/// Ctrl-Alt-Del, Win-L and a UAC prompt move the keyboard to the secure
+/// desktop, and a key released there never sends its release to this hook.
+fn forget_presses() {
+    PRESSES.with(|cell| *cell.borrow_mut() = [(0, false); 16]);
+}
+
+unsafe extern "system" fn desktop_switched(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _window: windows::Win32::Foundation::HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    forget_presses();
+}
+
+/// The watch for desktop switches, removed again when dropped.
+struct SwitchWatch(HWINEVENTHOOK);
+
+impl SwitchWatch {
+    /// Starts it on the hook thread, which gets the callback and owns PRESSES.
+    fn start() -> Self {
+        let hook = unsafe {
+            SetWinEventHook(
+                raw::EVENT_SYSTEM_DESKTOPSWITCH,
+                raw::EVENT_SYSTEM_DESKTOPSWITCH,
+                None,
+                Some(desktop_switched),
+                0,
+                0,
+                windows::Win32::UI::WindowsAndMessaging::WINEVENT_OUTOFCONTEXT,
+            )
+        };
+        if hook.is_invalid() {
+            tracing::warn!(
+                "could not watch for desktop switches, so a lost key release can eat one press"
+            );
+        }
+        Self(hook)
+    }
+}
+
+impl Drop for SwitchWatch {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            let _ = unsafe { UnhookWinEvent(self.0) };
+        }
+    }
 }
 
 /// What the hook does with one press.
@@ -573,6 +623,7 @@ impl Drop for HotkeyDaemon {
 fn hotkey_thread(tx: EventSender, bindings: Bindings, ready: Sender<Result<u32, String>>) {
     BINDINGS.with(|cell| *cell.borrow_mut() = bindings);
     SENDER.with(|cell| *cell.borrow_mut() = Some(tx));
+    let _switch = SwitchWatch::start();
 
     let instance = match unsafe { GetModuleHandleW(None) } {
         Ok(h) => h,
@@ -1036,19 +1087,49 @@ mod tests {
 
     #[test]
     fn only_a_key_down_since_its_recorded_press_is_a_repeat() {
-        assert!(
-            !is_repeat_with(0x46, |_| true),
-            "a first press read as a repeat"
-        );
+        assert!(!is_repeat(0x46), "a first press read as a repeat");
         assert_eq!(record_press(0x46, true), Some(true));
-        assert!(is_repeat_with(0x46, |_| true));
+        assert!(is_repeat(0x46));
+        assert!(take_press(0x46));
+        assert!(!is_repeat(0x46));
         // Its release went to the secure desktop and the slot stayed behind.
+        assert_eq!(record_press(0x46, true), Some(true));
+        forget_presses();
         assert!(
-            !is_repeat_with(0x46, |_| false),
+            !is_repeat(0x46),
             "a fresh press after a lost release read as a repeat"
         );
-        assert!(take_press(0x46));
-        assert!(!is_repeat_with(0x46, |_| true));
+    }
+
+    /// One key down the way `keyboard_hook` takes it, with Windows reading the key as up.
+    fn swallowed_down(bindings: &Bindings, mode: &mut ModeState, trigger: Trigger) -> Press {
+        let vk = trigger.key.vk();
+        let decided = decide(bindings, mode, Gate::All, trigger, is_repeat(vk));
+        record_press_with(vk, decided != Press::Theirs, |_| false);
+        decided
+    }
+
+    #[test]
+    fn a_held_toggle_runs_once_while_its_swallowed_key_reads_up() {
+        // The hook swallows a bound press, so Windows never marks that key down.
+        let bindings = bindings("alt + shift + f24 : toggle-float\n");
+        let trigger: Trigger = "alt + shift + f24".parse().unwrap();
+        let mut mode = ModeState::new();
+        let presses: Vec<Press> = (0..6)
+            .map(|_| swallowed_down(&bindings, &mut mode, trigger))
+            .collect();
+        assert_eq!(
+            runs(&presses),
+            1,
+            "toggle-float ran on auto-repeat: {presses:?}"
+        );
+        assert!(take_press(trigger.key.vk()));
+        // Pressed again after the release, it runs again.
+        assert!(matches!(
+            swallowed_down(&bindings, &mut mode, trigger),
+            Press::Run(_)
+        ));
+        assert!(take_press(trigger.key.vk()));
     }
 
     #[test]
