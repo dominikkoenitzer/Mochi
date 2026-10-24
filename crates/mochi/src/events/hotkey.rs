@@ -139,6 +139,8 @@ thread_local! {
     static MODE: Cell<ModeState> = const { Cell::new(ModeState::new()) };
     /// The [`GATE_CHANGES`] the active mode was entered under.
     static MODE_GATE: Cell<usize> = const { Cell::new(0) };
+    /// The key whose press last switched the mode: see [`decide`].
+    static SWITCH_KEY: Cell<Option<Key>> = const { Cell::new(None) };
     /// Where a match is reported.
     static SENDER: RefCell<Option<EventSender>> = const { RefCell::new(None) };
     /// What the hook did with the last press of each key that is down.
@@ -497,19 +499,33 @@ enum Press {
 /// Matches one press in the active mode, through the gate. A repeat runs only
 /// an action that [`Action::repeats`]; any other is swallowed and switches no
 /// mode.
+///
+/// `switch_key` is the key whose fresh press last switched the mode. Its
+/// repeats are swallowed too, since the new mode may not bind that key and
+/// they would reach the application as typed keys.
 fn decide(
     bindings: &Bindings,
     mode: &mut ModeState,
     gate: Gate,
     trigger: Trigger,
     repeat: bool,
+    switch_key: &mut Option<Key>,
 ) -> Press {
+    if repeat && *switch_key == Some(trigger.key) {
+        return Press::Held;
+    }
+    if !repeat {
+        *switch_key = None;
+    }
     let mut next = *mode;
     let Some(binding) = next.press(bindings, trigger, |action| gate.admits(action)) else {
         return Press::Theirs;
     };
     if repeat && !binding.action.repeats() {
         return Press::Held;
+    }
+    if !repeat && next.active() != mode.active() {
+        *switch_key = Some(trigger.key);
     }
     *mode = next;
     Press::Run(binding.action.clone())
@@ -537,8 +553,10 @@ fn press(vk: u16, time: u32, window: u32) -> Option<Modifiers> {
             mode.reset();
             MODE_GATE.set(changes);
         }
-        let decided = decide(&bindings, &mut mode, gate, trigger, repeat);
+        let mut switch_key = SWITCH_KEY.get();
+        let decided = decide(&bindings, &mut mode, gate, trigger, repeat, &mut switch_key);
         MODE.set(mode);
+        SWITCH_KEY.set(switch_key);
         decided
     });
 
@@ -1031,8 +1049,9 @@ mod tests {
     /// Holds `key` through five auto-repeats in `gate`: what each press did.
     fn hold(bindings: &Bindings, mode: &mut ModeState, gate: Gate, key: &str) -> Vec<Press> {
         let trigger: Trigger = key.parse().expect("the test spells its keys right");
+        let mut switch_key = None;
         (0..6)
-            .map(|i| decide(bindings, mode, gate, trigger, i > 0))
+            .map(|i| decide(bindings, mode, gate, trigger, i > 0, &mut switch_key))
             .collect()
     }
 
@@ -1083,7 +1102,7 @@ mod tests {
         let mut mode = ModeState::new();
         for _ in 0..2 {
             assert!(matches!(
-                decide(&bindings, &mut mode, Gate::All, trigger, false),
+                decide(&bindings, &mut mode, Gate::All, trigger, false, &mut None),
                 Press::Run(_)
             ));
         }
@@ -1125,6 +1144,31 @@ mod tests {
     }
 
     #[test]
+    fn a_held_mode_key_does_not_type_in_the_new_mode() {
+        let bindings = bindings(
+            "alt + shift + s : mode resize\n\
+             mode resize {\n\
+                 l : resize-axis horizontal increase\n\
+                 esc : mode default\n\
+             }\n",
+        );
+        let mut mode = ModeState::new();
+        let presses = hold(&bindings, &mut mode, Gate::All, "alt + shift + s");
+        assert_eq!(runs(&presses), 1, "{presses:?}");
+        assert!(
+            !presses.contains(&Press::Theirs),
+            "a repeat of the key that switched the mode reached the application: {presses:?}"
+        );
+        assert_eq!(bindings.mode_name(mode.active()), "resize");
+        // A fresh press of that key is matched in the new mode as usual.
+        let trigger: Trigger = "alt + shift + s".parse().unwrap();
+        assert_eq!(
+            decide(&bindings, &mut mode, Gate::All, trigger, false, &mut None),
+            Press::Theirs
+        );
+    }
+
+    #[test]
     fn only_a_key_down_since_its_recorded_press_is_a_repeat() {
         assert!(
             !is_repeat(0x46, 1_000, WINDOW),
@@ -1152,7 +1196,9 @@ mod tests {
     ) -> Press {
         let vk = trigger.key.vk();
         let repeat = is_repeat(vk, time, WINDOW);
-        let decided = decide(bindings, mode, Gate::All, trigger, repeat);
+        let mut switch_key = SWITCH_KEY.get();
+        let decided = decide(bindings, mode, Gate::All, trigger, repeat, &mut switch_key);
+        SWITCH_KEY.set(switch_key);
         record_press(vk, decided != Press::Theirs, time, WINDOW);
         decided
     }
