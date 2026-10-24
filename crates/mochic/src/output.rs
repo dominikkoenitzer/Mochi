@@ -32,7 +32,7 @@ pub fn print<T: Serialize>(document: &T) {
 pub fn wants_json(command: &Cmd) -> bool {
     matches!(
         command,
-        Cmd::State { json: true }
+        Cmd::State { json: true, .. }
             | Cmd::Query { json: true, .. }
             | Cmd::Check { json: true, .. }
             | Cmd::Schema { json: true, .. }

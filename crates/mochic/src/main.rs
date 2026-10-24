@@ -11,6 +11,7 @@
 mod mcp;
 mod output;
 mod process;
+mod select;
 
 use std::path::{Path, PathBuf};
 
@@ -130,6 +131,12 @@ fn run(cli: Cli) -> Result<()> {
     let raw_why = matches!(cli.command, Cmd::Why { json: true });
     let raw_doctor = matches!(cli.command, Cmd::Doctor { json: true });
     let raw_query = matches!(cli.command, Cmd::Query { json: true, .. });
+    // A bad pattern is refused before the daemon is asked anything.
+    let pick = match &cli.command {
+        Cmd::State { exe, title, .. } => select::Filter::new(exe.as_deref(), title.as_deref())
+            .map_err(|message| Coded::new(ErrorCode::Usage, message))?,
+        _ => None,
+    };
     let Some(command) = cli.command.to_command() else {
         unreachable!("the subcommands without a protocol command returned above")
     };
@@ -152,7 +159,13 @@ fn run(cli: Cli) -> Result<()> {
 
     match response {
         Response::Ok => {}
-        Response::State { state } => println!("{}", serde_json::to_string_pretty(&state)?),
+        Response::State { state } => match &pick {
+            Some(filter) => println!(
+                "{}",
+                serde_json::to_string_pretty(&select::windows(&state, filter))?
+            ),
+            None => println!("{}", serde_json::to_string_pretty(&state)?),
+        },
         Response::Query { answer } => match command {
             Command::Query { target } if raw_query => {
                 output::print(&QueryOutput::new(target, answer));
