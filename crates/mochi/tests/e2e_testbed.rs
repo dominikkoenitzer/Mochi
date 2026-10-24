@@ -2083,12 +2083,20 @@ fn hotkeys_drive_the_daemon_and_stay_out_of_the_way() {
         inject(&[(keys::F13, false)]);
         let ran = paused() == Some(true);
         let mut ran_again = false;
+        let mut unanswered = false;
         for _ in 0..5 {
             inject(&[(keys::F13, false)]);
-            ran_again |= paused() != Some(true);
+            match paused() {
+                Some(paused) => ran_again |= !paused,
+                None => unanswered = true,
+            }
         }
         inject(&[(keys::F13, true)]);
         check(ran, "a held F13 did not reach toggle-pause".to_owned())?;
+        check(
+            !unanswered,
+            "the daemon did not answer a state query while F13 was held".to_owned(),
+        )?;
         check(
             !ran_again,
             "a repeat of a held F13 ran toggle-pause again".to_owned(),
