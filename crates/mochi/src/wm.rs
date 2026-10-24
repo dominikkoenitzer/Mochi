@@ -3896,6 +3896,12 @@ impl WindowManager {
             Ok(info) => info,
             Err(e) => return Response::error(e),
         };
+        // `--manage-class` promises that nothing else on the desktop is touched.
+        if !self.manage_classes.is_empty() && !self.class_is_forced(&info.class) {
+            return Response::error(
+                "this mochi was started with --manage-class and the focused window's class was not named",
+            );
+        }
         // Never a window nothing could tile: the taskbar, the desktop, an elevated one.
         if let Err(reason) = is_manageable_with(&info, true)
             && !reason.is_overridable()
@@ -7581,6 +7587,21 @@ alt + j : focus down
             "the scratchpad window took a tile it will be hidden from"
         );
         assert_eq!(wm.scratchpad_holding(Hwnd(2)), Some(0));
+    }
+
+    #[test]
+    fn manage_keeps_to_the_classes_named_with_manage_class() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+        wm.manage_classes = vec!["MochiTestWindow".into()];
+        platform.clear_history();
+        wm.foreground = Some(Hwnd(2));
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert!(response.error_message().is_some(), "{response:?}");
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert!(platform.rect_of(Hwnd(2)).is_none());
     }
 
     #[test]
