@@ -30,7 +30,7 @@ The error document has no `version` either.
 
 | Command | Prints |
 |---|---|
-| `state --json` | The daemon's state document. |
+| `state --json` | The daemon's state document, or with `--exe` or `--title` the windows that match. |
 | `query TARGET --json` | One value in a small document. |
 | `check [PATH] --json` | The findings for a configuration file. |
 | `schema --json` | The schema, or where it was written. |
@@ -184,8 +184,10 @@ With `--exe <name>` or `--title <regex>`, `mochic state` prints an array of the
 managed windows that match instead of the whole document, so a script can find
 a window by name rather than by focus. `--exe` compares the whole file name in
 any case (`brave.exe`, not `brave`); `--title` is a regular expression searched
-anywhere in the title. Given both, a window has to match both. A pattern that
-is not a regular expression fails with `usage` before the daemon is asked.
+anywhere in the title, where case matters unless the pattern starts with
+`(?i)`. Given both, a window has to match both. An empty `--exe` or a pattern
+that does not compile fails with `usage` and exit code 2 before the daemon is
+asked.
 
 Each entry has the [window](#window) fields and four more:
 
@@ -391,7 +393,7 @@ else:
 | `daemon` | The daemon understood the command and refused it. |
 | `config` | `check` found no configuration path. |
 | `io` | A file could not be written. |
-| `usage` | The command line did not parse and contained `--json`. `--help` and `--version` keep their normal output. |
+| `usage` | The command line did not parse and contained `--json`, or a `state` filter was refused. `--help` and `--version` keep their normal output. |
 | `internal` | Anything else. |
 
 ## Exit codes
@@ -400,4 +402,4 @@ else:
 |---|---|
 | `0` | Success, or `check` found the file usable. |
 | `1` | A failure at run time, or `check` found the file unusable. |
-| `2` | The command line did not parse (code `usage`). |
+| `2` | The command line did not parse, or a `state` filter was refused (code `usage`). |

@@ -995,6 +995,17 @@ mod tests {
     }
 
     #[test]
+    fn state_keeps_the_names_it_was_given() {
+        let line = ["mochic", "state", "--exe", "brave.exe", "--title", "^Inbox"];
+        let Cmd::State { json, exe, title } = Cli::try_parse_from(line).unwrap().command else {
+            panic!("not state");
+        };
+        assert!(!json);
+        assert_eq!(exe.as_deref(), Some("brave.exe"));
+        assert_eq!(title.as_deref(), Some("^Inbox"));
+    }
+
+    #[test]
     fn the_extra_commands_parse_too() {
         assert_eq!(parse(&["state"]), Command::State);
         assert_eq!(
