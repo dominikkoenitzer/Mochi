@@ -586,6 +586,8 @@ pub struct WindowManager {
     routed: HashSet<Hwnd>,
     /// Windows Mochi dropped from the model because the user minimized them.
     minimized: HashSet<Hwnd>,
+    /// Windows taken out with `unmanage`, kept out until `manage` or until they close.
+    unmanaged_by_user: HashSet<Hwnd>,
     /// Windows that have taken a whole monitor over, and the monitor each one
     /// holds. See [`crate::platform::is_fullscreen`].
     ///
@@ -741,6 +743,7 @@ impl WindowManager {
             workspace_rules: Vec::new(),
             routed: HashSet::new(),
             minimized: HashSet::new(),
+            unmanaged_by_user: HashSet::new(),
             fullscreen: BTreeMap::new(),
             display_changes: 0,
             redraw_owed: HashSet::new(),
@@ -1185,6 +1188,9 @@ impl WindowManager {
     /// named, which is what makes an end-to-end run safe on a desktop that is
     /// already being managed by something else.
     fn is_candidate(&self, info: &WindowInfo) -> bool {
+        if self.unmanaged_by_user.contains(&info.hwnd) {
+            return false;
+        }
         if !self.manage_classes.is_empty() {
             return self.class_is_forced(&info.class) && is_manageable_with(info, true).is_ok();
         }
@@ -2046,6 +2052,7 @@ impl WindowManager {
                     // own account.
                     self.routed.remove(&hwnd);
                     self.minimized.remove(&hwnd);
+                    self.unmanaged_by_user.remove(&hwnd);
                     self.redraw_owed.remove(&hwnd);
                     self.min_size_checks.remove(&hwnd);
                     self.min_size_changes.remove(&hwnd);
@@ -3918,6 +3925,7 @@ impl WindowManager {
         match self.core.add_window_to(monitor, workspace, window) {
             Ok(changes) => {
                 self.routed.insert(hwnd);
+                self.unmanaged_by_user.remove(&hwnd);
                 self.notify(NotificationEvent::Manage {
                     window: window_ref(&info),
                 });
@@ -3941,6 +3949,7 @@ impl WindowManager {
             return Response::error("the focused window is not managed");
         }
         self.unmanage(hwnd, "unmanage command");
+        self.unmanaged_by_user.insert(hwnd);
         Response::Ok
     }
 
@@ -7602,6 +7611,57 @@ alt + j : focus down
         assert!(response.error_message().is_some(), "{response:?}");
         assert!(!wm.state().is_managed(window_id(Hwnd(2))));
         assert!(platform.rect_of(Hwnd(2)).is_none());
+    }
+
+    #[test]
+    fn an_unmanaged_window_stays_out_when_it_is_focused_or_renamed() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(1));
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+        wm.on_window_event(WindowEventKind::NameChange, Hwnd(2));
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(2))),
+            "unmanage lasted only until the window was next focused"
+        );
+    }
+
+    #[test]
+    fn an_unmanaged_window_stays_out_across_a_pause() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+
+        wm.handle_command(Command::TogglePause);
+        wm.handle_command(Command::TogglePause);
+        assert!(!wm.state().is_paused);
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+    }
+
+    #[test]
+    fn manage_and_a_new_window_on_the_same_handle_end_an_unmanage() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Manage).0, Response::Ok);
+        // Taken back, it comes back after a cloak like any other window.
+        wm.on_window_event(WindowEventKind::Cloaked, Hwnd(2));
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        wm.on_window_event(WindowEventKind::Uncloaked, Hwnd(2));
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
+
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+
+        // Windows hands the value of a closed window to the next one.
+        wm.on_window_event(WindowEventKind::Destroyed, Hwnd(2));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(2));
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
     }
 
     #[test]
