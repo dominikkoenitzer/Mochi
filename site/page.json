@@ -164,11 +164,11 @@
     "code": "{\n  \"mcpServers\": {\n    \"mochi\": {\n      \"command\": \"C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Programs\\\\Mochi\\\\bin\\\\mochic.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}"
   },
   "new": {
-    "version": "0.1.26",
+    "version": "0.1.27",
     "items": [
-      "On a screen taller than it is wide, windows stack in rows of equal height, and a window left alone there forgets its old resize.",
-      "Workspace rules for a screen that was switched off apply again as soon as it is back.",
-      "A border leaves with its window, however the window is moved or closed."
+      "Set <code>\"elevated\": true</code> in <code>mochi.json</code> and <code>mochic start</code> starts Mochi as administrator after the Windows prompt, so windows of programs running as administrator are tiled too.",
+      "Holding a key repeats only the commands that take one step at a time, so a held <code>toggle-float</code> no longer flips the window back and forth.",
+      "A key that switches the mode stays swallowed while it is held, even when the new mode does not bind it."
     ]
   },
   "requirements": [
