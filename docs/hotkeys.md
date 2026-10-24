@@ -231,7 +231,8 @@ desktop untouched.
 Holding a bound key repeats only the commands that take one step at a time:
 `focus`, `move`, `resize-axis`, `resize-edge` and the `cycle-` commands. Any
 other binding runs once per press, so a held `toggle-float` does not flip the
-window back and forth.
+window back and forth. A key that switches the mode stays swallowed while it is
+held, even when the new mode does not bind it.
 
 An Alt binding does not leave the application in a menu. A window that sees Alt
 go down and come back up with nothing in between opens its menu bar, and
