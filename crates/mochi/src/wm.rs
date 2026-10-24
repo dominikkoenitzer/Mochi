@@ -497,7 +497,9 @@ pub fn restore(platform: &dyn Platform, hidden: &Mutex<Hidden>) {
             if e.downcast_ref::<CloakUnsupported>().is_some() || platform.outranks_us(hwnd) {
                 tracing::warn!(
                     %hwnd,
-                    "restore: mochi took this window off screen and can no longer put it back,                      because the window now outranks it. Bring it back from the taskbar or with                      alt+tab. Mochi is letting go of it rather than promising again"
+                    "restore: mochi took this window off screen and can no longer put it back, \
+                     because the window now outranks it. Bring it back from the taskbar or with \
+                     alt+tab. Mochi is letting go of it rather than promising again"
                 );
                 continue;
             }
@@ -7580,6 +7582,40 @@ alt + j : focus down
         assert!(
             wm.hidden().lock().unwrap().is_empty(),
             "a window that can never be restored was written down again"
+        );
+    }
+
+    #[test]
+    fn the_warning_for_a_window_it_lets_go_reads_as_one_line() {
+        #[derive(Clone, Default)]
+        struct Log(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Log {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Log::default();
+        let sink = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish();
+
+        let mut out_of_reach = window(2, "Two");
+        out_of_reach.exe = String::new();
+        let (mut wm, platform) = manager(vec![window(1, "One"), out_of_reach]);
+        platform.unrestorable.lock().unwrap().push(Hwnd(2));
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        tracing::subscriber::with_default(subscriber, || restore(platform.as_ref(), &wm.hidden()));
+
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("put it back, because the window now outranks it. Bring it back from the taskbar or with alt+tab."),
+            "{text}"
         );
     }
 
