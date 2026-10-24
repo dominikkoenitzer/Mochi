@@ -1188,9 +1188,12 @@ impl WindowManager {
     /// named, which is what makes an end-to-end run safe on a desktop that is
     /// already being managed by something else.
     fn is_candidate(&self, info: &WindowInfo) -> bool {
-        if self.unmanaged_by_user.contains(&info.hwnd) {
-            return false;
-        }
+        !self.unmanaged_by_user.contains(&info.hwnd) && self.could_manage(info)
+    }
+
+    /// [`Self::is_candidate`] without the user's `unmanage`, which keeps a
+    /// window out of the layout but not out of a scratchpad's reach.
+    fn could_manage(&self, info: &WindowInfo) -> bool {
         if !self.manage_classes.is_empty() {
             return self.class_is_forced(&info.class) && is_manageable_with(info, true).is_ok();
         }
@@ -4589,7 +4592,7 @@ impl WindowManager {
                 // cloaked, it is no candidate, and passing it over would start
                 // a second copy of what is already running one screen away.
                 self.scratchpad_holding(info.hwnd).is_none()
-                    && (self.is_candidate(info) || self.core.is_managed(window_id(info.hwnd)))
+                    && (self.could_manage(info) || self.core.is_managed(window_id(info.hwnd)))
                     && rule.matches(&rule_info(info))
             });
         if let Some(info) = found {
@@ -9279,6 +9282,23 @@ alt + j : focus down
         assert!(!wm.state().is_managed(window_id(Hwnd(2))));
         assert!(!wm.we_hid(Hwnd(2)), "it was taken and left off screen");
         assert_eq!(cloak_calls(&platform, Hwnd(2)).last(), Some(&false));
+    }
+
+    #[test]
+    fn a_matching_window_the_user_unmanaged_is_taken_rather_than_started_again() {
+        let (mut wm, _) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert!(
+            wm.launched.lock().unwrap().is_empty(),
+            "a second copy was started while the first was open and unmanaged"
+        );
+        assert_eq!(wm.scratchpad_holding(Hwnd(2)), Some(0));
     }
 
     #[test]
