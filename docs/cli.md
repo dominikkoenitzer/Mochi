@@ -97,7 +97,7 @@ A scratchpad is a window kept out of the layout and shown with one command. The
 
 | Command | Arguments | Does |
 |---|---|---|
-| `state` | `--json` | Print the whole daemon state as JSON. `--json` makes a failure come out as JSON too. |
+| `state` | `--json`, `--exe <name>`, `--title <regex>` | Print the whole daemon state as JSON. With `--exe` or `--title` it prints only the managed windows that match, each with its monitor, workspace and placement. `--json` makes a failure come out as JSON too. |
 | `why` | `--json` | Explain what Mochi makes of the window in front and what to do about it: whether it is being tiled and where, or the reason it is being left alone and the command that would change that. The one thing to run when a window is not tiling and it is not obvious why. `--json` prints the document the paragraph is made of. |
 | `doctor` | `--json` | Check the daemon's picture of the desktop against the real one. Each finding names a window and says what is wrong the way you would see it on screen, for example a tile reserved for a window that is not there. `--json` prints the raw findings document. |
 | `query` | target, `--json` | Print one value. Targets: `focused-monitor-index`, `focused-workspace-index`, `focused-container-index`, `focused-window-index` (the index inside the focused container), `focused-workspace-name`, `monitor-count`, `window-count`, `paused`, `dry-run`, `config-path`, `version`. `--json` prints the value in a document with the target and the `mochic` version. |

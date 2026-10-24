@@ -11,6 +11,7 @@
 mod mcp;
 mod output;
 mod process;
+mod select;
 
 use std::path::{Path, PathBuf};
 
@@ -68,7 +69,21 @@ fn real_main() -> std::process::ExitCode {
         return check(path.as_deref(), json);
     }
 
-    match run(cli) {
+    // A pattern that does not compile is a usage error like one the parser
+    // finds: exit 2, before the daemon is asked anything.
+    let pick = match picked(&cli.command) {
+        Ok(pick) => pick,
+        Err(message) => {
+            if json {
+                output::print(&ErrorOutput::new(ErrorCode::Usage, message));
+            } else {
+                eprintln!("mochic: {message}");
+            }
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    match run(cli, pick) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             if json {
@@ -81,7 +96,16 @@ fn real_main() -> std::process::ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+/// The windows `mochic state --exe/--title` asked for, or `None` for every
+/// other command and for a plain `state`.
+fn picked(command: &Cmd) -> Result<Option<select::Filter>, String> {
+    match command {
+        Cmd::State { exe, title, .. } => select::Filter::new(exe.as_deref(), title.as_deref()),
+        _ => Ok(None),
+    }
+}
+
+fn run(cli: Cli, pick: Option<select::Filter>) -> Result<()> {
     // Three subcommands do not travel over the pipe.
     match cli.command {
         Cmd::Start {
@@ -152,7 +176,13 @@ fn run(cli: Cli) -> Result<()> {
 
     match response {
         Response::Ok => {}
-        Response::State { state } => println!("{}", serde_json::to_string_pretty(&state)?),
+        Response::State { state } => match &pick {
+            Some(filter) => println!(
+                "{}",
+                serde_json::to_string_pretty(&select::windows(&state, filter))?
+            ),
+            None => println!("{}", serde_json::to_string_pretty(&state)?),
+        },
         Response::Query { answer } => match command {
             Command::Query { target } if raw_query => {
                 output::print(&QueryOutput::new(target, answer));
@@ -1691,6 +1721,20 @@ fn doctor_report(doctor: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_state_filter_is_checked_before_the_daemon_is_asked() {
+        use clap::Parser;
+        let command = |line: &str| super::Cli::try_parse_from(line.split(' ')).unwrap().command;
+        assert!(super::picked(&command("mochic state --title (")).is_err());
+        assert!(
+            super::picked(&command("mochic state --exe x.exe"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(super::picked(&command("mochic state")).unwrap().is_none());
+        assert!(super::picked(&command("mochic retile")).unwrap().is_none());
+    }
+
     #[test]
     fn why_explains_an_unmanaged_window_and_names_a_way_out() {
         let why = serde_json::json!({
