@@ -70,8 +70,8 @@ instead of text. [json-output.md](json-output.md) lists every field.
 | `toggle-monocle` | none | Give the focused window the whole work area. |
 | `minimize` | none | Minimize the focused window. |
 | `close` | none | Ask the focused window to close. |
-| `manage` | none | Start managing the focused window even if a rule would skip it. |
-| `unmanage` | none | Stop managing the focused window and leave it where it is. |
+| `manage` | none | Start managing the focused window even though the usual checks say no. An ignore rule still keeps it out, and a window nothing could tile or one a scratchpad holds is refused with an error. |
+| `unmanage` | none | Stop managing the focused window and leave it where it is. It stays out until `manage` or until it closes. |
 
 ## Scratchpads
 

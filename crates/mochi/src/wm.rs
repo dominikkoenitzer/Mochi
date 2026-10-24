@@ -586,6 +586,8 @@ pub struct WindowManager {
     routed: HashSet<Hwnd>,
     /// Windows Mochi dropped from the model because the user minimized them.
     minimized: HashSet<Hwnd>,
+    /// Windows taken out with `unmanage`, kept out until `manage` or until they close.
+    unmanaged_by_user: HashSet<Hwnd>,
     /// Windows that have taken a whole monitor over, and the monitor each one
     /// holds. See [`crate::platform::is_fullscreen`].
     ///
@@ -741,6 +743,7 @@ impl WindowManager {
             workspace_rules: Vec::new(),
             routed: HashSet::new(),
             minimized: HashSet::new(),
+            unmanaged_by_user: HashSet::new(),
             fullscreen: BTreeMap::new(),
             display_changes: 0,
             redraw_owed: HashSet::new(),
@@ -1185,6 +1188,12 @@ impl WindowManager {
     /// named, which is what makes an end-to-end run safe on a desktop that is
     /// already being managed by something else.
     fn is_candidate(&self, info: &WindowInfo) -> bool {
+        !self.unmanaged_by_user.contains(&info.hwnd) && self.could_manage(info)
+    }
+
+    /// [`Self::is_candidate`] without the user's `unmanage`, which keeps a
+    /// window out of the layout but not out of a scratchpad's reach.
+    fn could_manage(&self, info: &WindowInfo) -> bool {
         if !self.manage_classes.is_empty() {
             return self.class_is_forced(&info.class) && is_manageable_with(info, true).is_ok();
         }
@@ -2046,6 +2055,7 @@ impl WindowManager {
                     // own account.
                     self.routed.remove(&hwnd);
                     self.minimized.remove(&hwnd);
+                    self.unmanaged_by_user.remove(&hwnd);
                     self.redraw_owed.remove(&hwnd);
                     self.min_size_checks.remove(&hwnd);
                     self.min_size_changes.remove(&hwnd);
@@ -3874,7 +3884,7 @@ impl WindowManager {
         Response::Why { why }
     }
 
-    /// `manage`: take the foreground window whatever the heuristics think.
+    /// `manage`: take the foreground window past every heuristic a manage rule could overrule.
     fn manage_foreground(&mut self) -> Response {
         let Some(hwnd) = self
             .foreground
@@ -3885,16 +3895,40 @@ impl WindowManager {
         if self.core.is_managed(window_id(hwnd)) {
             return Response::Ok;
         }
+        // Tiled, it would leave a hole in the layout each time the scratchpad hides it.
+        if let Some(index) = self.scratchpad_holding(hwnd) {
+            return Response::error(format!(
+                "the focused window belongs to the scratchpad {:?}",
+                self.scratchpads[index].config.name
+            ));
+        }
         let info = match self.platform.window_info(hwnd) {
             Ok(info) => info,
             Err(e) => return Response::error(e),
         };
+        // `--manage-class` promises that nothing else on the desktop is touched.
+        if !self.manage_classes.is_empty() && !self.class_is_forced(&info.class) {
+            return Response::error(
+                "this mochi was started with --manage-class and the focused window's class was not named",
+            );
+        }
+        // Never a window nothing could tile: the taskbar, the desktop, an elevated one.
+        if let Err(reason) = is_manageable_with(&info, true)
+            && !reason.is_overridable()
+        {
+            return Response::error(format!("the focused window cannot be managed: {reason}"));
+        }
+        // The model would turn it away, so an ok here would be untrue.
+        if self.rules_say_ignore(&info) {
+            return Response::error("an ignore rule matches the focused window");
+        }
         let window = core_window(&info).with_min_size(self.platform.min_size(hwnd));
         let (monitor, workspace) = self.destination(&info, &window);
         let before = self.focus();
         match self.core.add_window_to(monitor, workspace, window) {
             Ok(changes) => {
                 self.routed.insert(hwnd);
+                self.unmanaged_by_user.remove(&hwnd);
                 self.notify(NotificationEvent::Manage {
                     window: window_ref(&info),
                 });
@@ -3918,6 +3952,7 @@ impl WindowManager {
             return Response::error("the focused window is not managed");
         }
         self.unmanage(hwnd, "unmanage command");
+        self.unmanaged_by_user.insert(hwnd);
         Response::Ok
     }
 
@@ -4557,7 +4592,7 @@ impl WindowManager {
                 // cloaked, it is no candidate, and passing it over would start
                 // a second copy of what is already running one screen away.
                 self.scratchpad_holding(info.hwnd).is_none()
-                    && (self.is_candidate(info) || self.core.is_managed(window_id(info.hwnd)))
+                    && (self.could_manage(info) || self.core.is_managed(window_id(info.hwnd)))
                     && rule.matches(&rule_info(info))
             });
         if let Some(info) = found {
@@ -7491,6 +7526,147 @@ alt + j : focus down
         assert_eq!(wm.state().all_window_ids().count(), 2);
     }
 
+    /// The `manage` notifications sent so far.
+    fn manage_events(wm: &WindowManager) -> usize {
+        wm.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, NotificationEvent::Manage { .. }))
+            .count()
+    }
+
+    #[test]
+    fn manage_refuses_the_taskbar_and_every_window_nothing_could_tile() {
+        let taskbar = WindowInfo {
+            class: "Shell_TrayWnd".into(),
+            exe: "explorer.exe".into(),
+            ..window(2, "")
+        };
+        let (mut wm, platform) = manager(vec![window(1, "One"), taskbar]);
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        platform.clear_history();
+        wm.foreground = Some(Hwnd(2));
+        let announced = manage_events(&wm);
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert!(response.error_message().is_some(), "{response:?}");
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert!(platform.rect_of(Hwnd(2)).is_none(), "the taskbar was moved");
+        assert_eq!(manage_events(&wm), announced);
+    }
+
+    #[test]
+    fn manage_says_so_when_an_ignore_rule_keeps_the_window_out() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        let (response, _) = wm.handle_command(Command::IgnoreRule {
+            identifier: mochi_client::RuleIdentifier::Title,
+            id: "Two".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert!(response.is_ok());
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        wm.foreground = Some(Hwnd(2));
+        let announced = manage_events(&wm);
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert!(
+            response.error_message().is_some(),
+            "manage answered ok and left the window out"
+        );
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert_eq!(
+            manage_events(&wm),
+            announced,
+            "a bar was told the window is managed"
+        );
+    }
+
+    #[test]
+    fn manage_leaves_a_scratchpad_window_to_its_scratchpad() {
+        let (mut wm, _) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert_eq!(wm.scratchpad_holding(Hwnd(2)), Some(0));
+        wm.foreground = Some(Hwnd(2));
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert!(response.error_message().is_some(), "{response:?}");
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(2))),
+            "the scratchpad window took a tile it will be hidden from"
+        );
+        assert_eq!(wm.scratchpad_holding(Hwnd(2)), Some(0));
+    }
+
+    #[test]
+    fn manage_keeps_to_the_classes_named_with_manage_class() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+        wm.manage_classes = vec!["MochiTestWindow".into()];
+        platform.clear_history();
+        wm.foreground = Some(Hwnd(2));
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert!(response.error_message().is_some(), "{response:?}");
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert!(platform.rect_of(Hwnd(2)).is_none());
+    }
+
+    #[test]
+    fn an_unmanaged_window_stays_out_when_it_is_focused_or_renamed() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(1));
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+        wm.on_window_event(WindowEventKind::NameChange, Hwnd(2));
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(2))),
+            "unmanage lasted only until the window was next focused"
+        );
+    }
+
+    #[test]
+    fn an_unmanaged_window_stays_out_across_a_pause() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+
+        wm.handle_command(Command::TogglePause);
+        wm.handle_command(Command::TogglePause);
+        assert!(!wm.state().is_paused);
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+    }
+
+    #[test]
+    fn manage_and_a_new_window_on_the_same_handle_end_an_unmanage() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Manage).0, Response::Ok);
+        // Taken back, it comes back after a cloak like any other window.
+        wm.on_window_event(WindowEventKind::Cloaked, Hwnd(2));
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        wm.on_window_event(WindowEventKind::Uncloaked, Hwnd(2));
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
+
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+
+        // Windows hands the value of a closed window to the next one.
+        wm.on_window_event(WindowEventKind::Destroyed, Hwnd(2));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(2));
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
+    }
+
     #[test]
     fn the_restore_hook_puts_back_everything_that_was_hidden() {
         let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
@@ -9106,6 +9282,23 @@ alt + j : focus down
         assert!(!wm.state().is_managed(window_id(Hwnd(2))));
         assert!(!wm.we_hid(Hwnd(2)), "it was taken and left off screen");
         assert_eq!(cloak_calls(&platform, Hwnd(2)).last(), Some(&false));
+    }
+
+    #[test]
+    fn a_matching_window_the_user_unmanaged_is_taken_rather_than_started_again() {
+        let (mut wm, _) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert!(
+            wm.launched.lock().unwrap().is_empty(),
+            "a second copy was started while the first was open and unmanaged"
+        );
+        assert_eq!(wm.scratchpad_holding(Hwnd(2)), Some(0));
     }
 
     #[test]

@@ -196,7 +196,7 @@ pub enum Cmd {
     Minimize,
     /// Ask the focused window to close
     Close,
-    /// Manage the focused window even if a rule would skip it
+    /// Manage the focused window even though the usual checks say no
     Manage,
     /// Stop managing the focused window
     Unmanage,
