@@ -3885,6 +3885,13 @@ impl WindowManager {
         if self.core.is_managed(window_id(hwnd)) {
             return Response::Ok;
         }
+        // Tiled, it would leave a hole in the layout each time the scratchpad hides it.
+        if let Some(index) = self.scratchpad_holding(hwnd) {
+            return Response::error(format!(
+                "the focused window belongs to the scratchpad {:?}",
+                self.scratchpads[index].config.name
+            ));
+        }
         let info = match self.platform.window_info(hwnd) {
             Ok(info) => info,
             Err(e) => return Response::error(e),
@@ -7555,6 +7562,25 @@ alt + j : focus down
             announced,
             "a bar was told the window is managed"
         );
+    }
+
+    #[test]
+    fn manage_leaves_a_scratchpad_window_to_its_scratchpad() {
+        let (mut wm, _) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert_eq!(wm.scratchpad_holding(Hwnd(2)), Some(0));
+        wm.foreground = Some(Hwnd(2));
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert!(response.error_message().is_some(), "{response:?}");
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(2))),
+            "the scratchpad window took a tile it will be hidden from"
+        );
+        assert_eq!(wm.scratchpad_holding(Hwnd(2)), Some(0));
     }
 
     #[test]
