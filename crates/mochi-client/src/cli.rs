@@ -91,6 +91,12 @@ pub enum Cmd {
         /// Report a failure as JSON too. The state is JSON either way.
         #[arg(long)]
         json: bool,
+        /// List only the windows of this program, by its whole file name in any case
+        #[arg(long, value_name = "NAME")]
+        exe: Option<String>,
+        /// List only the windows whose title matches this regular expression
+        #[arg(long, value_name = "REGEX")]
+        title: Option<String>,
     },
     /// Print a single value from the daemon
     Query {
@@ -539,7 +545,8 @@ impl Cmd {
             Cmd::ReloadConfiguration => Command::ReloadConfiguration,
             Cmd::RestoreWindows => Command::RestoreWindows,
             Cmd::Retile => Command::Retile,
-            Cmd::State { json: _ } => Command::State,
+            // Picking windows out of the document is done by `mochic` too.
+            Cmd::State { .. } => Command::State,
             Cmd::Query { target, json: _ } => Command::Query { target: *target },
             // Table or raw JSON is a decision `mochic` makes on its own, the
             // daemon answers the same document either way.
@@ -988,8 +995,23 @@ mod tests {
     }
 
     #[test]
+    fn state_keeps_the_names_it_was_given() {
+        let line = ["mochic", "state", "--exe", "brave.exe", "--title", "^Inbox"];
+        let Cmd::State { json, exe, title } = Cli::try_parse_from(line).unwrap().command else {
+            panic!("not state");
+        };
+        assert!(!json);
+        assert_eq!(exe.as_deref(), Some("brave.exe"));
+        assert_eq!(title.as_deref(), Some("^Inbox"));
+    }
+
+    #[test]
     fn the_extra_commands_parse_too() {
         assert_eq!(parse(&["state"]), Command::State);
+        assert_eq!(
+            parse(&["state", "--exe", "brave.exe", "--title", "^Inbox", "--json"]),
+            Command::State
+        );
         assert_eq!(parse(&["promote"]), Command::Promote);
         assert_eq!(parse(&["unstack"]), Command::Unstack);
         assert_eq!(
