@@ -338,7 +338,8 @@ pub enum Command {
     Minimize,
     /// Ask the focused window to close.
     Close,
-    /// Start managing the focused window even if a rule would skip it.
+    /// Start managing the focused window even though the usual checks say no.
+    /// An ignore rule still keeps it out.
     Manage,
     /// Stop managing the focused window and leave it where it is.
     Unmanage,
