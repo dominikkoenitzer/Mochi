@@ -178,6 +178,26 @@ command line does.
 | `default_workspace_padding` | number | Outer padding of a workspace that sets none, in logical pixels. |
 | `default_container_padding` | number | Container padding of a workspace that sets none, in logical pixels. |
 
+### state --exe, --title
+
+With `--exe <name>` or `--title <regex>`, `mochic state` prints an array of the
+managed windows that match instead of the whole document, so a script can find
+a window by name rather than by focus. `--exe` compares the whole file name in
+any case (`brave.exe`, not `brave`); `--title` is a regular expression searched
+anywhere in the title. Given both, a window has to match both. A pattern that
+is not a regular expression fails with `usage` before the daemon is asked.
+
+Each entry has the [window](#window) fields and four more:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `monitor` | number | Index of the monitor it is on. |
+| `workspace` | number | Index of the workspace on that monitor. |
+| `workspace_name` | string or null | That workspace's name. |
+| `placement` | string | `tiled`, `monocle`, `maximized` or `floating`. |
+
+No match gives an empty array and exit code 0.
+
 ### query
 
 ```json

@@ -625,6 +625,7 @@ dependencies = [
  "mochi-client",
  "mochi-core",
  "mochi-hotkey",
+ "regex",
  "rmcp",
  "schemars",
  "serde",
