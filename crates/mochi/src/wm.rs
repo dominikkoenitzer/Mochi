@@ -3874,7 +3874,7 @@ impl WindowManager {
         Response::Why { why }
     }
 
-    /// `manage`: take the foreground window whatever the heuristics think.
+    /// `manage`: take the foreground window past every heuristic a manage rule could overrule.
     fn manage_foreground(&mut self) -> Response {
         let Some(hwnd) = self
             .foreground
@@ -3889,6 +3889,12 @@ impl WindowManager {
             Ok(info) => info,
             Err(e) => return Response::error(e),
         };
+        // Never a window nothing could tile: the taskbar, the desktop, an elevated one.
+        if let Err(reason) = is_manageable_with(&info, true)
+            && !reason.is_overridable()
+        {
+            return Response::error(format!("the focused window cannot be managed: {reason}"));
+        }
         let window = core_window(&info).with_min_size(self.platform.min_size(hwnd));
         let (monitor, workspace) = self.destination(&info, &window);
         let before = self.focus();
@@ -7489,6 +7495,36 @@ alt + j : focus down
         wm.foreground = Some(Hwnd(1));
         assert_eq!(wm.handle_command(Command::Manage).0, Response::Ok);
         assert_eq!(wm.state().all_window_ids().count(), 2);
+    }
+
+    /// The `manage` notifications sent so far.
+    fn manage_events(wm: &WindowManager) -> usize {
+        wm.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, NotificationEvent::Manage { .. }))
+            .count()
+    }
+
+    #[test]
+    fn manage_refuses_the_taskbar_and_every_window_nothing_could_tile() {
+        let taskbar = WindowInfo {
+            class: "Shell_TrayWnd".into(),
+            exe: "explorer.exe".into(),
+            ..window(2, "")
+        };
+        let (mut wm, platform) = manager(vec![window(1, "One"), taskbar]);
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        platform.clear_history();
+        wm.foreground = Some(Hwnd(2));
+        let announced = manage_events(&wm);
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert!(response.error_message().is_some(), "{response:?}");
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert!(platform.rect_of(Hwnd(2)).is_none(), "the taskbar was moved");
+        assert_eq!(manage_events(&wm), announced);
     }
 
     #[test]
