@@ -292,29 +292,55 @@ fn ask_to_stop(layout: &Layout, payload: Option<&Payload>) -> Option<PathBuf> {
     temp
 }
 
-/// Both files are written next to their places first and only then moved
-/// over the old ones, so a full disk never leaves a new mochi.exe beside an
-/// old mochic.exe.
+/// Both files are written next to their places first, then the old ones are
+/// moved aside and the new ones moved in. A step that fails puts the old ones
+/// back, so a full disk or a file another program holds never leaves a new
+/// mochi.exe beside an old mochic.exe.
 fn put_binaries(bin: &Path, payload: &Payload) -> Result<(), String> {
     std::fs::create_dir_all(bin).map_err(|e| format!("creating {}: {e}", bin.display()))?;
     let files = [("mochi.exe", payload.mochi), ("mochic.exe", payload.mochic)];
     let staged = |name: &str| bin.join(format!("{name}.new"));
-    let clean_up = || {
+    let aside = |name: &str| bin.join(format!("{name}.old"));
+    let mut moved = Vec::new();
+    let mut placed = Vec::new();
+    let undo = |moved: &[&str], placed: &[&str]| {
+        for name in placed.iter().filter(|name| !moved.contains(name)) {
+            let _ = std::fs::remove_file(bin.join(name));
+        }
+        for name in moved {
+            let _ = std::fs::rename(aside(name), bin.join(name));
+        }
         for (name, _) in files {
             let _ = std::fs::remove_file(staged(name));
         }
     };
     for (name, bytes) in files {
         if let Err(e) = std::fs::write(staged(name), bytes) {
-            clean_up();
+            undo(&moved, &placed);
             return Err(format!("writing {}: {e}", bin.join(name).display()));
         }
     }
     for (name, _) in files {
+        // One left by an earlier setup that could not remove it.
+        let _ = std::fs::remove_file(aside(name));
+        match std::fs::rename(bin.join(name), aside(name)) {
+            Ok(()) => moved.push(name),
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => {
+                undo(&moved, &placed);
+                return Err(format!("replacing {}: {e}", bin.join(name).display()));
+            }
+        }
+    }
+    for (name, _) in files {
         if let Err(e) = std::fs::rename(staged(name), bin.join(name)) {
-            clean_up();
+            undo(&moved, &placed);
             return Err(format!("replacing {}: {e}", bin.join(name).display()));
         }
+        placed.push(name);
+    }
+    for name in moved {
+        let _ = std::fs::remove_file(aside(name));
     }
     Ok(())
 }
@@ -483,4 +509,125 @@ fn remove_other_install(layout: &Layout) -> Vec<String> {
 fn other_bin(layout: &Layout) -> Option<PathBuf> {
     let (recorded, _) = win::read_text(plan::STATE_KEY, "InstallRoot").ok()??;
     plan::other_bin(Some(&recorded), layout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{File, OpenOptions};
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const NEW: Payload = Payload {
+        mochi: b"new mochi",
+        mochic: b"new mochic",
+    };
+
+    /// A folder of its own under TEMP, removed again even when a test fails.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("mochi-setup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    fn old_pair(bin: &Path) {
+        std::fs::write(bin.join("mochi.exe"), b"old mochi").unwrap();
+        std::fs::write(bin.join("mochic.exe"), b"old mochic").unwrap();
+    }
+
+    /// Opens a file the way a program that shares nothing does, so it can be
+    /// neither renamed nor replaced while the handle lives.
+    fn hold(path: &Path) -> File {
+        OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap()
+    }
+
+    fn contents(bin: &Path) -> Vec<(String, String)> {
+        let mut files: Vec<_> = std::fs::read_dir(bin)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name, std::fs::read_to_string(entry.path()).unwrap())
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    fn pair(mochi: &str, mochic: &str) -> Vec<(String, String)> {
+        vec![
+            ("mochi.exe".into(), mochi.into()),
+            ("mochic.exe".into(), mochic.into()),
+        ]
+    }
+
+    #[test]
+    fn both_files_are_replaced_and_nothing_else_is_left() {
+        let dir = scratch("replace");
+        old_pair(&dir.0);
+        put_binaries(&dir.0, &NEW).unwrap();
+        assert_eq!(contents(&dir.0), pair("new mochi", "new mochic"));
+    }
+
+    #[test]
+    fn a_first_install_puts_both_files() {
+        let dir = scratch("first");
+        let bin = dir.0.join("bin");
+        put_binaries(&bin, &NEW).unwrap();
+        assert_eq!(contents(&bin), pair("new mochi", "new mochic"));
+    }
+
+    #[test]
+    fn files_an_earlier_setup_left_behind_are_cleared() {
+        let dir = scratch("leftover");
+        old_pair(&dir.0);
+        std::fs::write(dir.0.join("mochi.exe.old"), b"older mochi").unwrap();
+        std::fs::write(dir.0.join("mochic.exe.new"), b"half a mochic").unwrap();
+        put_binaries(&dir.0, &NEW).unwrap();
+        assert_eq!(contents(&dir.0), pair("new mochi", "new mochic"));
+    }
+
+    #[test]
+    fn a_held_mochi_leaves_both_old_files_in_place() {
+        let dir = scratch("held-mochi");
+        old_pair(&dir.0);
+        let held = hold(&dir.0.join("mochi.exe"));
+        assert!(put_binaries(&dir.0, &NEW).is_err());
+        drop(held);
+        assert_eq!(contents(&dir.0), pair("old mochi", "old mochic"));
+    }
+
+    #[test]
+    fn a_held_mochic_leaves_both_old_files_in_place() {
+        let dir = scratch("held-mochic");
+        old_pair(&dir.0);
+        let held = hold(&dir.0.join("mochic.exe"));
+        assert!(put_binaries(&dir.0, &NEW).is_err());
+        drop(held);
+        assert_eq!(contents(&dir.0), pair("old mochi", "old mochic"));
+    }
+
+    #[test]
+    fn a_leftover_that_cannot_go_leaves_both_old_files_in_place() {
+        let dir = scratch("held-leftover");
+        old_pair(&dir.0);
+        std::fs::write(dir.0.join("mochic.exe.old"), b"older mochic").unwrap();
+        let held = hold(&dir.0.join("mochic.exe.old"));
+        assert!(put_binaries(&dir.0, &NEW).is_err());
+        drop(held);
+        std::fs::remove_file(dir.0.join("mochic.exe.old")).unwrap();
+        assert_eq!(contents(&dir.0), pair("old mochi", "old mochic"));
+    }
 }
