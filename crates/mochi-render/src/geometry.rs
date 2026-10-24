@@ -113,13 +113,25 @@ impl FrameGeometry {
     }
 }
 
+/// Keeps the border rect of an on-screen target and its size inside `i32`.
+const MAX_EXPANSION: i32 = i32::MAX / 4;
+
 /// How far the border window reaches past the target rect on every side.
 ///
 /// Can be negative, which draws the frame inside the window instead of around
-/// it; that is what a `border_offset` below `-border_width` asks for.
+/// it; that is what a `border_offset` below `-border_width` asks for. The sum
+/// is held to a quarter of `i32::MAX` either way, far past any surface a frame
+/// can be drawn on.
 #[must_use]
 pub const fn expansion(width: i32, offset: i32) -> i32 {
-    width + offset
+    let expand = width.saturating_add(offset);
+    if expand > MAX_EXPANSION {
+        MAX_EXPANSION
+    } else if expand < -MAX_EXPANSION {
+        -MAX_EXPANSION
+    } else {
+        expand
+    }
 }
 
 /// The rectangle the border window occupies for a given target.
@@ -243,6 +255,40 @@ mod tests {
         let window = border_window_rect(target, 6, -10);
         assert_eq!(window, Rect::new(4, 4, 96, 96));
         assert_eq!(expansion(6, -10), -4);
+    }
+
+    #[test]
+    fn an_extreme_width_or_offset_stays_in_range() {
+        let target = Rect::new(100, 100, 500, 400);
+        let growing = [
+            (i32::MAX, 0),
+            (0, i32::MAX),
+            (i32::MAX, i32::MAX),
+            (i32::MAX, -6),
+        ];
+        for (width, offset) in growing {
+            let window = border_window_rect(target, width, offset);
+            assert!(
+                window.left <= target.left
+                    && window.top <= target.top
+                    && window.right >= target.right
+                    && window.bottom >= target.bottom,
+                "{width}, {offset} gave {window:?}"
+            );
+            assert!(window.width() > target.width() && window.height() > target.height());
+            let _ = frame_geometry(target, width, offset, true, 96);
+        }
+        let shrinking = [
+            (i32::MIN, 0),
+            (0, i32::MIN),
+            (i32::MIN, i32::MIN),
+            (6, i32::MIN),
+        ];
+        for (width, offset) in shrinking {
+            let window = border_window_rect(target, width, offset);
+            assert!(window.is_empty(), "{width}, {offset} gave {window:?}");
+            assert!(frame_geometry(target, width, offset, true, 96).is_empty());
+        }
     }
 
     #[test]
