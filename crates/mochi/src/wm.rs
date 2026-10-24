@@ -3895,6 +3895,10 @@ impl WindowManager {
         {
             return Response::error(format!("the focused window cannot be managed: {reason}"));
         }
+        // The model would turn it away, so an ok here would be untrue.
+        if self.rules_say_ignore(&info) {
+            return Response::error("an ignore rule matches the focused window");
+        }
         let window = core_window(&info).with_min_size(self.platform.min_size(hwnd));
         let (monitor, workspace) = self.destination(&info, &window);
         let before = self.focus();
@@ -7525,6 +7529,32 @@ alt + j : focus down
         assert!(!wm.state().is_managed(window_id(Hwnd(2))));
         assert!(platform.rect_of(Hwnd(2)).is_none(), "the taskbar was moved");
         assert_eq!(manage_events(&wm), announced);
+    }
+
+    #[test]
+    fn manage_says_so_when_an_ignore_rule_keeps_the_window_out() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        let (response, _) = wm.handle_command(Command::IgnoreRule {
+            identifier: mochi_client::RuleIdentifier::Title,
+            id: "Two".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert!(response.is_ok());
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        wm.foreground = Some(Hwnd(2));
+        let announced = manage_events(&wm);
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert!(
+            response.error_message().is_some(),
+            "manage answered ok and left the window out"
+        );
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert_eq!(
+            manage_events(&wm),
+            announced,
+            "a bar was told the window is managed"
+        );
     }
 
     #[test]
