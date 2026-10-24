@@ -497,7 +497,9 @@ pub fn restore(platform: &dyn Platform, hidden: &Mutex<Hidden>) {
             if e.downcast_ref::<CloakUnsupported>().is_some() || platform.outranks_us(hwnd) {
                 tracing::warn!(
                     %hwnd,
-                    "restore: mochi took this window off screen and can no longer put it back,                      because the window now outranks it. Bring it back from the taskbar or with                      alt+tab. Mochi is letting go of it rather than promising again"
+                    "restore: mochi took this window off screen and can no longer put it back, \
+                     because the window now outranks it. Bring it back from the taskbar or with \
+                     alt+tab. Mochi is letting go of it rather than promising again"
                 );
                 continue;
             }
@@ -4007,8 +4009,15 @@ impl WindowManager {
         if let Err(e) = rule.validate() {
             return Response::error(e);
         }
-        self.push_rule(decision, rule.clone());
-        self.added_rules.push((decision, rule));
+        // Every rule in `added_rules` is also in its list, so one check covers both.
+        if !self
+            .added_rules
+            .iter()
+            .any(|(d, r)| *d == decision && *r == rule)
+        {
+            self.push_rule(decision, rule.clone());
+            self.added_rules.push((decision, rule));
+        }
         // A rule that arrives after the window it describes has to catch up.
         self.reapply_rules();
         // And a manage rule is about windows that are not in the model at all,
@@ -7364,6 +7373,50 @@ alt + j : focus down
     }
 
     #[test]
+    fn the_same_rule_sent_again_is_kept_once() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        let rules = |wm: &WindowManager| {
+            let r = &wm.state().rules;
+            [
+                r.ignore_rules.len(),
+                r.own_ignore_rules.len(),
+                r.floating_applications.len(),
+                r.manage_rules.len(),
+            ]
+        };
+        let before = rules(&wm);
+        for _ in 0..3 {
+            for command in [
+                Command::IgnoreRule {
+                    identifier: mochi_client::RuleIdentifier::Exe,
+                    id: "Wallpaper.exe".into(),
+                    matching_strategy: mochi_client::MatchingStrategy::Equals,
+                },
+                Command::FloatRule {
+                    identifier: mochi_client::RuleIdentifier::Class,
+                    id: "Palette".into(),
+                    matching_strategy: mochi_client::MatchingStrategy::Equals,
+                },
+                Command::ManageRule {
+                    identifier: mochi_client::RuleIdentifier::Title,
+                    id: "Notes".into(),
+                    matching_strategy: mochi_client::MatchingStrategy::Contains,
+                },
+            ] {
+                let (response, _) = wm.handle_command(command);
+                assert_eq!(response, Response::Ok);
+            }
+        }
+        let grown: Vec<usize> = rules(&wm)
+            .iter()
+            .zip(before)
+            .map(|(after, before)| after - before)
+            .collect();
+        assert_eq!(grown, [1, 1, 1, 1]);
+        assert_eq!(wm.added_rules.len(), 3);
+    }
+
+    #[test]
     fn an_ignore_rule_typed_at_the_keyboard_outranks_a_later_manage_rule() {
         let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
         wm.handle_command(Command::IgnoreRule {
@@ -7705,6 +7758,40 @@ alt + j : focus down
         assert!(
             wm.hidden().lock().unwrap().is_empty(),
             "a window that can never be restored was written down again"
+        );
+    }
+
+    #[test]
+    fn the_warning_for_a_window_it_lets_go_reads_as_one_line() {
+        #[derive(Clone, Default)]
+        struct Log(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Log {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let log = Log::default();
+        let sink = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish();
+
+        let mut out_of_reach = window(2, "Two");
+        out_of_reach.exe = String::new();
+        let (mut wm, platform) = manager(vec![window(1, "One"), out_of_reach]);
+        platform.unrestorable.lock().unwrap().push(Hwnd(2));
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        tracing::subscriber::with_default(subscriber, || restore(platform.as_ref(), &wm.hidden()));
+
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("put it back, because the window now outranks it. Bring it back from the taskbar or with alt+tab."),
+            "{text}"
         );
     }
 
