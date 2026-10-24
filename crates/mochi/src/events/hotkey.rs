@@ -45,8 +45,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN,
-    WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    SPI_GETKEYBOARDDELAY, SPI_GETKEYBOARDSPEED, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SetWindowsHookExW, SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use super::{Event, EventSender, raw};
@@ -138,6 +139,8 @@ thread_local! {
     static MODE: Cell<ModeState> = const { Cell::new(ModeState::new()) };
     /// The [`GATE_CHANGES`] the active mode was entered under.
     static MODE_GATE: Cell<usize> = const { Cell::new(0) };
+    /// The key whose press last switched the mode: see [`decide`].
+    static SWITCH_KEY: Cell<Option<Key>> = const { Cell::new(None) };
     /// Where a match is reported.
     static SENDER: RefCell<Option<EventSender>> = const { RefCell::new(None) };
     /// What the hook did with the last press of each key that is down.
@@ -156,7 +159,10 @@ thread_local! {
     ///
     /// Sixteen slots is more than a keyboard can report at once. A press that
     /// does not fit is never swallowed: see [`record_press`].
-    static PRESSES: RefCell<[(u16, bool); 16]> = const { RefCell::new([(0, false); 16]) };
+    ///
+    /// Each slot also keeps the time of its key's last down, which tells a
+    /// repeat from a fresh press: see [`is_repeat`].
+    static PRESSES: RefCell<[(u16, bool, u32); 16]> = const { RefCell::new([(0, false, 0); 16]) };
 }
 
 /// True while the key is physically down, according to the async key state.
@@ -205,25 +211,22 @@ const fn is_modifier(vk: u16) -> bool {
 
 /// Records which way a press went, so its release can follow.
 ///
-/// `Some(true)` when this is a fresh press, `Some(false)` when the key was
-/// already down and this is auto-repeat, and `None` when there was no room to
-/// record it at all. A press that cannot be recorded must not be swallowed:
-/// its release would have nothing to follow and would reach the application on
+/// `Some(true)` when this is a fresh press, `Some(false)` when it is
+/// auto-repeat by [`is_repeat`], and `None` when there was no room to record
+/// it at all. A press that cannot be recorded must not be swallowed: its
+/// release would have nothing to follow and would reach the application on
 /// its own, which is the latched key this table exists to prevent.
-fn record_press(vk: u16, swallowed: bool) -> Option<bool> {
-    record_press_with(vk, swallowed, |vk| down(VIRTUAL_KEY(vk)))
-}
-
-/// [`record_press`] with the "is this key still held" question injected, so the
-/// full-table path can be tested without a keyboard.
-fn record_press_with(vk: u16, swallowed: bool, still_down: impl Fn(u16) -> bool) -> Option<bool> {
+///
+/// `time` is the key event's time stamp and `window` the [`repeat_window`].
+fn record_press(vk: u16, swallowed: bool, time: u32, window: u32) -> Option<bool> {
     PRESSES.with(|cell| {
         let mut keys = cell.borrow_mut();
         if let Some(slot) = keys.iter_mut().find(|slot| slot.0 == vk) {
+            let repeat = time.wrapping_sub(slot.2) <= window;
             // The last press wins: a key that has changed sides while held is
             // exactly the case that strands a release.
-            slot.1 = swallowed;
-            return Some(false);
+            *slot = (vk, swallowed, time);
+            return Some(!repeat);
         }
         if !keys.iter().any(|slot| slot.0 == 0) {
             // (see `reclaim`)
@@ -234,24 +237,23 @@ fn record_press_with(vk: u16, swallowed: bool, still_down: impl Fn(u16) -> bool)
             // then stays taken for the life of the process. Sixteen of those
             // and every binding starts behaving as if it were auto-repeat,
             // with no way back short of restarting Mochi.
-            //
-            // Windows still knows which keys are physically down, so ask it.
-            reclaim(&mut keys, &still_down);
+            reclaim(&mut keys, time, window);
         }
         let slot = keys.iter_mut().find(|slot| slot.0 == 0)?;
-        *slot = (vk, swallowed);
+        *slot = (vk, swallowed, time);
         Some(true)
     })
 }
 
-/// Frees the slots of keys that are no longer held.
+/// Frees the slots of keys that have not gone down within `window` of `now`.
 ///
-/// Split out from the caller so it can be tested without a keyboard: the
-/// predicate is `GetAsyncKeyState` in the daemon and a list in the tests.
-fn reclaim(keys: &mut [(u16, bool); 16], still_down: impl Fn(u16) -> bool) {
+/// Not the async key state: Windows never marks a swallowed key down, so a
+/// held bound key would lose its slot and its next repeat would run again. A
+/// held key that still repeats goes down again within the window.
+fn reclaim(keys: &mut [(u16, bool, u32); 16], now: u32, window: u32) {
     for slot in keys.iter_mut() {
-        if slot.0 != 0 && !still_down(slot.0) {
-            *slot = (0, false);
+        if slot.0 != 0 && now.wrapping_sub(slot.2) > window {
+            *slot = (0, false, 0);
         }
     }
 }
@@ -267,7 +269,7 @@ fn take_press(vk: u16) -> bool {
         match keys.iter_mut().find(|slot| slot.0 == vk) {
             Some(slot) => {
                 let swallowed = slot.1;
-                *slot = (0, false);
+                *slot = (0, false, 0);
                 swallowed
             }
             None => false,
@@ -308,10 +310,11 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
 
         if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
             if !is_modifier(vk) {
-                let matched = press(vk);
+                let window = repeat_window();
+                let matched = press(vk, event.time, window);
                 // Every press is recorded, matched or not, so that the release
                 // follows the press the application actually saw.
-                if let Some(first) = record_press(vk, matched.is_some())
+                if let Some(first) = record_press(vk, matched.is_some(), event.time, window)
                     && let Some(modifiers) = matched
                 {
                     // Only the first press of a held key masks: auto-repeat is
@@ -385,13 +388,46 @@ fn mask_the_modifier() {
     }
 }
 
-/// Whether this press is auto-repeat: the key's last press is recorded and its
-/// release has not come yet.
+/// Whether this press is auto-repeat: the key's last press is recorded, its
+/// release has not come yet, and it went down no longer than `window` ago.
 ///
 /// Not the async key state: Windows never marks a swallowed key down, so every
-/// repeat of a bound key would read as a fresh press.
-fn is_repeat(vk: u16) -> bool {
-    PRESSES.with(|cell| cell.borrow().iter().any(|slot| slot.0 == vk))
+/// repeat of a bound key would read as a fresh press. The time matters because
+/// a release can be lost, and without it the next real press of that key would
+/// read as a repeat and be held.
+fn is_repeat(vk: u16, time: u32, window: u32) -> bool {
+    PRESSES.with(|cell| {
+        cell.borrow()
+            .iter()
+            .any(|slot| slot.0 == vk && time.wrapping_sub(slot.2) <= window)
+    })
+}
+
+/// The longest gap, in milliseconds, between two downs of a held key: the
+/// keyboard repeat delay or the repeat period, whichever is longer, with half
+/// again on top for a busy machine.
+fn repeat_window() -> u32 {
+    let read = |action, fallback| {
+        let mut value = 0u32;
+        let read = unsafe {
+            SystemParametersInfoW(
+                action,
+                0,
+                Some((&raw mut value).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+        };
+        if read.is_ok() { value } else { fallback }
+    };
+    repeat_window_for(read(SPI_GETKEYBOARDDELAY, 3), read(SPI_GETKEYBOARDSPEED, 0))
+}
+
+/// [`repeat_window`] for a delay setting of 0 to 3 (250 to 1000 ms) and a speed
+/// setting of 0 to 31 (about 2.5 to 30 repeats a second).
+fn repeat_window_for(delay: u32, speed: u32) -> u32 {
+    let delay = (delay.min(3) + 1) * 250;
+    let period = 62_000 / (155 + 55 * speed.min(31));
+    delay.max(period) * 3 / 2
 }
 
 /// Forgets every recorded press, for a switch of the input desktop.
@@ -399,7 +435,7 @@ fn is_repeat(vk: u16) -> bool {
 /// Ctrl-Alt-Del, Win-L and a UAC prompt move the keyboard to the secure
 /// desktop, and a key released there never sends its release to this hook.
 fn forget_presses() {
-    PRESSES.with(|cell| *cell.borrow_mut() = [(0, false); 16]);
+    PRESSES.with(|cell| *cell.borrow_mut() = [(0, false, 0); 16]);
 }
 
 unsafe extern "system" fn desktop_switched(
@@ -463,13 +499,24 @@ enum Press {
 /// Matches one press in the active mode, through the gate. A repeat runs only
 /// an action that [`Action::repeats`]; any other is swallowed and switches no
 /// mode.
+///
+/// `switch_key` is the key whose fresh press last switched the mode. Its
+/// repeats are swallowed too, since the new mode may not bind that key and
+/// they would reach the application as typed keys.
 fn decide(
     bindings: &Bindings,
     mode: &mut ModeState,
     gate: Gate,
     trigger: Trigger,
     repeat: bool,
+    switch_key: &mut Option<Key>,
 ) -> Press {
+    if repeat && *switch_key == Some(trigger.key) {
+        return Press::Held;
+    }
+    if !repeat {
+        *switch_key = None;
+    }
     let mut next = *mode;
     let Some(binding) = next.press(bindings, trigger, |action| gate.admits(action)) else {
         return Press::Theirs;
@@ -477,18 +524,21 @@ fn decide(
     if repeat && !binding.action.repeats() {
         return Press::Held;
     }
+    if !repeat && next.active() != mode.active() {
+        *switch_key = Some(trigger.key);
+    }
     *mode = next;
     Press::Run(binding.action.clone())
 }
 
 /// Matches one key press and reports it. The modifiers that were held when it
 /// matched, or `None` when the press was not ours.
-fn press(vk: u16) -> Option<Modifiers> {
+fn press(vk: u16, time: u32, window: u32) -> Option<Modifiers> {
     let trigger = Trigger {
         modifiers: current_modifiers(),
         key: Key::new(vk),
     };
-    let repeat = is_repeat(vk);
+    let repeat = is_repeat(vk, time, window);
 
     let gate = Gate::from_usize(GATE.load(Ordering::Relaxed));
     let decided = BINDINGS.with(|cell| {
@@ -503,8 +553,10 @@ fn press(vk: u16) -> Option<Modifiers> {
             mode.reset();
             MODE_GATE.set(changes);
         }
-        let decided = decide(&bindings, &mut mode, gate, trigger, repeat);
+        let mut switch_key = SWITCH_KEY.get();
+        let decided = decide(&bindings, &mut mode, gate, trigger, repeat, &mut switch_key);
         MODE.set(mode);
+        SWITCH_KEY.set(switch_key);
         decided
     });
 
@@ -805,17 +857,18 @@ mod tests {
         // reaches this one. The slot stayed taken for the life of the process,
         // and sixteen of those left every binding behaving as auto-repeat with
         // no way back short of restarting Mochi.
-        let mut keys = [(0u16, false); 16];
+        let mut keys = [(0u16, false, 0u32); 16];
         for (i, slot) in keys.iter_mut().enumerate() {
-            *slot = (u16::try_from(i + 1).unwrap(), true);
+            *slot = (u16::try_from(i + 1).unwrap(), true, 1_000);
         }
+        // Only key 7 is still held: it went down again a moment ago.
+        keys[6].2 = 9_900;
         assert!(
             !keys.iter().any(|slot| slot.0 == 0),
             "the table starts full"
         );
 
-        // Only key 7 is still physically held.
-        reclaim(&mut keys, |vk| vk == 7);
+        reclaim(&mut keys, 10_000, 750);
 
         assert_eq!(
             keys.iter().filter(|slot| slot.0 != 0).count(),
@@ -831,6 +884,9 @@ mod tests {
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LSHIFT, VK_RSHIFT};
 
     use super::*;
+
+    /// The repeat window of the default keyboard settings.
+    const WINDOW: u32 = 750;
 
     fn bindings(text: &str) -> Bindings {
         Bindings::parse(text).expect("the fixture should parse")
@@ -927,8 +983,8 @@ mod tests {
         // let the binding stop matching (let go of Alt, or reload the file)
         // while it is still held. The repeats reach the application, so the
         // release has to reach it too.
-        assert_eq!(record_press(0x50, true), Some(true));
-        assert_eq!(record_press(0x50, false), Some(false));
+        assert_eq!(record_press(0x50, true, 1_000, WINDOW), Some(true));
+        assert_eq!(record_press(0x50, false, 1_030, WINDOW), Some(false));
         assert!(
             !take_press(0x50),
             "the release was swallowed for a press the application was given, \
@@ -937,8 +993,8 @@ mod tests {
 
         // And the mirror: a plain key held while Alt is pressed starts
         // matching half way through, and its release belongs to Mochi.
-        assert_eq!(record_press(0x51, false), Some(true));
-        assert_eq!(record_press(0x51, true), Some(false));
+        assert_eq!(record_press(0x51, false, 1_000, WINDOW), Some(true));
+        assert_eq!(record_press(0x51, true, 1_030, WINDOW), Some(false));
         assert!(take_press(0x51));
     }
 
@@ -948,24 +1004,25 @@ mod tests {
         // went, so it has to be handed on: swallowing it would strand the
         // release. Sixteen keys held at once is already past what a keyboard
         // reports, so this is the safety valve, not the normal path.
-        // Every one of the sixteen really is held, so nothing can be reclaimed.
-        let all_held = |_vk: u16| true;
+        // Every one of the sixteen went down a moment ago, so nothing can be
+        // reclaimed.
         for vk in 0x41..0x51u16 {
             assert_eq!(
-                record_press_with(vk, true, all_held),
+                record_press(vk, true, 1_000, WINDOW),
                 Some(true),
                 "slot for {vk:#x}"
             );
         }
         assert_eq!(
-            record_press_with(0x60, true, all_held),
+            record_press(0x60, true, 1_010, WINDOW),
             None,
             "a seventeenth held key claimed a slot that does not exist"
         );
-        // But when they are not held, the slots come back rather than wedging
-        // every binding for the life of the process.
+        // But when none has gone down for longer than a repeat takes, the
+        // slots come back rather than wedging every binding for the life of
+        // the process.
         assert_eq!(
-            record_press_with(0x60, true, |_| false),
+            record_press(0x60, true, 9_000, WINDOW),
             Some(true),
             "slots left behind by a lost key-up were never reclaimed"
         );
@@ -982,9 +1039,9 @@ mod tests {
     #[test]
     fn a_swallowed_press_swallows_its_release_exactly_once() {
         assert!(!take_press(0x48));
-        assert_eq!(record_press(0x48, true), Some(true));
+        assert_eq!(record_press(0x48, true, 1_000, WINDOW), Some(true));
         // Auto-repeat presses the same key again before it comes up.
-        assert_eq!(record_press(0x48, true), Some(false));
+        assert_eq!(record_press(0x48, true, 1_030, WINDOW), Some(false));
         assert!(take_press(0x48));
         assert!(!take_press(0x48));
     }
@@ -992,8 +1049,9 @@ mod tests {
     /// Holds `key` through five auto-repeats in `gate`: what each press did.
     fn hold(bindings: &Bindings, mode: &mut ModeState, gate: Gate, key: &str) -> Vec<Press> {
         let trigger: Trigger = key.parse().expect("the test spells its keys right");
+        let mut switch_key = None;
         (0..6)
-            .map(|i| decide(bindings, mode, gate, trigger, i > 0))
+            .map(|i| decide(bindings, mode, gate, trigger, i > 0, &mut switch_key))
             .collect()
     }
 
@@ -1044,7 +1102,7 @@ mod tests {
         let mut mode = ModeState::new();
         for _ in 0..2 {
             assert!(matches!(
-                decide(&bindings, &mut mode, Gate::All, trigger, false),
+                decide(&bindings, &mut mode, Gate::All, trigger, false, &mut None),
                 Press::Run(_)
             ));
         }
@@ -1086,26 +1144,62 @@ mod tests {
     }
 
     #[test]
+    fn a_held_mode_key_does_not_type_in_the_new_mode() {
+        let bindings = bindings(
+            "alt + shift + s : mode resize\n\
+             mode resize {\n\
+                 l : resize-axis horizontal increase\n\
+                 esc : mode default\n\
+             }\n",
+        );
+        let mut mode = ModeState::new();
+        let presses = hold(&bindings, &mut mode, Gate::All, "alt + shift + s");
+        assert_eq!(runs(&presses), 1, "{presses:?}");
+        assert!(
+            !presses.contains(&Press::Theirs),
+            "a repeat of the key that switched the mode reached the application: {presses:?}"
+        );
+        assert_eq!(bindings.mode_name(mode.active()), "resize");
+        // A fresh press of that key is matched in the new mode as usual.
+        let trigger: Trigger = "alt + shift + s".parse().unwrap();
+        assert_eq!(
+            decide(&bindings, &mut mode, Gate::All, trigger, false, &mut None),
+            Press::Theirs
+        );
+    }
+
+    #[test]
     fn only_a_key_down_since_its_recorded_press_is_a_repeat() {
-        assert!(!is_repeat(0x46), "a first press read as a repeat");
-        assert_eq!(record_press(0x46, true), Some(true));
-        assert!(is_repeat(0x46));
+        assert!(
+            !is_repeat(0x46, 1_000, WINDOW),
+            "a first press read as a repeat"
+        );
+        assert_eq!(record_press(0x46, true, 1_000, WINDOW), Some(true));
+        assert!(is_repeat(0x46, 1_030, WINDOW));
         assert!(take_press(0x46));
-        assert!(!is_repeat(0x46));
+        assert!(!is_repeat(0x46, 1_060, WINDOW));
         // Its release went to the secure desktop and the slot stayed behind.
-        assert_eq!(record_press(0x46, true), Some(true));
+        assert_eq!(record_press(0x46, true, 2_000, WINDOW), Some(true));
         forget_presses();
         assert!(
-            !is_repeat(0x46),
+            !is_repeat(0x46, 2_030, WINDOW),
             "a fresh press after a lost release read as a repeat"
         );
     }
 
-    /// One key down the way `keyboard_hook` takes it, with Windows reading the key as up.
-    fn swallowed_down(bindings: &Bindings, mode: &mut ModeState, trigger: Trigger) -> Press {
+    /// One key down at `time` the way `keyboard_hook` takes it.
+    fn swallowed_down(
+        bindings: &Bindings,
+        mode: &mut ModeState,
+        trigger: Trigger,
+        time: u32,
+    ) -> Press {
         let vk = trigger.key.vk();
-        let decided = decide(bindings, mode, Gate::All, trigger, is_repeat(vk));
-        record_press_with(vk, decided != Press::Theirs, |_| false);
+        let repeat = is_repeat(vk, time, WINDOW);
+        let mut switch_key = SWITCH_KEY.get();
+        let decided = decide(bindings, mode, Gate::All, trigger, repeat, &mut switch_key);
+        SWITCH_KEY.set(switch_key);
+        record_press(vk, decided != Press::Theirs, time, WINDOW);
         decided
     }
 
@@ -1115,8 +1209,9 @@ mod tests {
         let bindings = bindings("alt + shift + f24 : toggle-float\n");
         let trigger: Trigger = "alt + shift + f24".parse().unwrap();
         let mut mode = ModeState::new();
-        let presses: Vec<Press> = (0..6)
-            .map(|_| swallowed_down(&bindings, &mut mode, trigger))
+        let presses: Vec<Press> = [1_000, 1_500, 1_533, 1_566, 1_600, 1_633]
+            .into_iter()
+            .map(|time| swallowed_down(&bindings, &mut mode, trigger, time))
             .collect();
         assert_eq!(
             runs(&presses),
@@ -1126,10 +1221,72 @@ mod tests {
         assert!(take_press(trigger.key.vk()));
         // Pressed again after the release, it runs again.
         assert!(matches!(
-            swallowed_down(&bindings, &mut mode, trigger),
+            swallowed_down(&bindings, &mut mode, trigger, 1_700),
             Press::Run(_)
         ));
         assert!(take_press(trigger.key.vk()));
+    }
+
+    #[test]
+    fn a_press_after_a_lost_release_runs() {
+        // A release that never arrives leaves the slot behind. The next real
+        // press comes long after any repeat would have, so it is a press.
+        let bindings = bindings("alt + shift + f24 : toggle-float\n");
+        let trigger: Trigger = "alt + shift + f24".parse().unwrap();
+        let mut mode = ModeState::new();
+        for times in [[1_000, 1_030, 9_000], [u32::MAX - 10, 20, 5_000]] {
+            forget_presses();
+            let presses: Vec<Press> = times
+                .into_iter()
+                .map(|time| swallowed_down(&bindings, &mut mode, trigger, time))
+                .collect();
+            assert!(matches!(presses[0], Press::Run(_)), "{presses:?}");
+            assert_eq!(presses[1], Press::Held, "{presses:?}");
+            assert!(
+                matches!(presses[2], Press::Run(_)),
+                "a press after a lost release was held as a repeat: {presses:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_held_key_keeps_its_slot_when_the_table_is_full() {
+        // Fifteen slots left behind by lost releases, then a bound key held
+        // down. Windows reads that key as up because its presses are swallowed.
+        for vk in 0x41..0x50u16 {
+            assert_eq!(record_press(vk, false, 0, WINDOW), Some(true));
+        }
+        let bindings = bindings("alt + shift + f24 : toggle-float\n");
+        let trigger: Trigger = "alt + shift + f24".parse().unwrap();
+        let mut mode = ModeState::new();
+        assert!(matches!(
+            swallowed_down(&bindings, &mut mode, trigger, 10_000),
+            Press::Run(_)
+        ));
+        // Another key finds the table full and frees what is stale.
+        assert_eq!(record_press(0x60, false, 10_020, WINDOW), Some(true));
+        assert_eq!(
+            swallowed_down(&bindings, &mut mode, trigger, 10_050),
+            Press::Held,
+            "the held key lost its slot, so its repeat ran again"
+        );
+        assert!(take_press(trigger.key.vk()));
+    }
+
+    #[test]
+    fn the_repeat_window_covers_every_keyboard_setting() {
+        for delay in 0..=3 {
+            for speed in 0..=31 {
+                let window = repeat_window_for(delay, speed);
+                // The delay before the first repeat, and the time between
+                // repeats at 2.5 to 30 a second.
+                let period = 1000.0 / (2.5 + f64::from(speed) * 27.5 / 31.0);
+                assert!(window > (delay + 1) * 250, "{delay} {speed} {window}");
+                assert!(f64::from(window) > period, "{delay} {speed} {window}");
+            }
+        }
+        assert_eq!(repeat_window_for(99, 99), repeat_window_for(3, 31));
+        assert!(repeat_window() >= repeat_window_for(0, 31));
     }
 
     #[test]
