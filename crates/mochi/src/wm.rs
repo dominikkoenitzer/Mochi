@@ -3972,8 +3972,15 @@ impl WindowManager {
         if let Err(e) = rule.validate() {
             return Response::error(e);
         }
-        self.push_rule(decision, rule.clone());
-        self.added_rules.push((decision, rule));
+        // Every rule in `added_rules` is also in its list, so one check covers both.
+        if !self
+            .added_rules
+            .iter()
+            .any(|(d, r)| *d == decision && *r == rule)
+        {
+            self.push_rule(decision, rule.clone());
+            self.added_rules.push((decision, rule));
+        }
         // A rule that arrives after the window it describes has to catch up.
         self.reapply_rules();
         // And a manage rule is about windows that are not in the model at all,
@@ -7326,6 +7333,50 @@ alt + j : focus down
             wm.state().rules.floating_applications.is_empty(),
             "a manage rule that lands in the floating list would float every              window it was meant to rescue"
         );
+    }
+
+    #[test]
+    fn the_same_rule_sent_again_is_kept_once() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        let rules = |wm: &WindowManager| {
+            let r = &wm.state().rules;
+            [
+                r.ignore_rules.len(),
+                r.own_ignore_rules.len(),
+                r.floating_applications.len(),
+                r.manage_rules.len(),
+            ]
+        };
+        let before = rules(&wm);
+        for _ in 0..3 {
+            for command in [
+                Command::IgnoreRule {
+                    identifier: mochi_client::RuleIdentifier::Exe,
+                    id: "Wallpaper.exe".into(),
+                    matching_strategy: mochi_client::MatchingStrategy::Equals,
+                },
+                Command::FloatRule {
+                    identifier: mochi_client::RuleIdentifier::Class,
+                    id: "Palette".into(),
+                    matching_strategy: mochi_client::MatchingStrategy::Equals,
+                },
+                Command::ManageRule {
+                    identifier: mochi_client::RuleIdentifier::Title,
+                    id: "Notes".into(),
+                    matching_strategy: mochi_client::MatchingStrategy::Contains,
+                },
+            ] {
+                let (response, _) = wm.handle_command(command);
+                assert_eq!(response, Response::Ok);
+            }
+        }
+        let grown: Vec<usize> = rules(&wm)
+            .iter()
+            .zip(before)
+            .map(|(after, before)| after - before)
+            .collect();
+        assert_eq!(grown, [1, 1, 1, 1]);
+        assert_eq!(wm.added_rules.len(), 3);
     }
 
     #[test]
