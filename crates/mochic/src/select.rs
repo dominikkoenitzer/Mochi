@@ -18,10 +18,18 @@ impl Filter {
         if exe.is_none() && title.is_none() {
             return Ok(None);
         }
+        // An empty name would pick every window whose program is unknown.
+        if exe.is_some_and(str::is_empty) {
+            return Err("--exe needs a file name, brave.exe for example".to_owned());
+        }
         let title = title
             .map(|pattern| {
-                Regex::new(pattern)
-                    .map_err(|err| format!("--title is not a regular expression: {err}"))
+                Regex::new(pattern).map_err(|err| match err {
+                    regex::Error::Syntax(_) => {
+                        format!("--title is not a regular expression: {err}")
+                    }
+                    _ => format!("--title is too big a pattern: {err}"),
+                })
             })
             .transpose()?;
         Ok(Some(Self {
@@ -42,9 +50,13 @@ impl Filter {
     }
 }
 
-/// The windows of a list in the document, or none when it is missing.
+/// The entries of a list in the document, or none when it is missing.
 fn listed(value: Option<&Value>) -> impl Iterator<Item = &Value> {
-    value.and_then(Value::as_array).into_iter().flatten()
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.is_object())
 }
 
 /// Every managed window in `state` that `filter` matches, each with the
@@ -199,6 +211,47 @@ mod tests {
             err.starts_with("--title is not a regular expression"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_title_keeps_its_case_unless_the_pattern_drops_it() {
+        assert!(pick(None, Some("inbox")).is_empty());
+        assert_eq!(hwnds(&pick(None, Some("(?i)inbox"))), [2]);
+    }
+
+    #[test]
+    fn an_empty_name_is_refused() {
+        let err = Filter::new(Some(""), None).unwrap_err();
+        assert!(err.starts_with("--exe needs a file name"), "{err}");
+    }
+
+    #[test]
+    fn a_pattern_over_the_size_limit_is_not_called_a_bad_one() {
+        let err = Filter::new(None, Some(r"\w{1000}{1000}")).unwrap_err();
+        assert!(err.starts_with("--title is too big a pattern"), "{err}");
+    }
+
+    #[test]
+    fn every_window_of_a_monocle_stack_is_listed() {
+        let mut state = state();
+        state["monitors"][1]["workspaces"][0]["monocle_container"]["windows"]
+            .as_array_mut()
+            .unwrap()
+            .push(window(7, "Code.exe", "lib.rs"));
+        let filter = Filter::new(Some("code.exe"), None).unwrap().unwrap();
+        let found = windows(&state, &filter);
+        assert_eq!(hwnds(&found), [5, 7]);
+        assert!(found.iter().all(|w| w["placement"] == "monocle"));
+    }
+
+    #[test]
+    fn entries_that_are_not_windows_are_skipped() {
+        let state = json!({ "monitors": [{ "workspaces": [{
+            "containers": [{ "windows": [null, 3, window(8, "a.exe", "")] }],
+            "floating_windows": ["b.exe"],
+        }] }] });
+        let filter = Filter::new(None, Some("")).unwrap().unwrap();
+        assert_eq!(hwnds(&windows(&state, &filter)), [8]);
     }
 
     #[test]
