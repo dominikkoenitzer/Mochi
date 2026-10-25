@@ -834,6 +834,48 @@ fn the_daemon_tiles_and_drives_four_real_windows() {
         wait_for_tiling(&windows, 4).map(|_| ())
     });
 
+    // A music player renames its window at every song; one the user minimized
+    // under a fullscreen game must stay down through it.
+    steps.step(
+        "a window the user minimized stays down when it is renamed",
+        || {
+            let target = focused_window().ok_or("nothing is focused")?;
+            let title = infos(&windows)
+                .into_iter()
+                .find(|w| w.hwnd == target)
+                .map(|w| w.title)
+                .ok_or("the focused window is not one of the batch")?;
+            mochi_testbed::minimize_window(target).map_err(|e| e.to_string())?;
+            wait_for(STEP, || managed_count() == 3)
+                .map_err(|_| format!("state shows {} windows", managed_count()))?;
+
+            mochi_testbed::rename_window(target, &format!("{title} renamed"))
+                .map_err(|e| e.to_string())?;
+            let minimized = || {
+                infos(&windows)
+                    .iter()
+                    .any(|w| w.hwnd == target && w.minimized)
+            };
+            let came_back = wait_for(Duration::from_secs(1), || {
+                managed_count() != 3 || !minimized() || mochi_testbed::foreground_window() == target
+            });
+            check(
+                came_back.is_err(),
+                format!(
+                    "the rename brought it back: {} managed, minimized {}",
+                    managed_count(),
+                    minimized()
+                ),
+            )?;
+
+            mochi_testbed::rename_window(target, &title).map_err(|e| e.to_string())?;
+            mochi_testbed::restore_window(target).map_err(|e| e.to_string())?;
+            wait_for(Duration::from_secs(5), || managed_count() == 4)
+                .map_err(|_| format!("state shows {} windows after restore", managed_count()))?;
+            wait_for_tiling(&windows, 4).map(|_| ())
+        },
+    );
+
     // --- layouts ---------------------------------------------------------
     steps.step("cycle-layout next and back to bsp", || {
         let before = layout_name().ok_or("no layout in the state")?;
