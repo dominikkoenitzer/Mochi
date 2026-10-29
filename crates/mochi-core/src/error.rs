@@ -91,8 +91,103 @@ pub enum Error {
 
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
-        Self::Json(error.to_string())
+        Self::Json(plain_json_error(&error.to_string()))
     }
+}
+
+/// A serde message with the Rust words in it said the way a config file says
+/// them: `i32` is a whole number, a sequence is a list, a map is an object.
+#[must_use]
+pub fn plain_json_error(message: &str) -> String {
+    const PHRASES: [(&str, &str); 10] = [
+        (
+            "EOF while parsing a value",
+            "the file ends where a value should be",
+        ),
+        (
+            "EOF while parsing an object",
+            "the file ends before the closing }",
+        ),
+        (
+            "EOF while parsing a list",
+            "the file ends before the closing ]",
+        ),
+        (
+            "EOF while parsing a string",
+            "the file ends inside a string",
+        ),
+        (
+            "control character (\\u0000-\\u001F) found while parsing a string",
+            "a string is not closed on its line, or holds a tab",
+        ),
+        ("expected ident", "expected true, false or null"),
+        ("invalid type: map", "invalid type: an object"),
+        ("invalid type: sequence", "invalid type: a list"),
+        ("expected a sequence", "expected a list"),
+        ("expected a map", "expected an object"),
+    ];
+    let mut out = message.replace("floating point `", "decimal number `");
+    for (from, to) in PHRASES {
+        out = out.replace(from, to);
+    }
+    let out_of_range = out.contains("invalid value: integer `");
+    let mut plain = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    while let Some(at) = rest.find("expected ") {
+        let (head, tail) = rest.split_at(at + "expected ".len());
+        plain.push_str(head);
+        let word_end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(tail.len());
+        let word = &tail[..word_end];
+        rest = &tail[word_end..];
+        if let Some(words) = whole_number(word, out_of_range) {
+            plain.push_str(&words);
+            continue;
+        }
+        match word {
+            "f32" | "f64" => plain.push_str("a number"),
+            "struct" => {
+                plain.push_str("an object");
+                // The Rust name of the struct follows, which the file never spells.
+                let name_end = rest
+                    .trim_start()
+                    .find(|c: char| !c.is_ascii_alphanumeric())
+                    .map_or(rest.len(), |end| end + rest.len() - rest.trim_start().len());
+                rest = &rest[name_end..];
+            }
+            _ => plain.push_str(word),
+        }
+    }
+    plain.push_str(rest);
+    plain
+}
+
+/// A Rust integer type as a config file says it, with its bounds when the
+/// value given was a whole number outside them.
+fn whole_number(word: &str, out_of_range: bool) -> Option<String> {
+    let (min, max) = match word {
+        "i8" => (i8::MIN.to_string(), i8::MAX.to_string()),
+        "i16" => (i16::MIN.to_string(), i16::MAX.to_string()),
+        "i32" => (i32::MIN.to_string(), i32::MAX.to_string()),
+        "i64" => (i64::MIN.to_string(), i64::MAX.to_string()),
+        "i128" => (i128::MIN.to_string(), i128::MAX.to_string()),
+        "isize" => (isize::MIN.to_string(), isize::MAX.to_string()),
+        "u8" => (u8::MIN.to_string(), u8::MAX.to_string()),
+        "u16" => (u16::MIN.to_string(), u16::MAX.to_string()),
+        "u32" => (u32::MIN.to_string(), u32::MAX.to_string()),
+        "u64" => (u64::MIN.to_string(), u64::MAX.to_string()),
+        "u128" => (u128::MIN.to_string(), u128::MAX.to_string()),
+        "usize" => (usize::MIN.to_string(), usize::MAX.to_string()),
+        _ => return None,
+    };
+    Some(if out_of_range {
+        format!("a whole number from {min} to {max}")
+    } else if min == "0" {
+        "a whole number of 0 or more".to_owned()
+    } else {
+        "a whole number".to_owned()
+    })
 }
 
 /// A [`Result`](std::result::Result) with this crate's [`Error`].

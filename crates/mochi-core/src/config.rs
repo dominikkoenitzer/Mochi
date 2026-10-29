@@ -21,6 +21,17 @@ use crate::model::{
 };
 use crate::rules::{MatchingRule, RuleSets};
 
+/// The starting `mochi.json` a quickstart writes, whether `mochic` or the
+/// daemon is asked for it. Kept minimal: every key left out has its default.
+pub const QUICKSTART: &str = r#"{
+  "$schema": "https://mochi.punds.ch/schema.json",
+  "window_hiding_behaviour": "Cloak",
+  "default_workspace_padding": 10,
+  "default_container_padding": 10,
+  "monitors": []
+}
+"#;
+
 /// A 24 bit colour.
 ///
 /// Reads `"#rrggbb"`, `{ "r": 255, "g": 187, "b": 223 }` and a raw Win32
@@ -108,7 +119,10 @@ impl Serialize for Colour {
 }
 
 #[derive(Deserialize)]
-#[serde(untagged)]
+#[serde(
+    untagged,
+    expecting = "expected a colour as a hex string, a channel object with each channel 0 to 255, or an integer"
+)]
 enum ColourRepr {
     Hex(String),
     Channels { r: u8, g: u8, b: u8 },
@@ -1260,6 +1274,74 @@ mod tests {
         let config = Config::from_json("\u{feff}{\"border_width\": 6}").unwrap();
         assert_eq!(config.border_width, Some(6));
         assert!(Config::from_json("\u{feff}[]").is_err(), "still not a list");
+    }
+
+    #[test]
+    fn a_wrong_type_is_named_in_the_words_of_the_file() {
+        let error = Config::from_json(r#"{"border_colours": 5}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expected an object at line 1"), "{error}");
+        assert!(!error.contains("BorderColours"), "{error}");
+
+        let error = Config::from_json(r#"{"border_width": 1.5}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("invalid type: decimal number `1.5`, expected a whole number"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_number_out_of_range_is_told_the_range() {
+        let error = Config::from_json(r#"{"transparency_alpha": 300}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("integer `300`, expected a whole number from 0 to 255"),
+            "{error}"
+        );
+
+        let error = Config::from_json(r#"{"border_width": 3000000000}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "integer `3000000000`, expected a whole number from -2147483648 to 2147483647"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_wrong_colour_or_rule_is_named_in_the_words_of_the_file() {
+        let error = Config::from_json(r#"{"border_colours": {"single": true}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected a colour as a hex string"),
+            "{error}"
+        );
+        assert!(!error.contains("ColourRepr"), "{error}");
+
+        let error = Config::from_json(r#"{"ignore_rules": [5]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expected a rule object"), "{error}");
+        assert!(!error.contains("MatchingRule"), "{error}");
+    }
+
+    #[test]
+    fn a_string_left_open_at_the_end_of_a_line_is_named_in_plain_words() {
+        let error = Config::from_json("{\n  \"border_style\": \"Rounded\n}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("a string is not closed on its line"),
+            "{error}"
+        );
+        assert!(!error.contains("control character"), "{error}");
     }
 
     #[test]

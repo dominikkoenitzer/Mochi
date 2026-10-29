@@ -214,7 +214,10 @@ impl IdWithIdentifier {
 
 /// A rule: either one condition or a set of conditions that all have to hold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
+#[serde(
+    untagged,
+    expecting = "expected a rule object with a kind and an id, or a list of rule objects"
+)]
 pub enum MatchingRule {
     /// A single condition.
     Simple(IdWithIdentifier),
