@@ -786,15 +786,20 @@ fn hotkey_path() -> Option<PathBuf> {
 
 /// Adds what the hotkey file says to the findings.
 fn check_hotkeys(found: &mut Findings) {
-    let Some(path) = hotkey_path() else {
-        return;
-    };
+    if let Some(path) = hotkey_path() {
+        check_hotkey_file(found, &path);
+    }
+}
+
+/// Adds what the hotkey file at `path` says to the findings.
+fn check_hotkey_file(found: &mut Findings, path: &Path) {
     let label = path.display().to_string();
-    let text = match std::fs::read_to_string(&path) {
+    let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             found.warnings.push(format!(
-                "no hotkey file at {label}. The daemon treats that as \"bind nothing\"                  rather than an error, so every key would silently do nothing."
+                "no hotkey file at {label}. The daemon treats that as \"bind nothing\" \
+                 rather than an error, so every key would silently do nothing."
             ));
             return;
         }
@@ -825,7 +830,8 @@ fn check_hotkeys(found: &mut Findings) {
     ));
     if bindings.is_empty() && errors.is_empty() {
         found.warnings.push(format!(
-            "{label} binds nothing at all. Every line is a comment or blank,              so no key reaches Mochi."
+            "{label} binds nothing at all. Every line is a comment or blank, \
+             so no key reaches Mochi."
         ));
     }
     for error in &errors {
@@ -2270,6 +2276,42 @@ mod tests {
         );
         assert!(!super::wants_elevation(Some(&dir.join("missing.json"))));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_hotkey_file_is_warned_about_in_one_sentence() {
+        let dir = std::env::temp_dir().join(format!("mochic-nokeys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut found = super::Findings::default();
+        super::check_hotkey_file(&mut found, &dir.join("hotkeys"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+        assert!(
+            found.warnings[0].ends_with(
+                "treats that as \"bind nothing\" rather than an error, so every key would silently do nothing."
+            ),
+            "{:?}",
+            found.warnings[0]
+        );
+    }
+
+    #[test]
+    fn a_hotkey_file_of_comments_is_warned_about_in_one_sentence() {
+        let dir = std::env::temp_dir().join(format!("mochic-commentkeys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hotkeys");
+        std::fs::write(&path, "# alt + h : focus left\n\n# alt + l : focus right\n").unwrap();
+        let mut found = super::Findings::default();
+        super::check_hotkey_file(&mut found, &path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+        assert!(
+            found.warnings[0].ends_with(
+                "binds nothing at all. Every line is a comment or blank, so no key reaches Mochi."
+            ),
+            "{:?}",
+            found.warnings[0]
+        );
     }
 
     #[test]

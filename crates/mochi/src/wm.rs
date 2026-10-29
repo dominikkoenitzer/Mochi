@@ -858,7 +858,8 @@ impl WindowManager {
             && !can_leave;
         if stuck {
             tracing::warn!(
-                "the reloaded hotkey file has no binding for toggle-game-mode, so game                  mode would have no way out; leaving it"
+                "the reloaded hotkey file has no binding for toggle-game-mode, so game \
+                 mode would have no way out; leaving it"
             );
             let _ = self.leave_game_mode("the reloaded file cannot toggle it");
             if let Some(hotkeys) = self.hotkeys.as_mut() {
@@ -6334,7 +6335,8 @@ mod tests {
 
         assert!(
             !wm.state().is_managed(WindowId(1)),
-            "the window was never judged again, so the ignore rule written for              the real application could not fire"
+            "the window was never judged again, so the ignore rule written for \
+             the real application could not fire"
         );
     }
 
@@ -7103,7 +7105,8 @@ alt + j : focus down
         assert_eq!(
             fresh.workspaces().len(),
             2,
-            "a screen attached after startup came up with its own defaults              instead of the entry that describes it"
+            "a screen attached after startup came up with its own defaults \
+             instead of the entry that describes it"
         );
         assert_eq!(
             fresh.workspaces().get(0).unwrap().name.as_deref(),
@@ -7262,7 +7265,8 @@ alt + j : focus down
         );
         assert!(
             workspace.latest_layout()[0].width() > shared_width,
-            "the window that is left should have the space back, not keep sharing              the screen with a tile nothing can be put in"
+            "the window that is left should have the space back, not keep sharing \
+             the screen with a tile nothing can be put in"
         );
     }
 
@@ -7368,7 +7372,8 @@ alt + j : focus down
         assert_eq!(wm.state().rules.manage_rules.len(), 1);
         assert!(
             wm.state().rules.floating_applications.is_empty(),
-            "a manage rule that lands in the floating list would float every              window it was meant to rescue"
+            "a manage rule that lands in the floating list would float every \
+             window it was meant to rescue"
         );
     }
 
@@ -7447,7 +7452,8 @@ alt + j : focus down
         });
         assert!(
             response.error_message().is_some(),
-            "a rule that routes nowhere would only show up as a window that              never opens where it was told to"
+            "a rule that routes nowhere would only show up as a window that \
+             never opens where it was told to"
         );
         assert!(wm.workspace_rules.is_empty());
     }
@@ -7506,7 +7512,8 @@ alt + j : focus down
         assert_eq!(
             platform.cloaks.lock().unwrap().len(),
             before,
-            "a rescue that drags every hidden workspace back on screen is not              a rescue"
+            "a rescue that drags every hidden workspace back on screen is not \
+             a rescue"
         );
         assert!(wm.hidden.lock().unwrap().contains(Hwnd(1)));
     }
@@ -8354,7 +8361,8 @@ alt + j : focus down
         wm.on_window_event(WindowEventKind::Destroyed, Hwnd(1));
         assert!(
             !wm.routed.contains(&Hwnd(1)),
-            "a dead handle stayed in the ledger, so the window that inherits it              is treated as one that has already been routed"
+            "a dead handle stayed in the ledger, so the window that inherits it \
+             is treated as one that has already been routed"
         );
     }
 
@@ -8497,7 +8505,8 @@ alt + j : focus down
         assert_eq!(wm.state().window(WindowId(1)).unwrap().title, "Report");
         assert!(
             wm.hidden().lock().unwrap().contains(Hwnd(1)),
-            "the window was moved to a workspace nobody is looking at and left              on screen, and nothing knows it is owed back"
+            "the window was moved to a workspace nobody is looking at and left \
+             on screen, and nothing knows it is owed back"
         );
     }
 
@@ -8652,7 +8661,8 @@ alt + j : focus down
         let drawn: Vec<Hwnd> = targets.tiled.iter().map(|(hwnd, _, _)| *hwnd).collect();
         assert!(
             drawn.contains(&Hwnd(1)) && drawn.contains(&Hwnd(2)),
-            "one monitor's pass left the other monitor's window out, so its              border is removed on every retile: {drawn:?}"
+            "one monitor's pass left the other monitor's window out, so its \
+             border is removed on every retile: {drawn:?}"
         );
         assert_eq!(
             targets.focused.iter().count(),

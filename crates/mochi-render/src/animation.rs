@@ -507,11 +507,13 @@ impl FrameClock {
             SAID.call_once(|| {
                 if raised {
                     tracing::debug!(
-                        "timer resolution raised to 1 ms while animating; without it a 60 fps                          animation waits on a 15.6 ms tick and arrives at about 32"
+                        "timer resolution raised to 1 ms while animating; without it a 60 fps \
+                         animation waits on a 15.6 ms tick and arrives at about 32"
                     );
                 } else {
                     tracing::warn!(
-                        "the system would not raise the timer resolution, so animation will                          run at about half the configured frame rate"
+                        "the system would not raise the timer resolution, so animation will \
+                         run at about half the configured frame rate"
                     );
                 }
             });

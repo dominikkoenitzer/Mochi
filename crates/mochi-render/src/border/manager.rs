@@ -284,7 +284,8 @@ impl Borders {
                 // window is all that is left to do.
                 tracing::info!(
                     target = %WindowHandle(key),
-                    "no border for this window: it belongs to an elevated process and mochi does                      not, so windows will not let a frame be stacked against it"
+                    "no border for this window: it belongs to an elevated process and mochi does \
+                     not, so windows will not let a frame be stacked against it"
                 );
                 self.refused.insert(key);
                 self.recycle(window);

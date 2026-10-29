@@ -150,7 +150,8 @@ pub fn load(path: &Path) -> Option<Vec<Entry>> {
                 kept = entries.len(),
                 lost = total - entries.len(),
                 path = %path.display(),
-                "part of the off screen record could not be read;                  a window a previous session hid may still be off screen"
+                "part of the off screen record could not be read; \
+                 a window a previous session hid may still be off screen"
             );
         }
         return Some(entries);
@@ -171,7 +172,8 @@ pub fn load(path: &Path) -> Option<Vec<Entry>> {
                 error = %e,
                 path = %path.display(),
                 kept = %aside.as_deref().unwrap_or(path).display(),
-                "the off screen record is damaged; it has been moved aside rather than                  overwritten, because a window a previous session hid may still be off screen"
+                "the off screen record is damaged; it has been moved aside rather than \
+                 overwritten, because a window a previous session hid may still be off screen"
             );
             None
         }
@@ -300,7 +302,10 @@ pub fn recover(platform: &dyn Platform, path: &Path) -> Recovered {
                 tracing::warn!(
                     %hwnd,
                     title = %info.title,
-                    "a previous session took this window off screen and this one cannot put it                      back, because the window outranks mochi now. Bring it back from the taskbar                      or with alt+tab. Mochi is letting go of it rather than trying again at                      every start"
+                    "a previous session took this window off screen and this one cannot put it \
+                     back, because the window outranks mochi now. Bring it back from the taskbar \
+                     or with alt+tab. Mochi is letting go of it rather than trying again at \
+                     every start"
                 );
                 true
             }
