@@ -91,8 +91,71 @@ pub enum Error {
 
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
-        Self::Json(error.to_string())
+        Self::Json(plain_json_error(&error.to_string()))
     }
+}
+
+/// A serde message with the Rust words in it said the way a config file says
+/// them: `i32` is a whole number, a sequence is a list, a map is an object.
+#[must_use]
+pub fn plain_json_error(message: &str) -> String {
+    const PHRASES: [(&str, &str); 9] = [
+        (
+            "EOF while parsing a value",
+            "the file ends where a value should be",
+        ),
+        (
+            "EOF while parsing an object",
+            "the file ends before the closing }",
+        ),
+        (
+            "EOF while parsing a list",
+            "the file ends before the closing ]",
+        ),
+        (
+            "EOF while parsing a string",
+            "the file ends inside a string",
+        ),
+        ("expected ident", "expected true, false or null"),
+        ("invalid type: map", "invalid type: an object"),
+        ("invalid type: sequence", "invalid type: a list"),
+        ("expected a sequence", "expected a list"),
+        ("expected a map", "expected an object"),
+    ];
+    let mut out = message.replace("floating point `", "decimal number `");
+    for (from, to) in PHRASES {
+        out = out.replace(from, to);
+    }
+    let mut plain = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    while let Some(at) = rest.find("expected ") {
+        let (head, tail) = rest.split_at(at + "expected ".len());
+        plain.push_str(head);
+        let word_end = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(tail.len());
+        let word = &tail[..word_end];
+        rest = &tail[word_end..];
+        match word {
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => plain.push_str("a whole number"),
+            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
+                plain.push_str("a whole number of 0 or more");
+            }
+            "f32" | "f64" => plain.push_str("a number"),
+            "struct" => {
+                plain.push_str("an object");
+                // The Rust name of the struct follows, which the file never spells.
+                let name_end = rest
+                    .trim_start()
+                    .find(|c: char| !c.is_ascii_alphanumeric())
+                    .map_or(rest.len(), |end| end + rest.len() - rest.trim_start().len());
+                rest = &rest[name_end..];
+            }
+            _ => plain.push_str(word),
+        }
+    }
+    plain.push_str(rest);
+    plain
 }
 
 /// A [`Result`](std::result::Result) with this crate's [`Error`].
