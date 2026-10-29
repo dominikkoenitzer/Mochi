@@ -4287,7 +4287,12 @@ impl WindowManager {
             }
             let kept = previous
                 .iter()
-                .position(|pad| pad.config.name.eq_ignore_ascii_case(&config.name))
+                .position(|pad| {
+                    pad.config
+                        .name
+                        .trim()
+                        .eq_ignore_ascii_case(config.name.trim())
+                })
                 .map(|index| previous.remove(index));
             self.scratchpads.push(Scratchpad {
                 config,
@@ -9412,6 +9417,33 @@ alt + j : focus down
         assert!(!wm.we_hid(Hwnd(2)));
         assert_eq!(cloak_calls(&platform, Hwnd(2)).last(), Some(&false));
         assert!(wm.state().is_managed(window_id(Hwnd(2))));
+    }
+
+    #[test]
+    fn a_reload_that_only_pads_a_scratchpad_name_keeps_its_window() {
+        let (mut wm, _) = scratch_manager(vec![
+            process_window(1, "Editor", 10),
+            process_window(2, "scratch", 20),
+        ]);
+        toggle(&mut wm);
+        toggle(&mut wm);
+        assert!(wm.we_hid(Hwnd(2)));
+
+        // A toggle already finds the pad by its trimmed name.
+        wm.set_scratchpads(vec![mochi_core::config::ScratchpadConfig {
+            name: "term ".into(),
+            ..scratch_pad()
+        }]);
+        assert!(wm.we_hid(Hwnd(2)), "the hidden window was given back");
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert_eq!(wm.scratchpad_holding(Hwnd(2)), Some(0));
+
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert!(
+            wm.launched.lock().unwrap().is_empty(),
+            "a second copy was started"
+        );
+        assert!(!wm.we_hid(Hwnd(2)));
     }
 
     /// The window drops its title bar and covers the whole of `screen`, the
