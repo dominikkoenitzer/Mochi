@@ -1280,6 +1280,39 @@ mod tests {
     }
 
     #[test]
+    fn a_number_out_of_range_is_told_the_range() {
+        let error = Config::from_json(r#"{"transparency_alpha": 300}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("integer `300`, expected a whole number from 0 to 255"),
+            "{error}"
+        );
+
+        let error = Config::from_json(r#"{"border_width": 3000000000}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "integer `3000000000`, expected a whole number from -2147483648 to 2147483647"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_string_left_open_at_the_end_of_a_line_is_named_in_plain_words() {
+        let error = Config::from_json("{\n  \"border_style\": \"Rounded\n}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("a string is not closed on its line"),
+            "{error}"
+        );
+        assert!(!error.contains("control character"), "{error}");
+    }
+
+    #[test]
     fn colours_parse_from_every_accepted_shape() {
         assert_eq!(
             Colour::parse("#ffbbdf").unwrap(),

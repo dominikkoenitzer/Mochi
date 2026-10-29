@@ -99,7 +99,7 @@ impl From<serde_json::Error> for Error {
 /// them: `i32` is a whole number, a sequence is a list, a map is an object.
 #[must_use]
 pub fn plain_json_error(message: &str) -> String {
-    const PHRASES: [(&str, &str); 9] = [
+    const PHRASES: [(&str, &str); 10] = [
         (
             "EOF while parsing a value",
             "the file ends where a value should be",
@@ -116,6 +116,10 @@ pub fn plain_json_error(message: &str) -> String {
             "EOF while parsing a string",
             "the file ends inside a string",
         ),
+        (
+            "control character (\\u0000-\\u001F) found while parsing a string",
+            "a string is not closed on its line, or holds a tab",
+        ),
         ("expected ident", "expected true, false or null"),
         ("invalid type: map", "invalid type: an object"),
         ("invalid type: sequence", "invalid type: a list"),
@@ -126,6 +130,7 @@ pub fn plain_json_error(message: &str) -> String {
     for (from, to) in PHRASES {
         out = out.replace(from, to);
     }
+    let out_of_range = out.contains("invalid value: integer `");
     let mut plain = String::with_capacity(out.len());
     let mut rest = out.as_str();
     while let Some(at) = rest.find("expected ") {
@@ -136,11 +141,11 @@ pub fn plain_json_error(message: &str) -> String {
             .unwrap_or(tail.len());
         let word = &tail[..word_end];
         rest = &tail[word_end..];
+        if let Some(words) = whole_number(word, out_of_range) {
+            plain.push_str(&words);
+            continue;
+        }
         match word {
-            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => plain.push_str("a whole number"),
-            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
-                plain.push_str("a whole number of 0 or more");
-            }
             "f32" | "f64" => plain.push_str("a number"),
             "struct" => {
                 plain.push_str("an object");
@@ -156,6 +161,33 @@ pub fn plain_json_error(message: &str) -> String {
     }
     plain.push_str(rest);
     plain
+}
+
+/// A Rust integer type as a config file says it, with its bounds when the
+/// value given was a whole number outside them.
+fn whole_number(word: &str, out_of_range: bool) -> Option<String> {
+    let (min, max) = match word {
+        "i8" => (i8::MIN.to_string(), i8::MAX.to_string()),
+        "i16" => (i16::MIN.to_string(), i16::MAX.to_string()),
+        "i32" => (i32::MIN.to_string(), i32::MAX.to_string()),
+        "i64" => (i64::MIN.to_string(), i64::MAX.to_string()),
+        "i128" => (i128::MIN.to_string(), i128::MAX.to_string()),
+        "isize" => (isize::MIN.to_string(), isize::MAX.to_string()),
+        "u8" => (u8::MIN.to_string(), u8::MAX.to_string()),
+        "u16" => (u16::MIN.to_string(), u16::MAX.to_string()),
+        "u32" => (u32::MIN.to_string(), u32::MAX.to_string()),
+        "u64" => (u64::MIN.to_string(), u64::MAX.to_string()),
+        "u128" => (u128::MIN.to_string(), u128::MAX.to_string()),
+        "usize" => (usize::MIN.to_string(), usize::MAX.to_string()),
+        _ => return None,
+    };
+    Some(if out_of_range {
+        format!("a whole number from {min} to {max}")
+    } else if min == "0" {
+        "a whole number of 0 or more".to_owned()
+    } else {
+        "a whole number".to_owned()
+    })
 }
 
 /// A [`Result`](std::result::Result) with this crate's [`Error`].
