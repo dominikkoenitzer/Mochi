@@ -449,6 +449,7 @@ impl Reader {
 
         self.drop_unknown_targets();
         self.drop_modes_with_no_way_out();
+        self.drop_game_mode_toggles_with_no_way_out();
 
         self.errors.sort_by_key(|error| error.line);
         (self.bindings, self.errors)
@@ -554,6 +555,34 @@ impl Reader {
         self.bindings.table.remove_where(into_stranded);
         for mode in &mut self.bindings.modes {
             mode.table.remove_where(into_stranded);
+        }
+    }
+
+    /// Drops `toggle-game-mode` inside a mode block when no binding outside
+    /// every block runs it.
+    ///
+    /// Game mode goes back to `default` and admits only that command, so a
+    /// toggle that lives in a block turns game mode on and no key can turn it
+    /// off again.
+    fn drop_game_mode_toggles_with_no_way_out(&mut self) {
+        let toggles =
+            |binding: &Binding| matches!(binding.action, Action::Command(Command::ToggleGameMode));
+        if self.bindings.table.iter().any(toggles) {
+            return;
+        }
+        for mode in &mut self.bindings.modes {
+            for binding in mode.table.iter().filter(|binding| toggles(binding)) {
+                self.errors.push(ParseError {
+                    line: binding.line,
+                    text: binding.source.clone(),
+                    message: format!(
+                        "game mode goes back to `default`, where no key runs `toggle-game-mode`, \
+                         so `{}` in mode `{}` is left out; bind one outside every block",
+                        binding.trigger, mode.name
+                    ),
+                });
+            }
+            mode.table.remove_where(toggles);
         }
     }
 }
@@ -1672,6 +1701,34 @@ mode resize {
         assert_eq!(bindings.modes().count(), 0);
         assert!(bindings.get("alt + r".parse().unwrap()).is_none());
         assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn a_game_mode_toggle_only_inside_a_mode_block_is_left_out() {
+        let block = concat!(
+            "mode games {\n",
+            "  g : toggle-game-mode\n",
+            "  esc : mode default\n",
+            "}\n",
+        );
+        let (bindings, found) = Bindings::parse_lossy(&format!("alt + g : mode games\n{block}"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].line, 3);
+        assert!(
+            found[0].message.contains("`g` in mode `games` is left out"),
+            "{found:?}"
+        );
+        let games = bindings.mode_id("games").unwrap();
+        assert!(bindings.get_in(games, "g".parse().unwrap()).is_none());
+        assert!(bindings.get_in(games, "esc".parse().unwrap()).is_some());
+
+        // With a toggle outside every block, the one inside stays.
+        let (bindings, found) = Bindings::parse_lossy(&format!(
+            "alt + g : mode games\nalt + shift + g : toggle-game-mode\n{block}"
+        ));
+        assert!(found.is_empty(), "{found:?}");
+        let games = bindings.mode_id("games").unwrap();
+        assert!(bindings.get_in(games, "g".parse().unwrap()).is_some());
     }
 
     #[test]
