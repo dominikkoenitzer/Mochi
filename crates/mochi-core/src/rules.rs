@@ -778,6 +778,8 @@ pub fn load_app_specific_configuration(json: &str) -> Result<RuleSets> {
 pub fn load_app_specific_configuration_reporting_unknown_keys(
     json: &str,
 ) -> Result<(RuleSets, Vec<String>)> {
+    // A byte order mark in front, as a Windows editor saves it, is not JSON.
+    let json = json.strip_prefix('\u{feff}').unwrap_or(json);
     let value: serde_json::Value = serde_json::from_str(json)?;
     let mut warnings = Vec::new();
     let value = match value {
@@ -1641,6 +1643,16 @@ mod tests {
             "{warnings:?}"
         );
         assert!(load_app_specific_configuration(json).is_ok(), "not fatal");
+    }
+
+    #[test]
+    fn app_rules_saved_with_a_byte_order_mark_load() {
+        let json = "\u{feff}{\"Steam\": {\"ignore\": \
+                    [{\"kind\": \"Exe\", \"id\": \"steam.exe\", \"matching_strategy\": \"Equals\"}]}}";
+        let (sets, warnings) =
+            load_app_specific_configuration_reporting_unknown_keys(json).unwrap();
+        assert_eq!(sets.ignore_rules.len(), 1);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
