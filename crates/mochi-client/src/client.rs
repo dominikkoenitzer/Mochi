@@ -59,6 +59,49 @@ pub fn send_to(pipe: &str, cmd: &Command) -> Result<Response> {
     }
 }
 
+/// Sends `stop` to the daemon on [`PIPE_NAME`] and returns once its process
+/// has exited, or once `wait` has passed.
+pub fn stop(wait: std::time::Duration) -> Result<Response> {
+    stop_on(PIPE_NAME, wait)
+}
+
+/// Same as [`stop`], against an explicit pipe path. Useful in tests.
+///
+/// The daemon answers before it has let go of the windows, the pipe and its
+/// single-instance lock, so a `start` straight after the answer still finds
+/// it running. The process is opened on the same connection, before `stop`
+/// is sent, so a reused process id can never be the one waited on.
+pub fn stop_on(pipe: &str, wait: std::time::Duration) -> Result<Response> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+
+    let mut stream = connect(pipe)?;
+    let mut pid = 0u32;
+    let process = unsafe { GetNamedPipeServerProcessId(HANDLE(stream.as_raw_handle()), &mut pid) }
+        .ok()
+        .and_then(|()| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.ok());
+    let response = protocol::write_message(&mut stream, &Command::Stop)
+        .and_then(|()| protocol::read_message::<_, Response>(&mut BufReader::new(stream)))
+        .map_err(Error::from)
+        .and_then(|reply| match reply {
+            None => Err(Error::NoResponse),
+            Some(Response::Error { message }) => Err(Error::Daemon(message)),
+            Some(other) => Ok(other),
+        });
+    if let Some(process) = process {
+        if response.is_ok() {
+            let millis = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX - 1);
+            unsafe { WaitForSingleObject(process, millis) };
+        }
+        let _ = unsafe { CloseHandle(process) };
+    }
+    response
+}
+
 /// True when the daemon's pipe exists and accepts connections.
 pub fn is_running() -> bool {
     match connect(PIPE_NAME) {
@@ -213,6 +256,63 @@ mod tests {
             level <= SecurityIdentification.0,
             "a pipe server reached impersonation level {level}; the client must ask for \
              SECURITY_IDENTIFICATION so a squatted pipe can only read who we are, never act as us"
+        );
+    }
+
+    #[test]
+    fn stop_waits_for_the_process_behind_the_pipe() {
+        use std::io::BufRead;
+        use std::os::windows::io::FromRawHandle;
+        use windows::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+        use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+        use windows::core::HSTRING;
+
+        // The pipe is served from this test process, which outlives the call,
+        // so `stop` has to sit out its whole wait.
+        let pipe = format!(r"\\.\pipe\mochi-test-stop-{}", std::process::id());
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let daemon = {
+            let pipe = pipe.clone();
+            std::thread::spawn(move || {
+                let handle = unsafe {
+                    CreateNamedPipeW(
+                        &HSTRING::from(pipe.as_str()),
+                        PIPE_ACCESS_DUPLEX,
+                        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                        1,
+                        4096,
+                        4096,
+                        0,
+                        None,
+                    )
+                };
+                assert!(handle != INVALID_HANDLE_VALUE, "could not create {pipe}");
+                let server = unsafe { std::fs::File::from_raw_handle(handle.0) };
+                ready_tx.send(()).unwrap();
+                unsafe { ConnectNamedPipe(HANDLE(handle.0), None) }.ok();
+                let mut line = String::new();
+                std::io::BufReader::new(&server)
+                    .read_line(&mut line)
+                    .unwrap();
+                assert!(line.contains("stop"), "{line}");
+                protocol::write_message(&mut &server, &Response::Ok).unwrap();
+            })
+        };
+
+        ready_rx.recv().unwrap();
+        let wait = std::time::Duration::from_millis(400);
+        let started = std::time::Instant::now();
+        let response = stop_on(&pipe, wait).expect("stop should be answered");
+        let took = started.elapsed();
+        daemon.join().unwrap();
+
+        assert!(matches!(response, Response::Ok), "{response:?}");
+        assert!(
+            took >= wait,
+            "stop returned after {took:?}, while the process behind the pipe was still running"
         );
     }
 

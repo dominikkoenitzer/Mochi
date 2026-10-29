@@ -236,6 +236,23 @@ impl Timeline {
         self.last_frame = None;
     }
 
+    /// Ends every job at once: one last frame with every window at its
+    /// target and `finished` set, after which the timeline is empty.
+    pub fn finish_all(&mut self) -> Vec<FrameUpdate> {
+        let mut updates: Vec<FrameUpdate> = self
+            .jobs
+            .iter()
+            .map(|(handle, job)| FrameUpdate {
+                handle: WindowHandle(*handle),
+                rect: job.to,
+                finished: true,
+            })
+            .collect();
+        updates.sort_unstable_by_key(|update| update.handle.0);
+        self.clear();
+        updates
+    }
+
     /// How many jobs are in flight.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -348,6 +365,7 @@ enum Command {
     Animate(Vec<AnimationJob>),
     Cancel(WindowHandle),
     CancelAll,
+    FinishAll,
     Stop,
 }
 
@@ -446,6 +464,16 @@ impl Animator {
     /// [`RenderError::ThreadGone`] when the animation thread has stopped.
     pub fn cancel_all(&self) -> Result<()> {
         self.send(Command::CancelAll)
+    }
+
+    /// Puts every window that is still moving at its target in one frame and
+    /// ends its job, for when animation is turned off or the daemon stops.
+    ///
+    /// # Errors
+    ///
+    /// [`RenderError::ThreadGone`] when the animation thread has stopped.
+    pub fn finish_all(&self) -> Result<()> {
+        self.send(Command::FinishAll)
     }
 
     fn send(&self, command: Command) -> Result<()> {
@@ -568,13 +596,13 @@ where
             if clock.is_none() {
                 clock = Some(FrameClock::raise());
             }
-            if handle_command(&mut timeline, command) {
+            if handle_command(&mut timeline, command, apply) {
                 return;
             }
             // Take anything else that is already queued before drawing, so a
             // burst of layout changes costs one frame, not one frame each.
             while let Ok(queued) = receiver.try_recv() {
-                if handle_command(&mut timeline, queued) {
+                if handle_command(&mut timeline, queued, apply) {
                     return;
                 }
             }
@@ -591,7 +619,10 @@ where
 }
 
 /// Applies one command. Returns `true` when the thread should stop.
-fn handle_command(timeline: &mut Timeline, command: Command) -> bool {
+fn handle_command<F>(timeline: &mut Timeline, command: Command, apply: &mut F) -> bool
+where
+    F: FnMut(&[FrameUpdate]),
+{
     match command {
         Command::Animate(jobs) => {
             let now = Instant::now();
@@ -606,6 +637,13 @@ fn handle_command(timeline: &mut Timeline, command: Command) -> bool {
         }
         Command::CancelAll => {
             timeline.clear();
+            false
+        }
+        Command::FinishAll => {
+            let frame = timeline.finish_all();
+            if !frame.is_empty() {
+                apply(&frame);
+            }
             false
         }
         Command::Stop => true,
