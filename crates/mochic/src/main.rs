@@ -1349,7 +1349,15 @@ fn parse_failure_json(label: &str, text: &str, flattened: &str) -> String {
 
 /// `file:line:column: what went wrong`, then the line itself under a caret.
 fn position_block(label: &str, text: &str, e: &serde_json::Error) -> String {
-    let (line, column) = (e.line(), e.column());
+    let (mut line, mut column) = (e.line(), e.column());
+    // Column 0 is serde standing just past a line break: the mistake is at
+    // the end of the line before.
+    if column == 0
+        && let Some(before) = line.checked_sub(2).and_then(|at| text.lines().nth(at))
+    {
+        line -= 1;
+        column = before.len() + 1;
+    }
     let message = e.to_string();
     if line == 0 {
         return format!("{label}: {message}");
@@ -2016,6 +2024,23 @@ mod tests {
         assert_eq!(found.errors.len(), 1, "{found:?}");
         assert!(found.errors[0].contains("unknown variant"), "{found:?}");
         assert!(found.errors[0].starts_with("mochi.json:1:"), "{found:?}");
+    }
+
+    #[test]
+    fn a_mistake_at_the_end_of_a_line_is_shown_on_that_line() {
+        let found = check_config_text("mochi.json", "{\n  \"border\": tru\n}\n");
+        assert_eq!(found.errors.len(), 1, "{found:?}");
+        let error = &found.errors[0];
+        assert!(error.starts_with("mochi.json:2:16:"), "{error}");
+        assert!(error.contains("  2 |   \"border\": tru\n"), "{error}");
+    }
+
+    #[test]
+    fn an_unclosed_file_is_shown_at_its_last_line() {
+        let found = check_config_text("mochi.json", "{\n  \"border\": true\n");
+        let error = &found.errors[0];
+        assert!(error.starts_with("mochi.json:2:17:"), "{error}");
+        assert!(error.contains("  2 |   \"border\": true\n"), "{error}");
     }
 
     #[test]
