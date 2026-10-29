@@ -699,7 +699,9 @@ mod tests {
         // command, which is true in practice and is not on a loaded test runner.
         assert_eq!(
             first.rect.bottom, SEEN.bottom,
-            "the animation did not start from the perceived frame: it compensated              for the invisible border a second time, so the window jumps outward              and eases back"
+            "the animation did not start from the perceived frame: it compensated \
+             for the invisible border a second time, so the window jumps outward \
+             and eases back"
         );
         assert_ne!(
             first.rect.bottom, WINDOW_RECT.bottom,

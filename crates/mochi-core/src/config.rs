@@ -1881,7 +1881,8 @@ mod tests {
         // larger would have raised every height to 300 as well.
         assert!(
             tiles(&state).iter().any(|rect| rect.height() < 300),
-            "no tile is shorter than the width floor, so the two axes are not              independent and a height of 250 was silently raised to 300"
+            "no tile is shorter than the width floor, so the two axes are not \
+             independent and a height of 250 was silently raised to 300"
         );
     }
 

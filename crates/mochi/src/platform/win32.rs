@@ -143,7 +143,8 @@ fn deny(h: Hwnd, call: &str) -> bool {
             hwnd = %h,
             exe = %file_name(&process_path(pid)),
             call,
-            "windows refuses every call against this window because it belongs to an elevated              process and mochi does not; leaving it alone from now on"
+            "windows refuses every call against this window because it belongs to an elevated \
+             process and mochi does not; leaving it alone from now on"
         );
     }
     first
