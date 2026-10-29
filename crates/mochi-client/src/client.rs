@@ -73,7 +73,7 @@ pub fn stop(wait: std::time::Duration) -> Result<Response> {
 /// is sent, so a reused process id can never be the one waited on.
 pub fn stop_on(pipe: &str, wait: std::time::Duration) -> Result<Response> {
     use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
     use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
@@ -94,8 +94,18 @@ pub fn stop_on(pipe: &str, wait: std::time::Duration) -> Result<Response> {
         });
     if let Some(process) = process {
         if response.is_ok() {
-            let millis = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX - 1);
-            unsafe { WaitForSingleObject(process, millis) };
+            // A timed wait can end up to a clock tick early, so it is resumed until all of `wait` has passed.
+            let deadline = std::time::Instant::now().checked_add(wait);
+            loop {
+                let left = deadline.map_or(wait, |d| {
+                    d.saturating_duration_since(std::time::Instant::now())
+                });
+                let millis = u32::try_from(left.as_micros().div_ceil(1000)).unwrap_or(u32::MAX - 1);
+                let timed_out = unsafe { WaitForSingleObject(process, millis) } == WAIT_TIMEOUT;
+                if !timed_out || deadline.is_none_or(|d| std::time::Instant::now() >= d) {
+                    break;
+                }
+            }
         }
         let _ = unsafe { CloseHandle(process) };
     }
