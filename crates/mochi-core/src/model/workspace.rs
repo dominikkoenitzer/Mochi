@@ -860,7 +860,9 @@ impl Workspace {
             // the workspace in two exclusive modes at once, and the follow-up
             // un-maximize would then send its restore to the monocled window
             // instead, stranding the maximized one at full size for good.
-            if self.is_maximized() {
+            // A floating focus is the same: the ring's focused tile is not the
+            // window the user pointed at.
+            if self.is_maximized() || self.focus_is_floating() {
                 return false;
             }
             let anchor = self.anchor_before(self.containers.focused_idx());
