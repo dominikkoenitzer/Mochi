@@ -658,7 +658,12 @@ impl State {
         let (monitor, workspace) = self.focused_indices()?;
         let before = self.visible_window_ids();
         let target = self.workspace_mut(monitor, workspace)?;
-        target.toggle_monocle();
+        let was_monocle = target.is_monocle();
+        if target.toggle_monocle() == was_monocle {
+            // Refused, as `toggle_maximize` is: there is nothing to retile and
+            // focus stays where the user put it.
+            return Ok(Changes::none());
+        }
         let id = target.focused_window_id();
         let mut changes = self.retiled(monitor, workspace);
         changes.merge(self.focus_changes(id));
@@ -2101,6 +2106,30 @@ mod tests {
             "monocle was allowed on top of a maximized window"
         );
         assert!(workspace.is_maximized());
+    }
+
+    #[test]
+    fn monocle_with_a_floating_window_focused_lifts_out_nothing() {
+        let mut state = with_windows(3);
+        state.toggle_float().unwrap();
+        assert!(state.workspace(0, 0).unwrap().focus_is_floating());
+        let floating = focused(&state);
+
+        // The ring's focused tile is a window the user did not point at.
+        let changes = state.toggle_monocle().unwrap();
+        assert!(changes.is_empty(), "{changes:?}");
+        let workspace = state.workspace(0, 0).unwrap();
+        assert!(!workspace.is_monocle());
+        assert!(workspace.focus_is_floating());
+        assert_eq!(focused(&state), floating);
+
+        // Turning it off still works whatever has focus.
+        state.focus_window(WindowId(1)).unwrap();
+        state.toggle_monocle().unwrap();
+        state.focus_window(floating.unwrap()).unwrap();
+        assert!(state.workspace(0, 0).unwrap().focus_is_floating());
+        state.toggle_monocle().unwrap();
+        assert!(!state.workspace(0, 0).unwrap().is_monocle());
     }
 
     #[test]
