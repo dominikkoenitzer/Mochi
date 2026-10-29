@@ -6203,6 +6203,25 @@ mod tests {
     }
 
     #[test]
+    fn a_tile_left_in_the_ring_does_not_answer_for_the_monocled_window() {
+        let (mut wm, _) = manager_focused_on(
+            vec![window(1, "Editor"), window(2, "Notes"), window(3, "Mail")],
+            Hwnd(2),
+        );
+        wm.handle_command(Command::Stack {
+            direction: mochi_client::Direction::Left,
+        });
+        wm.handle_command(Command::ToggleMonocle);
+        assert_eq!(wm.state().focused_window_id(), Some(WindowId(2)));
+        assert_eq!(ring_order(&wm), vec![Some(WindowId(3))]);
+        let (response, _) = wm.handle_command(Command::Query {
+            target: QueryTarget::FocusedWindowIndex,
+        });
+        let answer = serde_json::json!(1);
+        assert_eq!(response, Response::Query { answer });
+    }
+
+    #[test]
     fn stop_ends_the_loop_and_answers_ok() {
         let (mut wm, _) = manager(vec![]);
         let (response, flow) = wm.handle_command(Command::Stop);
