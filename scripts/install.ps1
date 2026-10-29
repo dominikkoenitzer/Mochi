@@ -692,15 +692,51 @@ function Stop-Mochi {
     throw 'Mochi did not stop within 10 seconds. Press alt + shift + e, then run this again.'
 }
 
-# Answers the names it copied into $BinDir.
+# Answers the names it copied into $BinDir: all of them or none. Both files
+# are copied next to their places first, then the old ones are moved aside and
+# the new ones moved in. A step that fails puts the old ones back, so a
+# declined -Confirm, a full disk or a file another program holds never leaves
+# a new mochi.exe beside an old mochic.exe.
 function Copy-Binaries {
     param([Parameter(Mandatory)][string] $Source)
-    foreach ($binary in $Binaries) {
-        if ($PSCmdlet.ShouldProcess($binary, "copy to $BinDir")) {
-            Copy-Item -LiteralPath (Join-Path $Source $binary) -Destination $BinDir -Force
-            $binary
+    if (-not $PSCmdlet.ShouldProcess($Binaries -join ', ', "copy to $BinDir")) { return }
+    $moved = @()
+    $placed = @()
+    try {
+        foreach ($binary in $Binaries) {
+            Copy-Item -LiteralPath (Join-Path $Source $binary) -Destination (Join-Path $BinDir "$binary.new") -Force
         }
+        foreach ($binary in $Binaries) {
+            $path = Join-Path $BinDir $binary
+            # One left by an earlier run that could not remove it.
+            if (Test-Path -LiteralPath "$path.old") { Remove-Item -LiteralPath "$path.old" -Force }
+            if (Test-Path -LiteralPath $path) {
+                Move-Item -LiteralPath $path -Destination "$path.old"
+                $moved += $binary
+            }
+        }
+        foreach ($binary in $Binaries) {
+            $path = Join-Path $BinDir $binary
+            Move-Item -LiteralPath "$path.new" -Destination $path
+            $placed += $binary
+        }
+    } catch {
+        foreach ($binary in $placed) {
+            Remove-Item -LiteralPath (Join-Path $BinDir $binary) -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($binary in $moved) {
+            $path = Join-Path $BinDir $binary
+            Move-Item -LiteralPath "$path.old" -Destination $path -ErrorAction SilentlyContinue
+        }
+        foreach ($binary in $Binaries) {
+            Remove-Item -LiteralPath (Join-Path $BinDir "$binary.new") -Force -ErrorAction SilentlyContinue
+        }
+        throw
     }
+    foreach ($binary in $moved) {
+        Remove-Item -LiteralPath (Join-Path $BinDir "$binary.old") -Force -ErrorAction SilentlyContinue
+    }
+    $Binaries
 }
 
 # Only bin, and only when it is empty. <InstallRoot> is a directory the user
@@ -708,7 +744,7 @@ function Copy-Binaries {
 # turn an uninstall into deleting C:\Tools.
 function Remove-EmptyBinDir {
     $dir = $BinDir
-    if ((Test-Path $dir) -and -not (Get-ChildItem -LiteralPath $dir -Force)) {
+    if ((Test-Path -LiteralPath $dir) -and -not (Get-ChildItem -LiteralPath $dir -Force)) {
         if ($PSCmdlet.ShouldProcess($dir, 'remove empty directory')) {
             Remove-Item -LiteralPath $dir -Force
         }
