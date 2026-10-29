@@ -492,7 +492,7 @@ fn write_unless_present(path: &std::path::Path, contents: &str) -> Result<()> {
 }
 
 /// Where Mochi is published. Every address the client writes out starts here.
-const SITE: &str = "https://get-mochi.vercel.app";
+const SITE: &str = "https://mochi.punds.ch";
 
 /// The stub configuration `quickstart` writes.
 ///
@@ -1989,7 +1989,7 @@ mod tests {
     fn the_quickstart_stub_is_valid_json() {
         let value: serde_json::Value = serde_json::from_str(&default_config()).unwrap();
         assert!(value.is_object());
-        assert_eq!(value["$schema"], "https://get-mochi.vercel.app/schema.json");
+        assert_eq!(value["$schema"], "https://mochi.punds.ch/schema.json");
     }
 
     // --- check ----------------------------------------------------------
