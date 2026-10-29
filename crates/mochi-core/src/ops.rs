@@ -2126,6 +2126,7 @@ mod tests {
         // Turning it off still works whatever has focus.
         state.focus_window(WindowId(1)).unwrap();
         state.toggle_monocle().unwrap();
+        assert!(state.workspace(0, 0).unwrap().is_monocle());
         state.focus_window(floating.unwrap()).unwrap();
         assert!(state.workspace(0, 0).unwrap().focus_is_floating());
         state.toggle_monocle().unwrap();
