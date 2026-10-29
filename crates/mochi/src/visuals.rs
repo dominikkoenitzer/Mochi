@@ -202,7 +202,8 @@ impl Visuals {
                 Err(e) => tracing::error!(error = %e, "could not start the animation thread"),
             }
         } else if !on && let Some(animator) = self.animator.take() {
-            let _ = animator.cancel_all();
+            // Dropping the animator waits for its thread, so this frame lands first.
+            let _ = animator.finish_all();
         }
     }
 
@@ -454,6 +455,9 @@ impl Visuals {
     /// Clears every visual and stops every worker thread. Call once, on
     /// daemon shutdown.
     pub fn stop(&mut self) {
+        if let Some(animator) = self.animator.take() {
+            let _ = animator.finish_all();
+        }
         self.clear();
         let manager = match self.borders.lock() {
             Ok(mut guard) => guard.take(),
@@ -463,7 +467,6 @@ impl Visuals {
             manager.stop();
         }
         self.transparency = None;
-        self.animator = None;
     }
 }
 
@@ -708,6 +711,53 @@ mod tests {
             "it started from the window rect"
         );
         visuals.stop();
+    }
+
+    /// Starts a ten second move and waits until it is under way.
+    fn moving_window() -> (Arc<RecordingPlatform>, Visuals, Hwnd, Rect) {
+        let target = Hwnd(0x1234);
+        let mut info = WindowInfo::placeholder(target);
+        info.rect = WINDOW_RECT;
+        info.frame = SEEN;
+        let platform = Arc::new(RecordingPlatform::new(info));
+        let hidden = Arc::new(Mutex::new(Hidden::default()));
+        let mut visuals = Visuals::new(Arc::clone(&platform) as Arc<dyn Platform>, hidden);
+        let slow: Config = serde_json::from_str(
+            r#"{"animation":{"enabled":true,"duration":10000,"style":"Linear","fps":60}}"#,
+        )
+        .expect("the animation block has to load");
+        visuals.set_settings(&slow);
+        let to = Rect::new(1000, 100, 1800, 700);
+        visuals.apply_layout(&[(target, to)]);
+        platform.first_move();
+        (platform, visuals, target, to)
+    }
+
+    fn last_move(platform: &RecordingPlatform) -> WindowPlacement {
+        *platform
+            .moves
+            .lock()
+            .expect("not poisoned")
+            .last()
+            .expect("the window was moved")
+    }
+
+    #[test]
+    fn turning_animation_off_puts_a_moving_window_at_its_target() {
+        let (platform, mut visuals, target, to) = moving_window();
+        let off: Config = serde_json::from_str(r#"{"animation":{"enabled":false}}"#)
+            .expect("the animation block has to load");
+        visuals.set_settings(&off);
+        assert!(!visuals.is_animating());
+        assert_eq!(last_move(&platform), WindowPlacement::new(target, to));
+        visuals.stop();
+    }
+
+    #[test]
+    fn stopping_puts_a_moving_window_at_its_target() {
+        let (platform, mut visuals, target, to) = moving_window();
+        visuals.stop();
+        assert_eq!(last_move(&platform), WindowPlacement::new(target, to));
     }
 
     #[test]
