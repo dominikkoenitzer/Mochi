@@ -1145,8 +1145,9 @@ fn check_app_rules_text(label: &str, text: &str) -> Findings {
         }
     };
 
+    let rules = if sets.len() == 1 { "rule" } else { "rules" };
     found.notes.push(format!(
-        "{} rules read from the application file",
+        "{} {rules} read from the application file",
         sets.len()
     ));
     // Two of the lists are accepted so a file written for another window
@@ -1156,8 +1157,9 @@ fn check_app_rules_text(label: &str, text: &str) -> Findings {
     // rules and saying nothing told the user they were live.
     let inert = sets.layered_whitelist.len() + sets.border_overflow_applications.len();
     if inert > 0 {
+        let are = if inert == 1 { "is" } else { "are" };
         found.notes.push(format!(
-            "{inert} of them are in lists Mochi accepts but never acts on (layered, border_overflow)"
+            "{inert} of them {are} in lists Mochi accepts but never acts on (layered, border_overflow)"
         ));
     }
     // A mistyped list name parses into no rules at all, because every list
@@ -1172,8 +1174,9 @@ fn check_app_rules_text(label: &str, text: &str) -> Findings {
     }
     if !found.errors.is_empty() {
         let broken = found.errors.len();
+        let says = if broken == 1 { "it says" } else { "they say" };
         found.headline = Some(format!(
-            "{broken} of the {} rules in {label} cannot do what they say",
+            "{broken} of the {} {rules} in {label} cannot do what {says}",
             sets.len()
         ));
     }
@@ -1669,9 +1672,10 @@ fn doctor_report(doctor: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_array)
         .unwrap_or(&empty);
 
+    let managed = count("managed");
     let mut out = format!(
-        "{} window(s) managed, {} taken off screen by Mochi.\n\n",
-        count("managed"),
+        "{managed} {} managed, {} taken off screen by Mochi.\n\n",
+        if managed == 1 { "window" } else { "windows" },
         count("off_screen")
     );
     if findings.is_empty() {
@@ -1679,8 +1683,13 @@ fn doctor_report(doctor: &serde_json::Value) -> String {
         return out;
     }
     out.push_str(&format!(
-        "{} thing(s) wrong. Each one is something you can see on screen:\n\n",
-        findings.len()
+        "{} {} wrong. Each one is something you can see on screen:\n\n",
+        findings.len(),
+        if findings.len() == 1 {
+            "thing"
+        } else {
+            "things"
+        }
     ));
     for finding in findings {
         let text = |key: &str| {
@@ -1843,6 +1852,31 @@ mod tests {
         assert!(out.contains("Mochi itself"), "{out}");
         assert!(!out.contains("(no title)"), "{out}");
         assert!(!out.contains("retile"), "{out}");
+    }
+
+    #[test]
+    fn the_doctor_counts_one_window_and_one_finding_in_the_singular() {
+        let finding = serde_json::json!({
+            "kind": "hole", "hwnd": "0x1", "title": "Notes", "exe": "notes.exe",
+            "detail": "the window is not on any monitor",
+        });
+        let out = super::doctor_report(&serde_json::json!({
+            "managed": 1, "off_screen": 0, "findings": [finding],
+        }));
+        assert!(
+            out.starts_with("1 window managed, 0 taken off screen by Mochi.\n\n1 thing wrong."),
+            "{out}"
+        );
+
+        let out = super::doctor_report(&serde_json::json!({
+            "managed": 2, "off_screen": 1, "findings": [finding, finding],
+        }));
+        assert!(
+            out.starts_with("2 windows managed, 1 taken off screen by Mochi.\n\n2 things wrong."),
+            "{out}"
+        );
+        let out = super::doctor_report(&serde_json::json!({ "managed": 0, "findings": [] }));
+        assert!(out.starts_with("0 windows managed,"), "{out}");
     }
 
     #[test]
@@ -2174,6 +2208,53 @@ mod tests {
         let found = check_app_rules_text("applications.json", text);
         assert_eq!(found.errors.len(), 1, "{found:?}");
         assert!(found.errors[0].starts_with("ignore[0]:"), "{found:?}");
+    }
+
+    #[test]
+    fn the_community_file_counts_one_rule_in_the_singular() {
+        let text = r#"{ "Zoom": { "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }] } }"#;
+        let found = check_app_rules_text("applications.json", text);
+        assert_eq!(
+            found.notes[0], "1 rule read from the application file",
+            "{found:?}"
+        );
+        assert_eq!(
+            found.headline.as_deref(),
+            Some("1 of the 1 rule in applications.json cannot do what it says"),
+        );
+
+        let text = r#"{ "Zoom": {
+  "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }, { "kind": "Exe", "id": "Zoom.exe" }],
+  "layered": [{ "kind": "Exe", "id": "Zoom.exe" }]
+} }"#;
+        let found = check_app_rules_text("applications.json", text);
+        assert_eq!(
+            found.notes[1],
+            "1 of them is in lists Mochi accepts but never acts on (layered, border_overflow)"
+        );
+        assert_eq!(
+            found.headline.as_deref(),
+            Some("1 of the 3 rules in applications.json cannot do what it says"),
+        );
+    }
+
+    #[test]
+    fn the_community_file_counts_more_rules_in_the_plural() {
+        let text = r#"{ "Zoom": {
+  "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }, { "kind": "Exe", "id": ")", "matching_strategy": "Regex" }],
+  "layered": [{ "kind": "Exe", "id": "Zoom.exe" }],
+  "border_overflow": [{ "kind": "Exe", "id": "Zoom.exe" }]
+} }"#;
+        let found = check_app_rules_text("applications.json", text);
+        assert_eq!(found.notes[0], "4 rules read from the application file");
+        assert_eq!(
+            found.notes[1],
+            "2 of them are in lists Mochi accepts but never acts on (layered, border_overflow)"
+        );
+        assert_eq!(
+            found.headline.as_deref(),
+            Some("2 of the 4 rules in applications.json cannot do what they say"),
+        );
     }
 
     #[test]

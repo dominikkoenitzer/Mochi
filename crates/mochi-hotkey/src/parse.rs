@@ -943,20 +943,23 @@ fn split_group(side: &str) -> Result<Option<Group<'_>>, String> {
 /// a binding that should simply have worked.
 fn expand(left: &str, right: &str) -> Result<Vec<(String, String)>, String> {
     let joined = |before: &str, item: &str, after: &str| format!("{before}{item}{after}");
+    let bindings = |n: usize| if n == 1 { "binding" } else { "bindings" };
 
     let Some((lb, ls, la)) = split_group(left)? else {
         return Ok(vec![(left.to_owned(), right.to_owned())]);
     };
     let Some((rb, rs, ra)) = split_group(right)? else {
         return Err(format!(
-            "the trigger expands to {} bindings but the command is a single line",
-            ls.len()
+            "the trigger expands to {} {} but the command is a single line",
+            ls.len(),
+            bindings(ls.len())
         ));
     };
     if ls.len() != rs.len() {
         return Err(format!(
-            "the trigger expands to {} bindings but the command expands to {}",
+            "the trigger expands to {} {} but the command expands to {}",
             ls.len(),
+            bindings(ls.len()),
             rs.len()
         ));
     }
@@ -1343,6 +1346,20 @@ mod tests {
         let found = errors("alt + [1,2,3] : focus-workspace [0,1]");
         assert!(
             found[0].contains("3 bindings but the command expands to 2"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_trigger_group_of_one_counts_one_binding() {
+        let found = errors("alt + [a] : focus-workspace 0");
+        assert!(
+            found[0].contains("expands to 1 binding but the command is a single line"),
+            "{found:?}"
+        );
+        let found = errors("alt + [a] : focus-workspace [0,1]");
+        assert!(
+            found[0].contains("expands to 1 binding but the command expands to 2"),
             "{found:?}"
         );
     }
