@@ -6174,6 +6174,35 @@ mod tests {
     }
 
     #[test]
+    fn the_focused_window_index_in_monocle_is_the_monocled_one() {
+        let index = |wm: &mut WindowManager| {
+            wm.handle_command(Command::Query {
+                target: QueryTarget::FocusedWindowIndex,
+            })
+            .0
+        };
+
+        let (mut wm, _) = manager(vec![window(1, "Editor"), window(2, "Notes")]);
+        wm.handle_command(Command::StackAll);
+        wm.handle_command(Command::FocusStackWindow { index: 0 });
+        wm.handle_command(Command::ToggleMonocle);
+        assert!(wm.state().focused_workspace().unwrap().is_monocle());
+        let answer = serde_json::json!(0);
+        assert_eq!(index(&mut wm), Response::Query { answer });
+        wm.handle_command(Command::ToggleMonocle);
+        wm.handle_command(Command::FocusStackWindow { index: 1 });
+        wm.handle_command(Command::ToggleMonocle);
+        assert!(wm.state().focused_workspace().unwrap().is_monocle());
+        let answer = serde_json::json!(1);
+        assert_eq!(index(&mut wm), Response::Query { answer });
+
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        wm.handle_command(Command::ToggleMonocle);
+        let answer = serde_json::json!(0);
+        assert_eq!(index(&mut wm), Response::Query { answer });
+    }
+
+    #[test]
     fn stop_ends_the_loop_and_answers_ok() {
         let (mut wm, _) = manager(vec![]);
         let (response, flow) = wm.handle_command(Command::Stop);

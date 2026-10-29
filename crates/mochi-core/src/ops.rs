@@ -1604,7 +1604,12 @@ impl State {
     /// hand to a stackbar.
     #[must_use]
     pub fn focused_container(&self) -> Option<&Container> {
-        self.focused_workspace().ok()?.focused_container()
+        // Monocle takes its container out of the ring, so the ring's focused
+        // one is another window's.
+        let workspace = self.focused_workspace().ok()?;
+        workspace
+            .monocle_container()
+            .or_else(|| workspace.focused_container())
     }
 }
 
