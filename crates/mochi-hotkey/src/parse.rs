@@ -1525,7 +1525,8 @@ mod tests {
         );
         assert!(
             shell_fallback_reason("start wt").is_none(),
-            "`start` is the Windows launcher as well as a Mochi subcommand, and              `start wt` is a terminal launcher, not a mistake"
+            "`start` is the Windows launcher as well as a Mochi subcommand, and \
+             `start wt` is a terminal launcher, not a mistake"
         );
         assert!(
             shell_fallback_reason("").is_none(),

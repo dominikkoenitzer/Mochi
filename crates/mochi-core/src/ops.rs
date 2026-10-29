@@ -2071,7 +2071,7 @@ mod tests {
                 if let Some(focus) = changes.focus {
                     assert!(
                         !hidden.contains(&focus),
-                        "{name} asked to focus {focus:?}, which is hidden behind a                          {} ",
+                        "{name} asked to focus {focus:?}, which is hidden behind a {}",
                         if maximize { "maximize" } else { "monocle" }
                     );
                 }
