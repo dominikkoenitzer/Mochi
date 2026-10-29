@@ -562,12 +562,38 @@ fn subscribe(name: &str) -> Result<()> {
         }
     });
 
+    follow(
+        &notifications,
+        SUBSCRIBE_POLL,
+        mochi_client::is_running,
+        |n| {
+            println!("{}", serde_json::to_string(n)?);
+            Ok(())
+        },
+    )
+}
+
+/// Hands every notification to `emit` until the daemon has gone.
+fn follow(
+    notifications: &std::sync::mpsc::Receiver<std::io::Result<mochi_client::Notification>>,
+    poll: std::time::Duration,
+    is_running: impl Fn() -> bool,
+    mut emit: impl FnMut(&mochi_client::Notification) -> Result<()>,
+) -> Result<()> {
     loop {
-        match notifications.recv_timeout(SUBSCRIBE_POLL) {
-            Ok(Ok(n)) => println!("{}", serde_json::to_string(&n)?),
+        match notifications.recv_timeout(poll) {
+            Ok(Ok(n)) => {
+                emit(&n)?;
+                // `stop` is the last line; a daemon started within one poll
+                // would otherwise leave this waiting on a pipe nobody writes to.
+                if n.event == mochi_client::NotificationEvent::Stop {
+                    eprintln!("mochi has stopped, ending the subscription");
+                    return Ok(());
+                }
+            }
             Ok(Err(e)) => bail!("the subscriber pipe failed: {e}"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if !mochi_client::is_running() {
+                if !is_running() {
                     eprintln!("mochi has stopped, ending the subscription");
                     return Ok(());
                 }
@@ -1728,6 +1754,38 @@ fn doctor_report(doctor: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_subscription_ends_on_the_stop_event_even_when_a_new_daemon_is_up() {
+        use mochi_client::{Notification, NotificationEvent};
+
+        let (lines, notifications) = std::sync::mpsc::channel();
+        lines
+            .send(Ok(Notification::new(NotificationEvent::Stop)))
+            .unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let poll = std::time::Duration::from_millis(20);
+            let result = super::follow(
+                &notifications,
+                poll,
+                || true,
+                |n| {
+                    seen.push(n.event.clone());
+                    Ok(())
+                },
+            );
+            let _ = done_tx.send((result.is_ok(), seen));
+        });
+
+        let (ok, seen) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the subscription carried on after the daemon said it stopped");
+        assert!(ok);
+        assert_eq!(seen, [NotificationEvent::Stop]);
+        drop(lines);
+    }
+
     #[test]
     fn a_state_filter_is_checked_before_the_daemon_is_asked() {
         use clap::Parser;
