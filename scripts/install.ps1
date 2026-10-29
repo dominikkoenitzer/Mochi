@@ -692,6 +692,29 @@ function Stop-Mochi {
     throw 'Mochi did not stop within 10 seconds. Press alt + shift + e, then run this again.'
 }
 
+# Answers the names it copied into $BinDir.
+function Copy-Binaries {
+    param([Parameter(Mandatory)][string] $Source)
+    foreach ($binary in $Binaries) {
+        if ($PSCmdlet.ShouldProcess($binary, "copy to $BinDir")) {
+            Copy-Item -LiteralPath (Join-Path $Source $binary) -Destination $BinDir -Force
+            $binary
+        }
+    }
+}
+
+# Only bin, and only when it is empty. <InstallRoot> is a directory the user
+# named and may have had long before Mochi: -InstallRoot C:\Tools must not
+# turn an uninstall into deleting C:\Tools.
+function Remove-EmptyBinDir {
+    $dir = $BinDir
+    if ((Test-Path $dir) -and -not (Get-ChildItem -LiteralPath $dir -Force)) {
+        if ($PSCmdlet.ShouldProcess($dir, 'remove empty directory')) {
+            Remove-Item -LiteralPath $dir -Force
+        }
+    }
+}
+
 function Install-Mochi {
     if ($Version) {
         Save-ReleaseAsset -Tag $Version
@@ -741,15 +764,9 @@ function Install-Mochi {
         throw "Mochi is running: $names. Stop it first with 'mochic stop', then run this again. Its files cannot be replaced while it is using them."
     }
 
-    $copied = $true
-    foreach ($binary in $Binaries) {
-        if ($PSCmdlet.ShouldProcess($binary, "copy to $BinDir")) {
-            Copy-Item -LiteralPath (Join-Path $source $binary) -Destination $BinDir -Force
-            Write-Detail $binary
-        } else {
-            $copied = $false
-        }
-    }
+    $placed = @(Copy-Binaries -Source $source)
+    foreach ($binary in $placed) { Write-Detail $binary }
+    $copied = $placed.Count -eq $Binaries.Count
     Write-Step 'checking that the installed binaries run'
     if (-not $copied) {
         Write-Detail 'skipped, the binaries were not copied'
@@ -889,15 +906,7 @@ function Uninstall-Mochi {
         }
     }
 
-    # Only bin, and only when the loop above left it empty. <InstallRoot> is a
-    # directory the user named and may have had long before Mochi: -InstallRoot
-    # C:\Tools must not turn an uninstall into deleting C:\Tools.
-    $dir = $BinDir
-    if ((Test-Path $dir) -and -not (Get-ChildItem -LiteralPath $dir -Force)) {
-        if ($PSCmdlet.ShouldProcess($dir, 'remove empty directory')) {
-            Remove-Item -LiteralPath $dir -Force
-        }
-    }
+    Remove-EmptyBinDir
 
     # What Mochi-Setup.exe adds on top: its own copy, which Apps & features
     # runs to uninstall, and that Apps & features entry. The setup always
