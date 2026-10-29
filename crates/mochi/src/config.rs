@@ -37,17 +37,8 @@ pub const HOTKEYS_LEGACY_FILE_NAME: &str = "whkdrc";
 /// one change, so a burst costs one reload and the last write in it still wins.
 const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// The stub `mochic quickstart` writes.
-///
-/// Intentionally minimal: once `mochi-core` owns the schema, the real defaults
-/// and the `$schema` link belong here.
-pub const DEFAULT_CONFIG: &str = r#"{
-  "window_hiding_behaviour": "Cloak",
-  "default_workspace_padding": 10,
-  "default_container_padding": 10,
-  "monitors": []
-}
-"#;
+/// The stub the `quickstart` command writes, the same one `mochic quickstart` writes.
+pub const DEFAULT_CONFIG: &str = mochi_core::config::QUICKSTART;
 
 /// Resolves the configuration path.
 ///
@@ -487,6 +478,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(DEFAULT_CONFIG).unwrap();
         assert!(value.is_object());
         assert!(value.get("monitors").is_some());
+        assert_eq!(value["$schema"], "https://mochi.punds.ch/schema.json");
     }
 
     #[test]
