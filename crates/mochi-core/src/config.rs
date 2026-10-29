@@ -603,6 +603,10 @@ impl Config {
     /// Returns [`Error::Json`] when the text is not valid JSON or a value has
     /// the wrong type. Unknown keys are not an error.
     pub fn from_json(json: &str) -> Result<Self> {
+        // A file saved by a Windows editor or written by `Out-File` starts with
+        // a byte order mark, which serde refuses as the first character.
+        let json = json.strip_prefix('\u{feff}').unwrap_or(json);
+
         // The shape is checked before the fields, because serde will otherwise
         // accept a JSON array here. A struct deserialises from a sequence by
         // taking its fields positionally, and this struct's `#[serde(default)]`
@@ -1249,6 +1253,13 @@ mod tests {
             Config::from_json(r#"{"border_width":"six"}"#).is_err(),
             "a wrong type is still an error"
         );
+    }
+
+    #[test]
+    fn a_config_saved_with_a_byte_order_mark_loads() {
+        let config = Config::from_json("\u{feff}{\"border_width\": 6}").unwrap();
+        assert_eq!(config.border_width, Some(6));
+        assert!(Config::from_json("\u{feff}[]").is_err(), "still not a list");
     }
 
     #[test]

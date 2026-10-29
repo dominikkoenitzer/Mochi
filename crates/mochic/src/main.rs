@@ -944,7 +944,14 @@ fn read_config(path: &Path) -> std::result::Result<String, String> {
             path.display()
         ));
     }
-    std::fs::read_to_string(path).map_err(|e| format!("could not read {}: {e}", path.display()))
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    // The checks below parse the text themselves, so a byte order mark goes
+    // here, once, and the columns on line 1 match what the editor shows.
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_owned(),
+        None => text,
+    })
 }
 
 /// Checks the text of a `mochi.json`.
@@ -1978,6 +1985,39 @@ mod tests {
             found.headline.as_deref(),
             Some(error.lines().next().unwrap())
         );
+    }
+
+    #[test]
+    fn a_file_saved_with_a_byte_order_mark_is_read_as_written() {
+        let dir = std::env::temp_dir().join(format!("mochic-bom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("\u{feff}{text}")).unwrap();
+            path
+        };
+        let elevated = super::wants_elevation(Some(&file("on.json", r#"{ "elevated": true }"#)));
+        let broken = read_config(&file(
+            "broken.json",
+            "{\n  \"border\": true\n  \"border_width\": 6\n}\n",
+        ))
+        .unwrap();
+        let rules = read_config(&file(
+            "applications.json",
+            r#"{ "Steam": { "ignore": [{ "kind": "Exe", "id": "steam.exe" }] } }"#,
+        ))
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(elevated);
+        let found = check_config_text("mochi.json", &broken);
+        assert_eq!(found.errors.len(), 1, "{found:?}");
+        assert!(
+            found.errors[0].starts_with("mochi.json:3:3:"),
+            "{}",
+            found.errors[0]
+        );
+        assert!(looks_like_app_rules(&rules));
     }
 
     #[test]
