@@ -12,7 +12,7 @@ Mochi reads one JSON file. It takes the first of these that applies:
 
 ```json
 {
-  "$schema": "https://get-mochi.vercel.app/schema.json",
+  "$schema": "https://mochi.punds.ch/schema.json",
   "window_hiding_behaviour": "Cloak",
   "default_workspace_padding": 10,
   "default_container_padding": 10,
@@ -209,7 +209,7 @@ A window kept out of the layout and shown with one command, `mochic toggle-scrat
 
 ```json
 {
-  "$schema": "https://get-mochi.vercel.app/schema.json",
+  "$schema": "https://mochi.punds.ch/schema.json",
   "window_hiding_behaviour": "Cloak",
   "default_workspace_padding": 10,
   "default_container_padding": 10,
