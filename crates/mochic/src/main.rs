@@ -1358,7 +1358,7 @@ fn position_block(label: &str, text: &str, e: &serde_json::Error) -> String {
         line -= 1;
         column = before.len() + 1;
     }
-    let message = e.to_string();
+    let message = mochi_core::error::plain_json_error(&e.to_string());
     if line == 0 {
         return format!("{label}: {message}");
     }
@@ -2033,6 +2033,28 @@ mod tests {
         let error = &found.errors[0];
         assert!(error.starts_with("mochi.json:2:16:"), "{error}");
         assert!(error.contains("  2 |   \"border\": tru\n"), "{error}");
+    }
+
+    #[test]
+    fn a_wrong_value_is_described_in_plain_words() {
+        let found = check_config_text("mochi.json", "{ \"default_workspace_padding\": \"ten\" }");
+        let error = &found.errors[0];
+        assert!(error.contains("expected a whole number"), "{error}");
+        assert!(!error.contains("i32"), "{error}");
+
+        let found = check_config_text("mochi.json", "{ \"monitors\": {} }");
+        let error = &found.errors[0];
+        assert!(
+            error.contains("invalid type: an object, expected a list"),
+            "{error}"
+        );
+
+        let found = check_config_text("mochi.json", "{\n  \"border\": true\n");
+        let error = &found.errors[0];
+        assert!(
+            error.contains("the file ends before the closing }"),
+            "{error}"
+        );
     }
 
     #[test]

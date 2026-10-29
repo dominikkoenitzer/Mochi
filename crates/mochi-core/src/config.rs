@@ -1263,6 +1263,23 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_type_is_named_in_the_words_of_the_file() {
+        let error = Config::from_json(r#"{"border_colours": 5}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expected an object at line 1"), "{error}");
+        assert!(!error.contains("BorderColours"), "{error}");
+
+        let error = Config::from_json(r#"{"border_width": 1.5}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("invalid type: decimal number `1.5`, expected a whole number"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn colours_parse_from_every_accepted_shape() {
         assert_eq!(
             Colour::parse("#ffbbdf").unwrap(),
