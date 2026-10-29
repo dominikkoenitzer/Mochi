@@ -119,7 +119,10 @@ impl Serialize for Colour {
 }
 
 #[derive(Deserialize)]
-#[serde(untagged)]
+#[serde(
+    untagged,
+    expecting = "expected a colour as a hex string, a channel object with each channel 0 to 255, or an integer"
+)]
 enum ColourRepr {
     Hex(String),
     Channels { r: u8, g: u8, b: u8 },
@@ -1298,6 +1301,24 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_wrong_colour_or_rule_is_named_in_the_words_of_the_file() {
+        let error = Config::from_json(r#"{"border_colours": {"single": true}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("expected a colour as a hex string"),
+            "{error}"
+        );
+        assert!(!error.contains("ColourRepr"), "{error}");
+
+        let error = Config::from_json(r#"{"ignore_rules": [5]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expected a rule object"), "{error}");
+        assert!(!error.contains("MatchingRule"), "{error}");
     }
 
     #[test]
