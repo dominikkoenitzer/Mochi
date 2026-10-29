@@ -756,11 +756,15 @@ fn hotkey_path() -> Option<PathBuf> {
 
 /// Adds what the hotkey file says to the findings.
 fn check_hotkeys(found: &mut Findings) {
-    let Some(path) = hotkey_path() else {
-        return;
-    };
+    if let Some(path) = hotkey_path() {
+        check_hotkey_file(found, &path);
+    }
+}
+
+/// Adds what the hotkey file at `path` says to the findings.
+fn check_hotkey_file(found: &mut Findings, path: &Path) {
     let label = path.display().to_string();
-    let text = match std::fs::read_to_string(&path) {
+    let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             found.warnings.push(format!(
