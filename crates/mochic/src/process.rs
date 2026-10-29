@@ -107,15 +107,47 @@ impl Launch for System {
         // Same console, same output, same process group: the user reads the
         // dry run where they typed it, and Ctrl-C or closing the window reaches
         // it as well as this process.
-        let mut child = Command::new(&exe)
-            .args(args)
-            .spawn()
-            .with_context(|| format!("could not start {}", exe.display()))?;
-        let pid = child.id();
-        child
-            .wait()
-            .with_context(|| format!("could not wait for mochi (pid {pid})"))
+        run_attached(
+            &win::Console,
+            || {
+                Command::new(&exe)
+                    .args(args)
+                    .spawn()
+                    .with_context(|| format!("could not start {}", exe.display()))
+            },
+            |mut child| {
+                let pid = child.id();
+                child
+                    .wait()
+                    .with_context(|| format!("could not wait for mochi (pid {pid})"))
+            },
+        )
     }
+}
+
+/// Whether Ctrl-C ends this process. A seam, so the tests can see when it
+/// changes without a console of their own.
+trait CtrlC {
+    fn set_ignored(&self, ignored: bool);
+}
+
+/// Starts a program on this console and returns once it has exited.
+///
+/// Ctrl-C reaches every process on the console, so it used to end this one at
+/// once and give the prompt back while the child still wrote its last lines.
+/// This process ignores it from the spawn to the end of the wait, failed or
+/// not. Never before the spawn: the child inherits the setting, and Ctrl-C
+/// could not stop it. Ctrl-Break and closing the window still end both.
+fn run_attached<C>(
+    ctrl_c: &impl CtrlC,
+    spawn: impl FnOnce() -> Result<C>,
+    wait: impl FnOnce(C) -> Result<ExitStatus>,
+) -> Result<ExitStatus> {
+    let child = spawn()?;
+    ctrl_c.set_ignored(true);
+    let status = wait(child);
+    ctrl_c.set_ignored(false);
+    status
 }
 
 /// `mochic start`: the daemon, or with `dry_run` an observer on this console.
@@ -315,6 +347,7 @@ mod win {
     use windows::Win32::System::Com::{
         COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
     };
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
     use windows::Win32::System::Threading::{
         GetCurrentProcess, GetExitCodeProcess, OpenProcessToken, WaitForSingleObject,
     };
@@ -324,7 +357,18 @@ mod win {
     };
     use windows::core::PCWSTR;
 
-    use super::quote_argument;
+    use super::{CtrlC, quote_argument};
+
+    /// This process's own Ctrl-C setting.
+    pub struct Console;
+
+    impl CtrlC for Console {
+        fn set_ignored(&self, ignored: bool) {
+            // SAFETY: no handler routine is passed, so the call only sets or
+            // clears this process's flag. A failure leaves Ctrl-C as it was.
+            let _ = unsafe { SetConsoleCtrlHandler(None, ignored) };
+        }
+    }
 
     /// Whether this process runs with an elevated token. Asked of the token,
     /// never guessed from a path or a group membership.
@@ -490,6 +534,10 @@ mod tests {
         fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
         }
+
+        fn record(&self, call: &str) {
+            self.calls.borrow_mut().push(call.to_owned());
+        }
     }
 
     impl Launch for Fake {
@@ -524,6 +572,184 @@ mod tests {
                 .push(format!("attached {}", args.join(" ")));
             Ok(ExitStatus::from_raw(self.exit))
         }
+    }
+
+    impl CtrlC for Fake {
+        fn set_ignored(&self, ignored: bool) {
+            let call = if ignored {
+                "ignore ctrl-c"
+            } else {
+                "heed ctrl-c"
+            };
+            self.record(call);
+        }
+    }
+
+    #[test]
+    fn ctrl_c_is_ignored_only_from_the_spawn_to_the_end_of_the_wait() {
+        use std::os::windows::process::ExitStatusExt;
+        let fake = Fake::new(false, 0);
+        let status = run_attached(
+            &fake,
+            || {
+                fake.record("spawn");
+                Ok(())
+            },
+            |()| {
+                fake.record("wait");
+                Ok(ExitStatus::from_raw(0))
+            },
+        )
+        .expect("the wait should succeed");
+        assert!(status.success());
+        assert_eq!(
+            fake.calls(),
+            ["spawn", "ignore ctrl-c", "wait", "heed ctrl-c"],
+            "ignored before the spawn, the child would inherit it and Ctrl-C could not stop it"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_is_heeded_again_when_the_wait_fails() {
+        let fake = Fake::new(false, 0);
+        let error = run_attached(
+            &fake,
+            || {
+                fake.record("spawn");
+                Ok(())
+            },
+            |()| -> Result<ExitStatus> {
+                fake.record("wait");
+                bail!("the wait failed")
+            },
+        )
+        .expect_err("a failed wait is an error");
+        assert_eq!(error.to_string(), "the wait failed");
+        assert_eq!(
+            fake.calls(),
+            ["spawn", "ignore ctrl-c", "wait", "heed ctrl-c"]
+        );
+    }
+
+    #[test]
+    fn ctrl_c_is_left_alone_when_nothing_starts() {
+        let fake = Fake::new(false, 0);
+        run_attached(
+            &fake,
+            || -> Result<()> {
+                fake.record("spawn");
+                bail!("no such program")
+            },
+            |()| unreachable!("nothing was started to wait for"),
+        )
+        .expect_err("a failed spawn is an error");
+        assert_eq!(fake.calls(), ["spawn"]);
+    }
+
+    /// Tells a copy of this test binary which helper it is.
+    const CTRL_C_HELPER: &str = "MOCHIC_TEST_CTRL_C_HELPER";
+
+    /// Runs one ignored helper test of this binary as its own process.
+    fn helper(name: &str, role: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", name, "--ignored", "--nocapture"])
+            .env(CTRL_C_HELPER, role);
+        command
+    }
+
+    #[test]
+    fn ctrl_c_on_the_console_ends_the_child_and_not_mochic() {
+        use std::os::windows::process::CommandExt;
+        // `CREATE_NO_WINDOW`: a console of its own with no window, so the
+        // Ctrl-C raised in it reaches nothing else.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let output = helper("process::tests::ctrl_c_waiter", "waiter")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stdout.contains("the child exited with 0xc000013a"),
+            "Ctrl-C must end the child, and the waiter must live to see it ({}):\n{stdout}\n{stderr}",
+            output.status
+        );
+        assert!(
+            output.status.success(),
+            "{}:\n{stdout}\n{stderr}",
+            output.status
+        );
+    }
+
+    /// Stands in for `mochic start --dry-run` in a console of its own: starts
+    /// a child on it, raises Ctrl-C there and says how the child ended.
+    #[test]
+    #[ignore = "run only by ctrl_c_on_the_console_ends_the_child_and_not_mochic"]
+    fn ctrl_c_waiter() {
+        use std::io::BufRead;
+        use windows::Win32::System::Console::{
+            CTRL_C_EVENT, GenerateConsoleCtrlEvent, GetConsoleProcessList,
+        };
+        if std::env::var(CTRL_C_HELPER).as_deref() != Ok("waiter") {
+            return;
+        }
+        // Heeded, as a shell leaves it. A process started in a new process
+        // group, as some tools start the test run, inherits it ignored.
+        win::Console.set_ignored(false);
+        let status = run_attached(
+            &win::Console,
+            || {
+                helper("process::tests::ctrl_c_child", "child")
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .context("could not start the child")
+            },
+            |mut child| {
+                let stdout = child.stdout.take().context("the child has no stdout")?;
+                let mut lines = std::io::BufReader::new(stdout).lines();
+                // Only a child that runs code of its own is sure to be on the
+                // console and get the Ctrl-C.
+                anyhow::ensure!(
+                    lines.any(|line| line.is_ok_and(|line| line == "ready")),
+                    "the child ended before it was ready"
+                );
+                let mut on = [0u32; 8];
+                // SAFETY: the call writes at most `on.len()` process ids.
+                let count = unsafe { GetConsoleProcessList(&mut on) } as usize;
+                let mut on = on[..count.min(on.len())].to_vec();
+                let mut expected = vec![std::process::id(), child.id()];
+                on.sort_unstable();
+                expected.sort_unstable();
+                anyhow::ensure!(
+                    on == expected,
+                    "this console holds {on:?}, not only {expected:?}, so no Ctrl-C is raised on it"
+                );
+                // SAFETY: plain values; the console is this helper's own.
+                unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }
+                    .context("could not raise Ctrl-C")?;
+                let status = child.wait().context("could not wait for the child")?;
+                // Each process gets the Ctrl-C on a thread of its own, so this
+                // one may see it after the child has gone. Waiting here keeps
+                // the test from depending on that order.
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                Ok(status)
+            },
+        )
+        .unwrap();
+        let code = status.code().expect("an exit code").cast_unsigned();
+        println!("the child exited with {code:#x}");
+    }
+
+    /// The waiter's child: says it is running, then waits to be stopped.
+    #[test]
+    #[ignore = "run only by ctrl_c_on_the_console_ends_the_child_and_not_mochic"]
+    fn ctrl_c_child() {
+        if std::env::var(CTRL_C_HELPER).as_deref() != Ok("child") {
+            return;
+        }
+        println!("ready");
+        std::thread::sleep(std::time::Duration::from_secs(5));
     }
 
     fn args() -> Vec<String> {
