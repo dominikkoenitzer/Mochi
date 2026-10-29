@@ -217,7 +217,7 @@ Short example:
 
 ```json
 {
-  "$schema": "https://get-mochi.vercel.app/schema.json",
+  "$schema": "https://mochi.punds.ch/schema.json",
   "default_workspace_padding": 10,
   "default_container_padding": 10,
   "border": true,

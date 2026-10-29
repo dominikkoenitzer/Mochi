@@ -457,7 +457,7 @@ fn quickstart() -> Result<()> {
         .map(PathBuf::from)
         .context("USERPROFILE is not set")?;
 
-    write_unless_present(&profile.join("mochi.json"), &default_config())?;
+    write_unless_present(&profile.join("mochi.json"), default_config())?;
 
     // The hotkey directory may already hold a file under the name a standalone
     // hotkey daemon uses, which is one of the names Mochi reads. Writing the
@@ -491,23 +491,9 @@ fn write_unless_present(path: &std::path::Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Where Mochi is published. Every address the client writes out starts here.
-const SITE: &str = "https://get-mochi.vercel.app";
-
 /// The stub configuration `quickstart` writes.
-///
-/// Kept minimal on purpose: `mochi-core` owns the schema and fills this in.
-fn default_config() -> String {
-    format!(
-        r#"{{
-  "$schema": "{SITE}/schema.json",
-  "window_hiding_behaviour": "Cloak",
-  "default_workspace_padding": 10,
-  "default_container_padding": 10,
-  "monitors": []
-}}
-"#
-    )
+fn default_config() -> &'static str {
+    mochi_core::config::QUICKSTART
 }
 
 /// How often a subscription checks that the daemon is still there.
@@ -1376,8 +1362,16 @@ fn parse_failure_json(label: &str, text: &str, flattened: &str) -> String {
 
 /// `file:line:column: what went wrong`, then the line itself under a caret.
 fn position_block(label: &str, text: &str, e: &serde_json::Error) -> String {
-    let (line, column) = (e.line(), e.column());
-    let message = e.to_string();
+    let (mut line, mut column) = (e.line(), e.column());
+    // Column 0 is serde standing just past a line break: the mistake is at
+    // the end of the line before.
+    if column == 0
+        && let Some(before) = line.checked_sub(2).and_then(|at| text.lines().nth(at))
+    {
+        line -= 1;
+        column = before.len() + 1;
+    }
+    let message = mochi_core::error::plain_json_error(&e.to_string());
     if line == 0 {
         return format!("{label}: {message}");
     }
@@ -2000,16 +1994,16 @@ mod tests {
 
     #[test]
     fn the_quickstart_stub_is_valid_json() {
-        let value: serde_json::Value = serde_json::from_str(&default_config()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(default_config()).unwrap();
         assert!(value.is_object());
-        assert_eq!(value["$schema"], "https://get-mochi.vercel.app/schema.json");
+        assert_eq!(value["$schema"], "https://mochi.punds.ch/schema.json");
     }
 
     // --- check ----------------------------------------------------------
 
     #[test]
     fn a_good_file_is_usable_and_says_what_it_read() {
-        let found = check_config_text("mochi.json", &default_config());
+        let found = check_config_text("mochi.json", default_config());
         assert!(found.errors.is_empty(), "{:?}", found.errors);
         assert!(found.warnings.is_empty(), "{:?}", found.warnings);
         assert!(
@@ -2076,6 +2070,45 @@ mod tests {
         assert_eq!(found.errors.len(), 1, "{found:?}");
         assert!(found.errors[0].contains("unknown variant"), "{found:?}");
         assert!(found.errors[0].starts_with("mochi.json:1:"), "{found:?}");
+    }
+
+    #[test]
+    fn a_mistake_at_the_end_of_a_line_is_shown_on_that_line() {
+        let found = check_config_text("mochi.json", "{\n  \"border\": tru\n}\n");
+        assert_eq!(found.errors.len(), 1, "{found:?}");
+        let error = &found.errors[0];
+        assert!(error.starts_with("mochi.json:2:16:"), "{error}");
+        assert!(error.contains("  2 |   \"border\": tru\n"), "{error}");
+    }
+
+    #[test]
+    fn a_wrong_value_is_described_in_plain_words() {
+        let found = check_config_text("mochi.json", "{ \"default_workspace_padding\": \"ten\" }");
+        let error = &found.errors[0];
+        assert!(error.contains("expected a whole number"), "{error}");
+        assert!(!error.contains("i32"), "{error}");
+
+        let found = check_config_text("mochi.json", "{ \"monitors\": {} }");
+        let error = &found.errors[0];
+        assert!(
+            error.contains("invalid type: an object, expected a list"),
+            "{error}"
+        );
+
+        let found = check_config_text("mochi.json", "{\n  \"border\": true\n");
+        let error = &found.errors[0];
+        assert!(
+            error.contains("the file ends before the closing }"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_file_is_shown_at_its_last_line() {
+        let found = check_config_text("mochi.json", "{\n  \"border\": true\n");
+        let error = &found.errors[0];
+        assert!(error.starts_with("mochi.json:2:17:"), "{error}");
+        assert!(error.contains("  2 |   \"border\": true\n"), "{error}");
     }
 
     #[test]
@@ -2284,7 +2317,7 @@ mod tests {
     fn an_application_rules_file_is_recognised_for_what_it_is() {
         let apps = r#"{ "Zoom": { "ignore": [{ "kind": "Exe", "id": "Zoom.exe" }] } }"#;
         assert!(looks_like_app_rules(apps));
-        assert!(!looks_like_app_rules(&default_config()));
+        assert!(!looks_like_app_rules(default_config()));
         // An empty object is neither, and is a configuration by default.
         assert!(!looks_like_app_rules("{}"));
         assert!(!looks_like_app_rules(
