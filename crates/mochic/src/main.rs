@@ -241,9 +241,16 @@ fn response_kind(response: &Response) -> &'static str {
     }
 }
 
+/// How long `stop` waits for the daemon's process to exit after it answered.
+const STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Sends a command, turning "no daemon" into a message a human can act on.
 fn send(command: &Command) -> Result<Response> {
-    match mochi_client::send(command) {
+    let sent = match command {
+        Command::Stop => mochi_client::stop(STOP_TIMEOUT),
+        _ => mochi_client::send(command),
+    };
+    match sent {
         Ok(response) => Ok(response),
         Err(Error::NotRunning) => Err(Coded::new(
             ErrorCode::DaemonNotRunning,
