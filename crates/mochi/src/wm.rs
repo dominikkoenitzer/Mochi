@@ -1006,7 +1006,9 @@ impl WindowManager {
         let loaded = match config::load(&path) {
             Ok(loaded) => loaded,
             Err(e) => {
-                tracing::error!(path = %path.display(), error = %e, "keeping the previous configuration");
+                // `{e:#}` keeps the cause after the context, which is where
+                // the line and column of the mistake are.
+                tracing::error!(path = %path.display(), error = %format!("{e:#}"), "keeping the previous configuration");
                 return Err(e);
             }
         };
@@ -3273,7 +3275,7 @@ impl WindowManager {
             }
             Command::ReloadConfiguration => match self.reload_config() {
                 Ok(()) => Response::Ok,
-                Err(e) => Response::error(e),
+                Err(e) => Response::error(format!("{e:#}")),
             },
             Command::Retile => {
                 self.refresh_min_sizes();
@@ -8804,6 +8806,23 @@ alt + j : focus down
              could be read from"
         );
         let _ = std::fs::remove_file(&broken);
+    }
+
+    #[test]
+    fn a_refused_reload_says_where_the_file_is_broken() {
+        let (mut wm, _) = manager(vec![window(1, "One")]);
+        let broken = std::env::temp_dir().join("mochi-wm-open-string-config.json");
+        std::fs::write(&broken, "{\n  \"border_style\": \"Rounded\n}\n").unwrap();
+        wm.session.config_path = broken.clone();
+
+        let (response, _) = wm.handle_command(Command::ReloadConfiguration);
+        let message = response.error_message().unwrap_or_default().to_owned();
+        let _ = std::fs::remove_file(&broken);
+        assert!(
+            message.contains("a string is not closed on its line"),
+            "{message}"
+        );
+        assert!(message.ends_with(" at line 2 column 27"), "{message}");
     }
 
     /// A crash record path of its own, emptied before the test runs.

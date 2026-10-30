@@ -783,7 +783,7 @@ pub fn load_app_specific_configuration_reporting_unknown_keys(
 ) -> Result<(RuleSets, Vec<String>)> {
     // A byte order mark in front, as a Windows editor saves it, is not JSON.
     let json = json.strip_prefix('\u{feff}').unwrap_or(json);
-    let value: serde_json::Value = serde_json::from_str(json)?;
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| Error::json(json, &e))?;
     let mut warnings = Vec::new();
     let value = match value {
         serde_json::Value::Object(mut map) => {
@@ -1241,6 +1241,14 @@ mod tests {
     fn a_broken_applications_json_is_an_error() {
         assert!(load_app_specific_configuration("not json").is_err());
         assert!(load_app_specific_configuration(r#"{"App": 5}"#).is_ok());
+    }
+
+    #[test]
+    fn a_string_left_open_in_an_applications_json_is_placed_on_its_line() {
+        let error = load_app_specific_configuration("{\n  \"App\": \"x\n}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.ends_with(" at line 2 column 12"), "{error}");
     }
 
     #[test]
