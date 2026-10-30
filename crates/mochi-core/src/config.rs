@@ -1354,6 +1354,14 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_file_is_placed_at_line_1_column_1() {
+        for text in ["", "\u{feff}"] {
+            let error = Config::from_json(text).unwrap_err().to_string();
+            assert!(error.ends_with(" at line 1 column 1"), "{error}");
+        }
+    }
+
+    #[test]
     fn text_the_user_typed_is_echoed_as_typed() {
         let cases = [
             (

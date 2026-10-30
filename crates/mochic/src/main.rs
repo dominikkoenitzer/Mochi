@@ -2228,6 +2228,13 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_file_is_placed_at_line_1_column_1() {
+        let found = check_config_text("mochi.json", "");
+        let headline = found.headline.unwrap_or_default();
+        assert!(headline.starts_with("mochi.json:1:1: "), "{headline}");
+    }
+
+    #[test]
     fn a_file_that_is_not_an_object_is_refused_in_the_daemons_words() {
         for text in ["5", "\"x\"", "true", "null", "[\"x\"]", "[5, 6]"] {
             let found = check_config_text("mochi.json", text);
