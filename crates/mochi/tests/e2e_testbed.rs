@@ -648,7 +648,7 @@ fn the_daemon_tiles_and_drives_four_real_windows() {
             let start = window_with_a_neighbour(&windows, direction).ok_or_else(|| {
                 format!("no tile has a neighbour to the {direction}, so the layout is wrong")
             })?;
-            mochi_testbed::focus_window(start).map_err(|e| e.to_string())?;
+            mochi_testbed::bring_to_front(start, STEP).map_err(|e| e.to_string())?;
             wait_for(STEP, || focused_window() == Some(start))
                 .map_err(|_| format!("{start:#x} never took the focus to start from"))?;
 
@@ -1158,7 +1158,7 @@ fn a_claimed_scratchpad_toggles_and_comes_back_after_a_hard_kill() {
     steps.step(
         "scratchpad-claim takes the focused window out of the layout",
         || {
-            mochi_testbed::focus_window(pad).map_err(|e| e.to_string())?;
+            mochi_testbed::bring_to_front(pad, STEP).map_err(|e| e.to_string())?;
             wait_for(STEP, || {
                 state().and_then(|s| s["foreground_window"].as_i64()) == Some(pad)
             })
@@ -2301,8 +2301,7 @@ fn an_alt_binding_does_not_leave_the_application_in_menu_mode() {
             hotkey_count() == 1,
             format!("the daemon holds {} bindings, not one", hotkey_count()),
         )?;
-        mochi_testbed::focus_window(hwnd).map_err(|e| e.to_string())?;
-        wait_for(STEP, || mochi_testbed::foreground_window() == hwnd).map_err(|_| {
+        mochi_testbed::bring_to_front(hwnd, STEP).map_err(|_| {
             format!(
                 "{hwnd:#x} never reached the foreground, so no key may be injected: \
                  the foreground is {:#x}",

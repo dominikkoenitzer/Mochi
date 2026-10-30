@@ -176,6 +176,9 @@ fn with_the_setting_on_the_windows_of_an_administrator_are_tiled_and_keep_their_
     });
 
     steps.step("both windows are tiled", || {
+        // Each window the daemon adopts takes the foreground, so wait until it holds both.
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} managed windows", managed_count()))?;
         wait_for_tiling(&windows, 2).map(|_| ())
     });
 
@@ -209,9 +212,8 @@ fn with_the_setting_on_the_windows_of_an_administrator_are_tiled_and_keep_their_
     steps.step(
         "the window in front is managed and its keys are not withheld",
         || {
-            mochi_testbed::focus_window(front).map_err(|e| e.to_string())?;
-            wait_for(STEP, || mochi_testbed::foreground_window() == front)
-                .map_err(|_| "the test window never came to the front".to_owned())?;
+            mochi_testbed::bring_to_front(front, STEP)
+                .map_err(|e| format!("the test window never came to the front: {e}"))?;
             let why = why().ok_or("no why answer")?;
             check(
                 why["managed"] == Value::Bool(true),
@@ -285,6 +287,8 @@ fn the_elevated_setting_off_leaves_the_daemon_as_it_was() {
             },
         );
         steps.step(&format!("{name}: both windows are tiled"), || {
+            wait_for(Duration::from_secs(10), || managed_count() == 2)
+                .map_err(|_| format!("state shows {} managed windows", managed_count()))?;
             wait_for_tiling(&windows, 2).map(|_| ())
         });
         drop(windows);
