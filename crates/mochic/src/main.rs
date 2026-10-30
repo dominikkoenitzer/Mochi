@@ -1377,12 +1377,19 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 /// A parse failure of `mochi.json`, with the line, the column and the text.
 fn parse_failure(label: &str, text: &str, flattened: &str) -> String {
-    // `mochi_core::Error::Json` carries the serde message as a string and has
-    // thrown the line and column away, so they are recovered by handing the
-    // same text to the same deserialiser `Config::from_json` runs. If that ever
+    // `mochi_core::Error::Json` carries the serde message as a string, so the
+    // line and column for the caret are recovered by handing the same text to
+    // the same two parses `Config::from_json` runs, in its order: a broken
+    // file is refused before a wrong value further up. If that ever
     // disagrees, the flattened message is printed exactly as it came.
-    let Err(e) = serde_json::from_str::<Config>(text) else {
-        return format!("{label}: {flattened}");
+    let e = match serde_json::from_str::<serde_json::Value>(text) {
+        Err(e) => e,
+        Ok(shape) if shape.is_object() => match serde_json::from_str::<Config>(text) {
+            Err(e) => e,
+            Ok(_) => return format!("{label}: {flattened}"),
+        },
+        // Any other shape is refused in words of its own, which carry no place.
+        Ok(_) => return format!("{label}: {flattened}"),
     };
     position_block(label, text, &e)
 }
@@ -1398,32 +1405,18 @@ fn parse_failure_json(label: &str, text: &str, flattened: &str) -> String {
 
 /// `file:line:column: what went wrong`, then the line itself under a caret.
 fn position_block(label: &str, text: &str, e: &serde_json::Error) -> String {
-    let (mut line, mut column) = (e.line(), e.column());
-    // Column 0 is serde standing just past a line break: the mistake is at
-    // the end of the line before.
-    if column == 0
-        && let Some(before) = line.checked_sub(2).and_then(|at| text.lines().nth(at))
-    {
-        line -= 1;
-        column = before.len() + 1;
-    }
-    let message = mochi_core::error::plain_json_error(&e.to_string());
-    if line == 0 {
+    // The same words and the same place `Config::from_json` puts in its
+    // error, which is what the daemon says when it refuses the file.
+    let message = mochi_core::error::json_words(e);
+    let Some((line, column)) = mochi_core::error::json_place(text, e) else {
         return format!("{label}: {message}");
-    }
-    let mut block = format!("{label}:{line}:{column}: {}", without_position(&message));
+    };
+    let mut block = format!("{label}:{line}:{column}: {message}");
     if let Some(caret) = caret(text, line, column) {
         block.push('\n');
         block.push_str(&caret);
     }
     block
-}
-
-/// Drops serde's own ` at line L column C`, which the prefix already said.
-fn without_position(message: &str) -> String {
-    message
-        .find(" at line ")
-        .map_or_else(|| message.to_owned(), |at| message[..at].to_owned())
 }
 
 /// The offending line with a caret under the offending column.
@@ -2208,6 +2201,53 @@ mod tests {
         let error = &found.errors[0];
         assert!(error.starts_with("mochi.json:2:17:"), "{error}");
         assert!(error.contains("  2 |   \"border\": true\n"), "{error}");
+    }
+
+    /// The daemon's reload refusal and the MCP reload tool carry the message
+    /// of `Config::from_json`, so it has to name the place `check` names.
+    #[test]
+    fn the_check_and_the_parse_name_the_same_place() {
+        for text in [
+            "{\n  \"border\": true,\n  \"border_width\": 6\n  \"border_style\": \"Rounded\"\n}\n",
+            "{\n  \"border\": true,\n  \"border_style\": \"Rounded\n}\n",
+            "{\r\n  \"border\": true,\r\n  \"border_style\": \"Rounded\r\n}\r\n",
+            "{\n  \"border\": true,\n  \"border_style\": \"Rounded",
+            "{ \"border\": true \"border_width\": 6 }",
+            "{\n  \"border_width\": \"x\",\n  \"border\": true\n  \"border_style\": \"Rounded\"\n}\n",
+        ] {
+            let found = check_config_text("mochi.json", text);
+            let headline = found.headline.unwrap_or_default();
+            let mut place = headline.split(':').skip(1);
+            let (line, column) = (place.next().unwrap(), place.next().unwrap());
+            let parsed = Config::from_json(text).unwrap_err().to_string();
+            assert!(
+                parsed.ends_with(&format!(" at line {line} column {column}")),
+                "check: {headline}\nparse: {parsed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_object_is_refused_in_the_daemons_words() {
+        for text in ["5", "\"x\"", "true", "null", "[\"x\"]", "[5, 6]"] {
+            let found = check_config_text("mochi.json", text);
+            let parsed = Config::from_json(text).unwrap_err().to_string();
+            assert_eq!(
+                found.headline.as_deref(),
+                Some(format!("mochi.json: {parsed}").as_str()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_reads_like_a_position_is_kept() {
+        let found = check_config_text("mochi.json", r#"{ "border_style": "Round at line 9" }"#);
+        let error = &found.errors[0];
+        assert!(
+            error.contains("unknown variant `Round at line 9`, expected one of"),
+            "{error}"
+        );
     }
 
     #[test]

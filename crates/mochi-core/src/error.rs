@@ -89,16 +89,123 @@ pub enum Error {
     Json(String),
 }
 
+impl Error {
+    /// A failure to read `text` as JSON, in the words of the file and at the
+    /// place [`json_place`] gives, which is the place `mochic check` prints.
+    #[must_use]
+    pub fn json(text: &str, error: &serde_json::Error) -> Self {
+        let words = json_words(error);
+        Self::Json(match json_place(text, error) {
+            Some((line, column)) => format!("{words} at line {line} column {column}"),
+            None => words,
+        })
+    }
+}
+
+/// For failures that have no text to point into, such as a value turned into
+/// a type or a type turned back into JSON. A parse of text uses [`Error::json`].
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(plain_json_error(&error.to_string()))
     }
 }
 
+/// serde's message without its ` at line L column C`, in the words of the file.
+#[must_use]
+pub fn json_words(error: &serde_json::Error) -> String {
+    let message = error.to_string();
+    let position = format!(" at line {} column {}", error.line(), error.column());
+    plain_json_error(message.strip_suffix(&position).unwrap_or(&message))
+}
+
+/// The line and column, both counted from 1, where reading `text` failed, or
+/// `None` when serde knows no place.
+#[must_use]
+pub fn json_place(text: &str, error: &serde_json::Error) -> Option<(usize, usize)> {
+    let (line, column) = (error.line(), error.column());
+    if line == 0 {
+        return None;
+    }
+    // Column 0 is serde standing just past a line break: the mistake is at
+    // the end of the line before.
+    if column == 0
+        && let Some(before) = line.checked_sub(2).and_then(|at| text.lines().nth(at))
+    {
+        return Some((line - 1, before.len() + 1));
+    }
+    Some((line, column))
+}
+
 /// A serde message with the Rust words in it said the way a config file says
 /// them: `i32` is a whole number, a sequence is a list, a map is an object.
+///
+/// Text the user typed is echoed as typed, so a value that happens to hold
+/// one of these words is not rewritten: a string in quotes, and the name in
+/// `unknown variant` or `unknown field`.
 #[must_use]
 pub fn plain_json_error(message: &str) -> String {
+    let mut serde_words = Vec::new();
+    let mut typed = Vec::new();
+    let mut rest = message;
+    while let Some((start, end)) = typed_span(rest) {
+        serde_words.push(&rest[..start]);
+        typed.push(&rest[start..end]);
+        rest = &rest[end..];
+    }
+    serde_words.push(rest);
+    let out_of_range = serde_words
+        .iter()
+        .any(|words| words.contains("invalid value: integer `"));
+    let mut plain = String::with_capacity(message.len());
+    for (at, words) in serde_words.iter().enumerate() {
+        plain.push_str(&plain_words(words, out_of_range));
+        if let Some(text) = typed.get(at) {
+            plain.push_str(text);
+        }
+    }
+    plain
+}
+
+/// The first stretch of `message` that holds text from the file, as a byte
+/// range: a string serde or a custom error printed in quotes, or the name in
+/// `unknown variant` and `unknown field`, which serde prints raw between
+/// backticks. A stretch whose end cannot be found runs to the end, so a
+/// doubtful case is left as typed rather than rewritten.
+fn typed_span(message: &str) -> Option<(usize, usize)> {
+    let quoted = message.find('"').map(|start| {
+        let mut escaped = false;
+        let end = message[start + 1..]
+            .char_indices()
+            .find(|&(_, c)| {
+                let closes = c == '"' && !escaped;
+                escaped = c == '\\' && !escaped;
+                closes
+            })
+            .map_or(message.len(), |(at, _)| start + 1 + at + 1);
+        (start, end)
+    });
+    let named = ["unknown variant `", "unknown field `"]
+        .iter()
+        .filter_map(|lead| message.find(lead).map(|at| at + lead.len()))
+        .min()
+        .map(|start| {
+            // The name is raw and may hold a backtick, so it ends at the last
+            // place serde's own words pick up again.
+            let end = ["`, expected ", "`, there are no "]
+                .iter()
+                .filter_map(|tail| message[start..].rfind(tail))
+                .max()
+                .map_or(message.len(), |at| start + at);
+            (start, end)
+        });
+    match (quoted, named) {
+        (Some(a), Some(b)) => Some(if a.0 < b.0 { a } else { b }),
+        (a, b) => a.or(b),
+    }
+}
+
+/// [`plain_json_error`] for a stretch of serde's own words.
+fn plain_words(message: &str, out_of_range: bool) -> String {
     const PHRASES: [(&str, &str); 10] = [
         (
             "EOF while parsing a value",
@@ -130,7 +237,6 @@ pub fn plain_json_error(message: &str) -> String {
     for (from, to) in PHRASES {
         out = out.replace(from, to);
     }
-    let out_of_range = out.contains("invalid value: integer `");
     let mut plain = String::with_capacity(out.len());
     let mut rest = out.as_str();
     while let Some(at) = rest.find("expected ") {
