@@ -288,6 +288,8 @@ fn the_elevated_setting_off_leaves_the_daemon_as_it_was() {
             },
         );
         steps.step(&format!("{name}: both windows are tiled"), || {
+            wait_for(Duration::from_secs(10), || managed_count() == 2)
+                .map_err(|_| format!("state shows {} managed windows", managed_count()))?;
             wait_for_tiling(&windows, 2).map(|_| ())
         });
         drop(windows);
