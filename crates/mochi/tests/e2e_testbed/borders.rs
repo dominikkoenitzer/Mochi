@@ -512,7 +512,7 @@ fn application_windows_leave_no_border_however_they_close() {
         let mut focused = spawn(1);
         let hwnd = focused.handles()[0];
         wait_for(STEP, || managed_count() == 3).map_err(|e| e.to_string())?;
-        mochi_testbed::focus_window(hwnd).map_err(|e| e.to_string())?;
+        mochi_testbed::bring_to_front(hwnd, STEP).map_err(|e| e.to_string())?;
         wait_for(STEP, || focused_window() == Some(hwnd))
             .map_err(|_| "the new window never took the focus".to_owned())?;
         wait_until_still(&stay);
@@ -529,7 +529,7 @@ fn application_windows_leave_no_border_however_they_close() {
             let mut away = spawn(1);
             let hwnd = away.handles()[0];
             wait_for(STEP, || managed_count() == 3).map_err(|e| e.to_string())?;
-            mochi_testbed::focus_window(hwnd).map_err(|e| e.to_string())?;
+            mochi_testbed::bring_to_front(hwnd, STEP).map_err(|e| e.to_string())?;
             wait_for(STEP, || focused_window() == Some(hwnd)).map_err(|e| e.to_string())?;
             command(&Command::MoveToWorkspace { index: 1 })?;
             command(&Command::FocusWorkspace { index: 1 })?;
@@ -558,7 +558,7 @@ fn application_windows_leave_no_border_however_they_close() {
             let mut victim = Foreign::spawn("Victim")?;
             wait_for(Duration::from_secs(10), || managed_count() == 3)
                 .map_err(|_| format!("state shows {} windows", managed_count()))?;
-            mochi_testbed::focus_window(victim.hwnd).map_err(|e| e.to_string())?;
+            mochi_testbed::bring_to_front(victim.hwnd, STEP).map_err(|e| e.to_string())?;
             wait_for(STEP, || focused_window() == Some(victim.hwnd))
                 .map_err(|_| "the window to kill never took the focus".to_owned())?;
             wait_until_still(&stay);
