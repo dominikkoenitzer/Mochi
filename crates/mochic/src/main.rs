@@ -1384,10 +1384,12 @@ fn parse_failure(label: &str, text: &str, flattened: &str) -> String {
     // disagrees, the flattened message is printed exactly as it came.
     let e = match serde_json::from_str::<serde_json::Value>(text) {
         Err(e) => e,
-        Ok(_) => match serde_json::from_str::<Config>(text) {
+        Ok(shape) if shape.is_object() => match serde_json::from_str::<Config>(text) {
             Err(e) => e,
             Ok(_) => return format!("{label}: {flattened}"),
         },
+        // Any other shape is refused in words of its own, which carry no place.
+        Ok(_) => return format!("{label}: {flattened}"),
     };
     position_block(label, text, &e)
 }
@@ -2221,6 +2223,19 @@ mod tests {
             assert!(
                 parsed.ends_with(&format!(" at line {line} column {column}")),
                 "check: {headline}\nparse: {parsed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_object_is_refused_in_the_daemons_words() {
+        for text in ["5", "\"x\"", "true", "null", "[\"x\"]", "[5, 6]"] {
+            let found = check_config_text("mochi.json", text);
+            let parsed = Config::from_json(text).unwrap_err().to_string();
+            assert_eq!(
+                found.headline.as_deref(),
+                Some(format!("mochi.json: {parsed}").as_str()),
+                "{text}"
             );
         }
     }
