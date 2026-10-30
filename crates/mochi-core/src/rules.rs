@@ -818,7 +818,7 @@ pub fn load_app_specific_configuration_reporting_unknown_keys(
             AppSpecificConfiguration::Map(serde_json::from_value(value)?)
         }
         serde_json::Value::Array(ref entries)
-            if entries.iter().all(serde_json::Value::is_object) =>
+            if entries.iter().any(serde_json::Value::is_object) =>
         {
             AppSpecificConfiguration::Legacy(serde_json::from_value(value)?)
         }
@@ -1296,6 +1296,10 @@ mod tests {
             (
                 r#"[{"identifier": {"kind": "Exe", "id": "a.exe", "matching_strategy": "Equals"}, "options": ["nope"]}]"#,
                 "unknown variant `nope`",
+            ),
+            (
+                r#"[{"identifier": {"kind": "Exe", "id": "a.exe", "matching_strategy": "Equals"}}, 5]"#,
+                "invalid type: integer `5`, expected an object",
             ),
         ] {
             let error = load_app_specific_configuration(text)
