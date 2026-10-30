@@ -656,7 +656,10 @@ pub enum LegacyApplicationOption {
 
 /// Either shape of `applications.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
+#[serde(
+    untagged,
+    expecting = "expected an object of applications, or the older list of application entries"
+)]
 pub enum AppSpecificConfiguration {
     /// The current shape: a map of application name to its rule lists.
     Map(HashMap<String, ApplicationRules>),
@@ -783,7 +786,7 @@ pub fn load_app_specific_configuration_reporting_unknown_keys(
 ) -> Result<(RuleSets, Vec<String>)> {
     // A byte order mark in front, as a Windows editor saves it, is not JSON.
     let json = json.strip_prefix('\u{feff}').unwrap_or(json);
-    let value: serde_json::Value = serde_json::from_str(json)?;
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| Error::json(json, &e))?;
     let mut warnings = Vec::new();
     let value = match value {
         serde_json::Value::Object(mut map) => {
@@ -809,7 +812,18 @@ pub fn load_app_specific_configuration_reporting_unknown_keys(
         }
         other => other,
     };
-    let parsed: AppSpecificConfiguration = serde_json::from_value(value)?;
+    // A file of either shape is read as that shape, so a wrong rule in it is named as itself.
+    let parsed = match value {
+        serde_json::Value::Object(_) => {
+            AppSpecificConfiguration::Map(serde_json::from_value(value)?)
+        }
+        serde_json::Value::Array(ref entries)
+            if entries.iter().any(serde_json::Value::is_object) =>
+        {
+            AppSpecificConfiguration::Legacy(serde_json::from_value(value)?)
+        }
+        other => serde_json::from_value(other)?,
+    };
     Ok((parsed.into_rule_sets(), warnings))
 }
 
@@ -1241,6 +1255,65 @@ mod tests {
     fn a_broken_applications_json_is_an_error() {
         assert!(load_app_specific_configuration("not json").is_err());
         assert!(load_app_specific_configuration(r#"{"App": 5}"#).is_ok());
+    }
+
+    #[test]
+    fn a_string_left_open_in_an_applications_json_is_placed_on_its_line() {
+        let error = load_app_specific_configuration("{\n  \"App\": \"x\n}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.ends_with(" at line 2 column 12"), "{error}");
+    }
+
+    #[test]
+    fn an_applications_json_of_the_wrong_shape_is_named_without_the_rust_type() {
+        for text in ["5", "\"x\"", "true", "null", "[5, 6]", "[\"x\"]"] {
+            let error = load_app_specific_configuration(text)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("expected an object of applications"),
+                "{text}: {error}"
+            );
+            assert!(
+                !error.contains("AppSpecificConfiguration"),
+                "{text}: {error}"
+            );
+            assert!(!error.contains("untagged"), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_wrong_rule_in_an_applications_json_of_either_shape_is_named() {
+        for (text, words) in [
+            (
+                r#"{"Example": {"floating": [5]}}"#,
+                "expected a rule object with a kind and an id",
+            ),
+            (r#"{"Example": {"floating": "x"}}"#, "expected a list"),
+            (r#"[{"identifier": 5}]"#, "expected an object"),
+            (r#"[{"name": "x"}]"#, "missing field `identifier`"),
+            (
+                r#"[{"identifier": {"kind": "Exe", "id": "a.exe", "matching_strategy": "Equals"}, "options": ["nope"]}]"#,
+                "unknown variant `nope`",
+            ),
+            (
+                r#"[{"identifier": {"kind": "Exe", "id": "a.exe", "matching_strategy": "Equals"}}, 5]"#,
+                "invalid type: integer `5`, expected an object",
+            ),
+        ] {
+            let error = load_app_specific_configuration(text)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(words), "{text}: {error}");
+            assert!(
+                !error.contains("expected an object of applications"),
+                "{text}: {error}"
+            );
+            for rust in ["IdWithIdentifier", "LegacyApplicationEntry", "struct"] {
+                assert!(!error.contains(rust), "{text}: {error}");
+            }
+        }
     }
 
     #[test]
