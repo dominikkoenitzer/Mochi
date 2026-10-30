@@ -133,7 +133,8 @@ pub fn json_place(text: &str, error: &serde_json::Error) -> Option<(usize, usize
     {
         return Some((line - 1, before.len() + 1));
     }
-    Some((line, column))
+    // With no line before, as in an empty file, it is the start of the file.
+    Some((line, column.max(1)))
 }
 
 /// A serde message with the Rust words in it said the way a config file says
