@@ -812,7 +812,18 @@ pub fn load_app_specific_configuration_reporting_unknown_keys(
         }
         other => other,
     };
-    let parsed: AppSpecificConfiguration = serde_json::from_value(value)?;
+    // A file of either shape is read as that shape, so a wrong rule in it is named as itself.
+    let parsed = match value {
+        serde_json::Value::Object(_) => {
+            AppSpecificConfiguration::Map(serde_json::from_value(value)?)
+        }
+        serde_json::Value::Array(ref entries)
+            if entries.iter().all(serde_json::Value::is_object) =>
+        {
+            AppSpecificConfiguration::Legacy(serde_json::from_value(value)?)
+        }
+        other => serde_json::from_value(other)?,
+    };
     Ok((parsed.into_rule_sets(), warnings))
 }
 
@@ -1269,6 +1280,35 @@ mod tests {
                 "{text}: {error}"
             );
             assert!(!error.contains("untagged"), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_wrong_rule_in_an_applications_json_of_either_shape_is_named() {
+        for (text, words) in [
+            (
+                r#"{"Example": {"floating": [5]}}"#,
+                "expected a rule object with a kind and an id",
+            ),
+            (r#"{"Example": {"floating": "x"}}"#, "expected a list"),
+            (r#"[{"identifier": 5}]"#, "expected an object"),
+            (r#"[{"name": "x"}]"#, "missing field `identifier`"),
+            (
+                r#"[{"identifier": {"kind": "Exe", "id": "a.exe", "matching_strategy": "Equals"}, "options": ["nope"]}]"#,
+                "unknown variant `nope`",
+            ),
+        ] {
+            let error = load_app_specific_configuration(text)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(words), "{text}: {error}");
+            assert!(
+                !error.contains("expected an object of applications"),
+                "{text}: {error}"
+            );
+            for rust in ["IdWithIdentifier", "LegacyApplicationEntry", "struct"] {
+                assert!(!error.contains(rust), "{text}: {error}");
+            }
         }
     }
 
