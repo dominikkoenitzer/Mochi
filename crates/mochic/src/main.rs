@@ -1379,10 +1379,15 @@ fn edit_distance(a: &str, b: &str) -> usize {
 fn parse_failure(label: &str, text: &str, flattened: &str) -> String {
     // `mochi_core::Error::Json` carries the serde message as a string, so the
     // line and column for the caret are recovered by handing the same text to
-    // the same deserialiser `Config::from_json` runs. If that ever
+    // the same two parses `Config::from_json` runs, in its order: a broken
+    // file is refused before a wrong value further up. If that ever
     // disagrees, the flattened message is printed exactly as it came.
-    let Err(e) = serde_json::from_str::<Config>(text) else {
-        return format!("{label}: {flattened}");
+    let e = match serde_json::from_str::<serde_json::Value>(text) {
+        Err(e) => e,
+        Ok(_) => match serde_json::from_str::<Config>(text) {
+            Err(e) => e,
+            Ok(_) => return format!("{label}: {flattened}"),
+        },
     };
     position_block(label, text, &e)
 }
@@ -2203,6 +2208,10 @@ mod tests {
         for text in [
             "{\n  \"border\": true,\n  \"border_width\": 6\n  \"border_style\": \"Rounded\"\n}\n",
             "{\n  \"border\": true,\n  \"border_style\": \"Rounded\n}\n",
+            "{\r\n  \"border\": true,\r\n  \"border_style\": \"Rounded\r\n}\r\n",
+            "{\n  \"border\": true,\n  \"border_style\": \"Rounded",
+            "{ \"border\": true \"border_width\": 6 }",
+            "{\n  \"border_width\": \"x\",\n  \"border\": true\n  \"border_style\": \"Rounded\"\n}\n",
         ] {
             let found = check_config_text("mochi.json", text);
             let headline = found.headline.unwrap_or_default();
