@@ -568,6 +568,51 @@ pub fn focus_window(hwnd: i64) -> Result<bool> {
     }
 }
 
+/// How long [`bring_to_front`] waits on one foreground request before it asks
+/// again.
+const ASK_AGAIN: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Asks for the foreground until the window is in front or `timeout` has
+/// passed.
+///
+/// A single [`focus_window`] can be refused, and nothing else asks again, so a
+/// test that waits for the foreground after one request can wait for nothing.
+/// This asks again every 100 ms while another window is in front.
+///
+/// # Errors
+/// [`Error::Timeout`] naming the window that was in front instead, or
+/// [`Error::NotFound`] when the window is gone.
+pub fn bring_to_front(hwnd: i64, timeout: std::time::Duration) -> Result<()> {
+    ask_until_in_front(hwnd, timeout, ASK_AGAIN, foreground_window, focus_window)
+}
+
+fn ask_until_in_front(
+    hwnd: i64,
+    timeout: std::time::Duration,
+    again: std::time::Duration,
+    mut front: impl FnMut() -> i64,
+    mut ask: impl FnMut(i64) -> Result<bool>,
+) -> Result<()> {
+    let deadline = Deadline::new(timeout);
+    loop {
+        if front() == hwnd {
+            return Ok(());
+        }
+        if deadline.passed() {
+            return Err(Error::timeout(format!(
+                "hwnd 0x{hwnd:x} to come to the front after {:?}, the foreground is 0x{:x}",
+                deadline.elapsed(),
+                front()
+            )));
+        }
+        ask(hwnd)?;
+        let asked = Deadline::new(again);
+        while !asked.passed() && !deadline.passed() && front() != hwnd {
+            std::thread::sleep(POLL);
+        }
+    }
+}
+
 /// Asks a window to close, exactly as clicking its close button would.
 ///
 /// # Errors
@@ -804,6 +849,72 @@ mod tests {
     fn a_null_handle_is_not_a_window() {
         assert!(!window_exists(0));
         assert!(window_info(0).is_err());
+    }
+
+    #[test]
+    fn a_refused_foreground_request_is_asked_again_inside_the_wait() {
+        let asks = std::cell::Cell::new(0);
+        let result = ask_until_in_front(
+            7,
+            std::time::Duration::from_secs(5),
+            POLL,
+            || if asks.get() >= 3 { 7 } else { 1 },
+            |_| {
+                asks.set(asks.get() + 1);
+                Ok(asks.get() >= 3)
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(asks.get(), 3);
+    }
+
+    #[test]
+    fn a_window_already_in_front_is_not_asked_for() {
+        let asks = std::cell::Cell::new(0);
+        let result = ask_until_in_front(
+            7,
+            std::time::Duration::from_secs(5),
+            POLL,
+            || 7,
+            |_| {
+                asks.set(asks.get() + 1);
+                Ok(true)
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(asks.get(), 0);
+    }
+
+    #[test]
+    fn a_window_that_never_comes_to_the_front_names_the_one_that_did() {
+        let err = ask_until_in_front(
+            7,
+            std::time::Duration::from_millis(50),
+            POLL,
+            || 0x1c,
+            |_| Ok(false),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Timeout(_)), "{err:?}");
+        assert!(err.to_string().contains("the foreground is 0x1c"), "{err}");
+    }
+
+    #[test]
+    fn a_window_that_is_gone_stops_the_asking() {
+        let asks = std::cell::Cell::new(0);
+        let err = ask_until_in_front(
+            7,
+            std::time::Duration::from_secs(5),
+            POLL,
+            || 1,
+            |_| {
+                asks.set(asks.get() + 1);
+                Err(Error::not_found("hwnd 0x7"))
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::NotFound(_)), "{err:?}");
+        assert_eq!(asks.get(), 1);
     }
 
     #[test]
