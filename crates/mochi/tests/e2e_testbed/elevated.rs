@@ -212,9 +212,8 @@ fn with_the_setting_on_the_windows_of_an_administrator_are_tiled_and_keep_their_
     steps.step(
         "the window in front is managed and its keys are not withheld",
         || {
-            mochi_testbed::focus_window(front).map_err(|e| e.to_string())?;
-            wait_for(STEP, || mochi_testbed::foreground_window() == front)
-                .map_err(|_| "the test window never came to the front".to_owned())?;
+            mochi_testbed::bring_to_front(front, STEP)
+                .map_err(|e| format!("the test window never came to the front: {e}"))?;
             let why = why().ok_or("no why answer")?;
             check(
                 why["managed"] == Value::Bool(true),
