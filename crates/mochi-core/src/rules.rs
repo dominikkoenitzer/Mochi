@@ -656,7 +656,10 @@ pub enum LegacyApplicationOption {
 
 /// Either shape of `applications.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(untagged)]
+#[serde(
+    untagged,
+    expecting = "expected an object of applications, or the older list of application entries"
+)]
 pub enum AppSpecificConfiguration {
     /// The current shape: a map of application name to its rule lists.
     Map(HashMap<String, ApplicationRules>),
@@ -1249,6 +1252,24 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.ends_with(" at line 2 column 12"), "{error}");
+    }
+
+    #[test]
+    fn an_applications_json_of_the_wrong_shape_is_named_without_the_rust_type() {
+        for text in ["5", "\"x\"", "true", "null", "[5, 6]", "[\"x\"]"] {
+            let error = load_app_specific_configuration(text)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("expected an object of applications"),
+                "{text}: {error}"
+            );
+            assert!(
+                !error.contains("AppSpecificConfiguration"),
+                "{text}: {error}"
+            );
+            assert!(!error.contains("untagged"), "{text}: {error}");
+        }
     }
 
     #[test]
