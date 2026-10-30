@@ -176,6 +176,9 @@ fn with_the_setting_on_the_windows_of_an_administrator_are_tiled_and_keep_their_
     });
 
     steps.step("both windows are tiled", || {
+        // Each window the daemon adopts takes the foreground, so wait until it holds both.
+        wait_for(Duration::from_secs(10), || managed_count() == 2)
+            .map_err(|_| format!("state shows {} managed windows", managed_count()))?;
         wait_for_tiling(&windows, 2).map(|_| ())
     });
 
