@@ -630,7 +630,8 @@ impl Config {
         //
         // Parsed twice on purpose: the second parse is the one whose error
         // carries the line and column that `mochic check` prints.
-        let shape: serde_json::Value = serde_json::from_str(json)?;
+        let shape: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| Error::json(json, &e))?;
         if !shape.is_object() {
             return Err(Error::Json(format!(
                 "a configuration file has to be a JSON object, this one is {}",
@@ -644,7 +645,7 @@ impl Config {
                 }
             )));
         }
-        Ok(serde_json::from_str(json)?)
+        serde_json::from_str(json).map_err(|e| Error::json(json, &e))
     }
 
     /// Serialises the configuration back to pretty printed JSON.
@@ -1342,6 +1343,43 @@ mod tests {
             "{error}"
         );
         assert!(!error.contains("control character"), "{error}");
+    }
+
+    #[test]
+    fn a_string_left_open_at_the_end_of_a_line_is_placed_on_that_line() {
+        let error = Config::from_json("{\n  \"border_style\": \"Rounded\n}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.ends_with(" at line 2 column 27"), "{error}");
+    }
+
+    #[test]
+    fn text_the_user_typed_is_echoed_as_typed() {
+        let cases = [
+            (
+                r#"{"border_width": "expected i32"}"#,
+                r#"invalid type: string "expected i32", expected a whole number"#,
+            ),
+            (
+                r#"{"border_style": "expected u8"}"#,
+                "unknown variant `expected u8`, expected one of",
+            ),
+            (
+                r#"{"border_colours": {"single": "expected a map"}}"#,
+                r#""expected a map" is not a valid colour"#,
+            ),
+            (
+                r#"{"border_width": "EOF while parsing a value \"x\""}"#,
+                r#"string "EOF while parsing a value \"x\"", expected a whole number"#,
+            ),
+        ];
+        let wrong: Vec<String> = cases
+            .iter()
+            .map(|(json, kept)| (Config::from_json(json).unwrap_err().to_string(), kept))
+            .filter(|(error, kept)| !error.contains(*kept))
+            .map(|(error, _)| error)
+            .collect();
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
