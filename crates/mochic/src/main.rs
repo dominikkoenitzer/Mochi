@@ -784,14 +784,22 @@ fn check_run(path: &Path, source: String) -> CheckRun {
 
 /// The hotkey file the daemon would load, and the whkdrc it falls back to.
 fn hotkey_path() -> Option<PathBuf> {
-    let explicit = std::env::var("MOCHI_HOTKEYS")
-        .ok()
-        .filter(|v| !v.is_empty());
-    if let Some(path) = explicit {
-        return Some(PathBuf::from(expand_env(&path)));
+    hotkey_path_from(
+        std::env::var_os("MOCHI_HOTKEYS"),
+        std::env::var("USERPROFILE").ok().map(PathBuf::from),
+    )
+}
+
+/// The rule behind [`hotkey_path`], given the value of `MOCHI_HOTKEYS` and the profile folder.
+fn hotkey_path_from(
+    explicit: Option<std::ffi::OsString>,
+    profile: Option<PathBuf>,
+) -> Option<PathBuf> {
+    // Taken as it is written: the daemon expands nothing in it either.
+    if let Some(path) = explicit.filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(path));
     }
-    let profile = std::env::var("USERPROFILE").ok()?;
-    let keys = PathBuf::from(profile).join(".config").join("mochi");
+    let keys = profile?.join(".config").join("mochi");
     let named = keys.join("hotkeys");
     if named.exists() {
         return Some(named);
@@ -2542,6 +2550,21 @@ mod tests {
         );
         assert!(!super::wants_elevation(Some(&dir.join("missing.json"))));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_hotkey_variable_is_taken_as_written_like_the_daemon_takes_it() {
+        use std::path::PathBuf;
+
+        let profile = PathBuf::from(r"C:\Users\nobody-here");
+        assert_eq!(
+            super::hotkey_path_from(Some(r"%USERPROFILE%\keys".into()), Some(profile.clone())),
+            Some(PathBuf::from(r"%USERPROFILE%\keys"))
+        );
+        assert_eq!(
+            super::hotkey_path_from(Some("".into()), Some(profile.clone())),
+            Some(profile.join(".config").join("mochi").join("hotkeys"))
+        );
     }
 
     #[test]
