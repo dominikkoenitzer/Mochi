@@ -838,7 +838,7 @@ mod tests {
         let line = r#"echo ran > "C:\a b\c.txt""#;
         assert_eq!(
             super::command_line(super::Shell::Cmd, line),
-            format!("cmd.exe /C {line}")
+            format!(r#"cmd.exe /S /C "{line}""#)
         );
         assert_eq!(
             super::command_line(super::Shell::Pwsh, "Get-Date"),
@@ -847,6 +847,15 @@ mod tests {
         assert_eq!(
             super::command_line(super::Shell::Bash, r#"echo "a b""#),
             r#"bash.exe -c "echo \"a b\"""#
+        );
+    }
+
+    #[test]
+    fn a_cmd_line_that_starts_with_a_quote_reaches_cmd_whole() {
+        let line = r#""C:\a b\app.exe" --open "C:\c d\e.txt""#;
+        assert_eq!(
+            super::command_line(super::Shell::Cmd, line),
+            format!(r#"cmd.exe /S /C "{line}""#)
         );
     }
 
