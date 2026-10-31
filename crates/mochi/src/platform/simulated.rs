@@ -201,6 +201,10 @@ impl Platform for SimulatedMonitors {
         self.inner.outranks_us(hwnd)
     }
 
+    fn is_elevated(&self) -> bool {
+        self.inner.is_elevated()
+    }
+
     fn is_on_screen(&self, hwnd: Hwnd) -> bool {
         self.inner.is_on_screen(hwnd)
     }
@@ -305,5 +309,83 @@ mod tests {
     fn a_typo_is_refused_rather_than_ignored() {
         assert!(parse(r#"[{ "device_name": "x", "rect": {} }]"#).is_err());
         assert!(parse("{}").is_err());
+    }
+
+    /// A platform that runs as administrator and has nothing else to say.
+    struct Elevated;
+
+    impl Platform for Elevated {
+        fn name(&self) -> &'static str {
+            "elevated"
+        }
+        fn monitors(&self) -> Result<Vec<MonitorInfo>> {
+            Ok(Vec::new())
+        }
+        fn windows(&self) -> Result<Vec<WindowInfo>> {
+            Ok(Vec::new())
+        }
+        fn window_info(&self, _hwnd: Hwnd) -> Result<WindowInfo> {
+            Err(anyhow::anyhow!("no such window"))
+        }
+        fn foreground_window(&self) -> Option<Hwnd> {
+            None
+        }
+        fn window_at(&self, _x: i32, _y: i32) -> Option<Hwnd> {
+            None
+        }
+        fn cursor_position(&self) -> Result<(i32, i32)> {
+            Ok((0, 0))
+        }
+        fn is_maximized(&self, _hwnd: Hwnd) -> bool {
+            false
+        }
+        fn window_shape(&self, _hwnd: Hwnd) -> Option<WindowShape> {
+            None
+        }
+        fn outranks_us(&self, _hwnd: Hwnd) -> bool {
+            false
+        }
+        fn is_elevated(&self) -> bool {
+            true
+        }
+        fn is_on_screen(&self, _hwnd: Hwnd) -> bool {
+            true
+        }
+        fn set_positions(&self, _placements: &[WindowPlacement]) -> Result<()> {
+            Ok(())
+        }
+        fn set_cloaked(&self, _hwnd: Hwnd, _cloaked: bool) -> Result<()> {
+            Ok(())
+        }
+        fn show(&self, _hwnd: Hwnd, _state: ShowState) -> Result<()> {
+            Ok(())
+        }
+        fn focus(&self, _hwnd: Hwnd) -> Result<()> {
+            Ok(())
+        }
+        fn focus_desktop(&self) -> Result<()> {
+            Ok(())
+        }
+        fn close(&self, _hwnd: Hwnd) -> Result<()> {
+            Ok(())
+        }
+        fn set_transparency(&self, _hwnd: Hwnd, _alpha: Option<u8>) -> Result<()> {
+            Ok(())
+        }
+        fn set_topmost(&self, _hwnd: Hwnd, _topmost: bool) -> Result<()> {
+            Ok(())
+        }
+        fn set_cursor_position(&self, _x: i32, _y: i32) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn simulated_monitors_keep_the_rights_of_the_process() {
+        let platform = SimulatedMonitors {
+            inner: Arc::new(Elevated),
+            path: PathBuf::new(),
+        };
+        assert!(platform.is_elevated());
     }
 }
