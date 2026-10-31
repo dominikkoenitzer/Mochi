@@ -1247,7 +1247,8 @@ impl State {
     /// says, because the setting is about monitor edges.
     ///
     /// Does nothing when the focused window is outside the container ring; see
-    /// `focus_outside_the_ring`.
+    /// `focus_outside_the_ring`. A swap also does nothing when the destination
+    /// is maximized or monocled, because the tile it would trade with is hidden.
     ///
     /// # Errors
     ///
@@ -1288,7 +1289,13 @@ impl State {
             return Ok(Changes::none());
         }
         // Make sure the destination exists before anything is taken apart.
-        self.workspace(to_monitor, to_workspace)?;
+        let destination = self.workspace(to_monitor, to_workspace)?;
+        let swapping =
+            self.cross_monitor_move_behaviour == MoveBehaviour::Swap && to_monitor != from_monitor;
+        // A swap trades with the ring's focused tile, which a maximize or a monocle hides.
+        if swapping && (destination.is_maximized() || destination.is_monocle()) {
+            return Ok(Changes::none());
+        }
 
         let before = self.visible_window_ids();
         let source = self.workspace_mut(from_monitor, from_workspace)?;
@@ -1297,9 +1304,6 @@ impl State {
             return Ok(Changes::none());
         };
         let moved = container.focused_window_id();
-
-        let swapping =
-            self.cross_monitor_move_behaviour == MoveBehaviour::Swap && to_monitor != from_monitor;
 
         // The slot the container is going into has to be read before the
         // container that may be swapped out of it is removed, or the moved
@@ -1930,6 +1934,57 @@ mod tests {
             Some((0, 0)),
             "the other window came back the other way"
         );
+    }
+
+    fn with_a_covered_side_monitor(maximize: bool) -> State {
+        let mut state = with_windows(1);
+        state.cross_monitor_move_behaviour = MoveBehaviour::Swap;
+        state.add_window_to(1, 0, Window::new(50)).unwrap();
+        state.add_window_to(1, 0, Window::new(51)).unwrap();
+        state.focus_window(WindowId(51)).unwrap();
+        if maximize {
+            state.toggle_maximize().unwrap();
+        } else {
+            state.toggle_monocle().unwrap();
+        }
+        state.focus_window(WindowId(1)).unwrap();
+        state
+    }
+
+    fn assert_nothing_crossed(state: &State, maximize: bool, changes: &Changes) {
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(state.locate_window(WindowId(1)), Some((0, 0)));
+        assert_eq!(state.locate_window(WindowId(50)), Some((1, 0)));
+        assert_eq!(state.locate_window(WindowId(51)), Some((1, 0)));
+        let side = state.workspace(1, 0).unwrap();
+        if maximize {
+            assert_eq!(side.maximized_window().map(|w| w.id), Some(WindowId(51)));
+        } else {
+            assert_eq!(
+                side.monocle_container()
+                    .and_then(crate::model::Container::focused_window_id),
+                Some(WindowId(51))
+            );
+        }
+        assert_eq!(focused(state), Some(WindowId(1)));
+    }
+
+    #[test]
+    fn moving_past_the_edge_never_swaps_with_a_tile_a_maximize_or_monocle_hides() {
+        for maximize in [true, false] {
+            let mut state = with_a_covered_side_monitor(maximize);
+            let changes = state.move_direction(Direction::Right).unwrap();
+            assert_nothing_crossed(&state, maximize, &changes);
+        }
+    }
+
+    #[test]
+    fn moving_to_a_covered_monitor_never_swaps_with_a_hidden_tile() {
+        for maximize in [true, false] {
+            let mut state = with_a_covered_side_monitor(maximize);
+            let changes = state.move_focused_container(1, 0, true).unwrap();
+            assert_nothing_crossed(&state, maximize, &changes);
+        }
     }
 
     #[test]
@@ -3619,6 +3674,8 @@ mod tests {
     #[test]
     fn a_window_moved_behind_a_maximized_one_never_takes_the_foreground() {
         let mut state = with_windows(1);
+        // A swap refuses a maximized destination; an insert still goes behind it.
+        state.cross_monitor_move_behaviour = MoveBehaviour::Insert;
         state.focus_monitor(1).unwrap();
         state.add_window(Window::new(2)).unwrap();
         state.toggle_maximize().unwrap();
