@@ -2804,7 +2804,11 @@ impl WindowManager {
         let changes = match dropped_on {
             Some(target) if target != monitor => {
                 let _ = self.core.focus_window(id);
-                self.core.move_to_monitor(target, true)
+                match self.core.move_to_monitor(target, true) {
+                    // A refused move still has to put the window back in its tile.
+                    Ok(changes) if changes.is_empty() => self.core.retile(),
+                    moved => moved,
+                }
             }
             Some(_) => {
                 let source = self
@@ -9956,6 +9960,72 @@ alt + j : focus down
         platform.points_at(tiles[0].left + 10, 500);
         wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(2));
         assert_ne!(order(&wm), before, "a drop on the other tile did not swap");
+    }
+
+    #[test]
+    fn a_tile_dropped_on_a_covered_monitor_snaps_back() {
+        for maximize in [true, false] {
+            let (mut wm, platform) = manager_on(
+                vec![
+                    window(1, "Main"),
+                    window_on_portrait(2, "Portrait"),
+                    window_on_portrait(3, "Covering"),
+                ],
+                vec![main_screen(), portrait_screen()],
+            );
+            assert_eq!(
+                wm.state().cross_monitor_move_behaviour,
+                mochi_core::model::MoveBehaviour::Swap
+            );
+            assert_eq!(wm.state().locate_window(WindowId(3)), Some((1, 0)));
+            wm.on_window_event(WindowEventKind::Foreground, Hwnd(3));
+            if maximize {
+                wm.handle_command(Command::ToggleMaximize);
+            } else {
+                wm.handle_command(Command::ToggleMonocle);
+            }
+            let side = wm.state().workspace(1, 0).unwrap();
+            assert!(side.is_maximized() == maximize && side.is_monocle() != maximize);
+
+            platform.moves_by_itself(Hwnd(1), Rect::new(4000, 100, 4800, 700));
+            platform.points_at(4400, 400);
+            platform.clear_history();
+            wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(1));
+
+            assert_eq!(wm.state().locate_window(WindowId(1)), Some((0, 0)));
+            let placed = platform.rect_of(Hwnd(1));
+            assert!(
+                placed.is_some_and(|rect| main_screen().work_area.contains_rect(&rect)),
+                "left where it fell, placed {placed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_monocle_window_dropped_on_another_monitor_snaps_back() {
+        let (mut wm, platform) = manager_on(
+            vec![
+                window(1, "Main"),
+                window(2, "Other"),
+                window_on_portrait(3, "Portrait"),
+            ],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(1));
+        wm.handle_command(Command::ToggleMonocle);
+        assert!(wm.state().workspace(0, 0).unwrap().is_monocle());
+
+        platform.moves_by_itself(Hwnd(1), Rect::new(4000, 100, 4800, 700));
+        platform.points_at(4400, 400);
+        platform.clear_history();
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(1));
+
+        assert_eq!(wm.state().locate_window(WindowId(1)), Some((0, 0)));
+        let placed = platform.rect_of(Hwnd(1));
+        assert!(
+            placed.is_some_and(|rect| main_screen().work_area.contains_rect(&rect)),
+            "left where it fell, placed {placed:?}"
+        );
     }
 
     #[test]
