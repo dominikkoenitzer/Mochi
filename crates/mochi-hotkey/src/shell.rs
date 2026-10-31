@@ -39,10 +39,16 @@ impl Shell {
     /// arrives with the quotes escaped and the redirect goes nowhere. They get
     /// the line verbatim instead. `None` means the shell follows the usual
     /// argument rules and [`Shell::args_for`] is right.
+    ///
+    /// cmd gets the line inside one more pair of quotes, after `/S`. Bare
+    /// after `/C`, a line that starts with a quote loses its first and its
+    /// last quote unless that one pair around a program's name is all it
+    /// holds, so a quoted program path with a quoted argument falls apart.
+    /// With `/S` cmd strips exactly the outer pair and runs the line as typed.
     #[must_use]
     pub fn raw_tail(self, line: &str) -> Option<String> {
         match self {
-            Self::Cmd => Some(format!("/C {line}")),
+            Self::Cmd => Some(format!(r#"/S /C "{line}""#)),
             Self::Powershell | Self::Pwsh => Some(format!("-NoProfile -Command {line}")),
             Self::Bash => None,
         }
@@ -105,7 +111,10 @@ mod tests {
         // Quoting this text would be the caller's undoing: cmd applies its own
         // rules and a redirect into a quoted path is the case that shows it.
         let line = r#"echo ran > "C:\a b\c.txt""#;
-        assert_eq!(Shell::Cmd.raw_tail(line).unwrap(), format!("/C {line}"));
+        assert_eq!(
+            Shell::Cmd.raw_tail(line).unwrap(),
+            format!(r#"/S /C "{line}""#)
+        );
         assert_eq!(
             Shell::Pwsh.raw_tail(line).unwrap(),
             format!("-NoProfile -Command {line}")
@@ -119,6 +128,21 @@ mod tests {
         assert_eq!(
             Shell::Bash.args_for(line),
             vec!["-c".to_owned(), line.to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_cmd_line_that_starts_with_a_quote_keeps_every_quote() {
+        // Bare after /C, cmd drops this line's first and last quote and looks
+        // for a program named `C:\a`. After /S it drops only the outer pair.
+        let line = r#""C:\a b\app.exe" --open "C:\c d\e.txt""#;
+        assert_eq!(
+            Shell::Cmd.raw_tail(line).unwrap(),
+            format!(r#"/S /C "{line}""#)
+        );
+        assert_eq!(
+            Shell::Cmd.raw_tail("start wt").unwrap(),
+            r#"/S /C "start wt""#
         );
     }
 }
