@@ -299,13 +299,13 @@ function Disable-OtherAutostart {
     $link = Get-StartupLink -Name $Name
     $linkOff = "$link.disabled"
 
-    if (Test-Path $link) {
+    if (Test-Path -LiteralPath $link) {
         $found = $true
         if ($PSCmdlet.ShouldProcess($link, 'rename to .disabled')) {
             Move-Item -LiteralPath $link -Destination $linkOff -Force
             Write-Detail "startup shortcut moved to $linkOff"
         }
-    } elseif (Test-Path $linkOff) {
+    } elseif (Test-Path -LiteralPath $linkOff) {
         Write-Detail 'startup shortcut is already disabled'
         $found = $true
     }
@@ -331,13 +331,13 @@ function Enable-OtherAutostart {
     $link = Get-StartupLink -Name $Name
     $linkOff = "$link.disabled"
 
-    if (Test-Path $linkOff) {
+    if (Test-Path -LiteralPath $linkOff) {
         $found = $true
         if ($PSCmdlet.ShouldProcess($linkOff, "rename back to $Name.lnk")) {
             Move-Item -LiteralPath $linkOff -Destination $link -Force
             Write-Detail "startup shortcut restored to $link"
         }
-    } elseif (Test-Path $link) {
+    } elseif (Test-Path -LiteralPath $link) {
         Write-Detail 'startup shortcut is already in place'
         $found = $true
     }
