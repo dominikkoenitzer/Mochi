@@ -56,9 +56,9 @@ mod msg {
     /// The session was unlocked.
     pub const WTS_SESSION_UNLOCK: usize = 0x8;
 
-    /// The machine woke up on its own, for example for a scheduled task.
+    /// The machine is resuming. Sent on every resume, whatever woke it.
     pub const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
-    /// The machine woke up because the user asked it to.
+    /// The user woke the machine. Sent after `PBT_APMRESUMEAUTOMATIC`.
     pub const PBT_APMRESUMESUSPEND: usize = 0x0007;
 
     /// `NOTIFY_FOR_THIS_SESSION`.
@@ -76,6 +76,19 @@ fn emit(event: Event) {
             let _ = tx.send(event);
         }
     });
+}
+
+/// The session change a `WM_POWERBROADCAST` event stands for, if any.
+///
+/// Every resume brings `PBT_APMRESUMEAUTOMATIC`, so that one alone is the
+/// resume.
+fn power_change(event: usize) -> Option<SessionChangeKind> {
+    match event {
+        msg::PBT_APMRESUMEAUTOMATIC => Some(SessionChangeKind::Resume),
+        // The same resume again, after a wake by the user.
+        msg::PBT_APMRESUMESUSPEND => None,
+        _ => None,
+    }
 }
 
 unsafe extern "system" fn wndproc(
@@ -139,11 +152,8 @@ unsafe extern "system" fn wndproc(
             LRESULT(0)
         }
         msg::WM_POWERBROADCAST => {
-            if matches!(
-                wparam.0,
-                msg::PBT_APMRESUMEAUTOMATIC | msg::PBT_APMRESUMESUSPEND
-            ) {
-                emit(Event::Session(SessionChangeKind::Resume));
+            if let Some(kind) = power_change(wparam.0) {
+                emit(Event::Session(kind));
             }
             LRESULT(1)
         }
@@ -291,5 +301,18 @@ mod tests {
         window.stop();
         // A second stop must not hang or panic.
         window.stop();
+    }
+
+    #[test]
+    fn a_resume_the_user_started_is_announced_once() {
+        // Windows sends the automatic resume every time and the user resume
+        // right after it, so only the first may say so.
+        assert_eq!(
+            power_change(msg::PBT_APMRESUMEAUTOMATIC),
+            Some(SessionChangeKind::Resume)
+        );
+        assert_eq!(power_change(msg::PBT_APMRESUMESUSPEND), None);
+        // PBT_APMPOWERSTATUSCHANGE, a battery or mains change.
+        assert_eq!(power_change(0x000A), None);
     }
 }
