@@ -146,6 +146,8 @@ impl Subscribers {
                                 pipes.insert(name, pipe);
                             }
                             Message::Remove(name) => {
+                                // An Add still queued when `remove` ran has put the name back.
+                                lock(&names).retain(|n| n != &name);
                                 if pipes.remove(&name).is_some() {
                                     tracing::info!(subscriber = %name, "unsubscribed");
                                 }
@@ -430,6 +432,55 @@ mod tests {
             "the re-subscribed bar never heard another event; names: {:?}",
             subs.names()
         );
+    }
+
+    /// A bar that unsubscribes while the fan-out is still busy is not listed afterwards.
+    #[test]
+    fn a_bar_that_unsubscribes_behind_a_busy_fan_out_is_not_listed() {
+        let wedged_name = format!("mochi-test-busy-{}", std::process::id());
+        let live_name = format!("mochi-test-busy-live-{}", std::process::id());
+        let late_name = format!("mochi-test-busy-late-{}", std::process::id());
+        let _wedged = create_pipe(&wedged_name).unwrap();
+        let mut live = create_pipe(&live_name).unwrap();
+        let _late = create_pipe(&late_name).unwrap();
+
+        let (seen_tx, seen_rx) = channel();
+        std::thread::spawn(move || {
+            while let Ok(Some(n)) = live.next_notification() {
+                if seen_tx.send(n).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut subs = Subscribers::start().unwrap();
+        subs.add(&wedged_name).unwrap();
+        subs.add(&live_name).unwrap();
+        // The wedged pipe fills, so the fan-out is still busy while the late bar comes and goes.
+        for count in 0..NOTIFICATIONS {
+            subs.notify(Notification::new(NotificationEvent::MonitorsChanged {
+                count,
+            }));
+        }
+        subs.add(&late_name).unwrap();
+        subs.remove(&late_name).unwrap();
+        subs.notify(Notification::new(NotificationEvent::MonitorsChanged {
+            count: NOTIFICATIONS,
+        }));
+
+        // Once the live bar hears the last one, the Add and the Remove have been handled.
+        let patience = std::time::Duration::from_secs(20);
+        loop {
+            let got = seen_rx
+                .recv_timeout(patience)
+                .expect("the live bar stopped hearing notifications");
+            if let NotificationEvent::MonitorsChanged { count } = got.event
+                && count == NOTIFICATIONS
+            {
+                break;
+            }
+        }
+        assert_eq!(subs.names(), std::slice::from_ref(&live_name));
     }
 
     /// `mochic state` must not list bars that are gone.
