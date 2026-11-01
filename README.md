@@ -1,6 +1,6 @@
 # Mochi
 
-[![CI](https://github.com/dominikkoenitzer/Mochi/actions/workflows/ci.yml/badge.svg)](https://github.com/dominikkoenitzer/Mochi/actions/workflows/ci.yml)
+[![CI](https://github.com/dominikkoenitzer/Mochi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dominikkoenitzer/Mochi/actions/workflows/ci.yml)
 
 A tiling window manager for Windows, written in Rust: it arranges every open
 window into tiles that you focus, move and resize from the keyboard.
