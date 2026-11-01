@@ -616,6 +616,9 @@ mod tests {
         fn is_on_screen(&self, _hwnd: Hwnd) -> bool {
             true
         }
+        fn no_tiling(&self, _hwnd: Hwnd) -> bool {
+            false
+        }
 
         fn set_positions(&self, placements: &[WindowPlacement]) -> anyhow::Result<()> {
             self.moves

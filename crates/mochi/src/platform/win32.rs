@@ -35,10 +35,10 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, BringWindowToTop, DeferWindowPos, EndDeferWindowPos, EnumChildWindows,
     EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClassNameW,
-    GetCursorPos, GetForegroundWindow, GetShellWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    IsIconic, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, MINMAXINFO, PostMessageW,
-    SET_WINDOW_POS_FLAGS, SM_CXMAXTRACK, SM_CXMINTRACK, SM_CYMAXTRACK, SM_CYMINTRACK,
+    GetCursorPos, GetForegroundWindow, GetPropW, GetShellWindow, GetWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP,
+    HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, MINMAXINFO,
+    PostMessageW, SET_WINDOW_POS_FLAGS, SM_CXMAXTRACK, SM_CXMINTRACK, SM_CYMAXTRACK, SM_CYMINTRACK,
     SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
     SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SendMessageTimeoutW, SetCursorPos, SetForegroundWindow, SetLayeredWindowAttributes,
@@ -47,9 +47,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::appview::{self, ViewCloakError};
 use super::types::{
-    FRAME_HOST, Hwnd, MonitorId, MonitorInfo, WindowInfo, WindowShape, ex_style, logical_min_frame,
+    FRAME_HOST, Hwnd, MonitorId, MonitorInfo, NO_TILING, WindowInfo, WindowShape, ex_style,
+    logical_min_frame,
 };
-use super::wide::{file_name, from_wide};
+use super::wide::{file_name, from_wide, to_wide};
 use super::{CloakUnsupported, Platform, ShowState, WindowPlacement, ZOrder};
 
 /// `MONITORINFOF_PRIMARY`, missing from the `windows` crate metadata.
@@ -520,6 +521,18 @@ fn dwm_cloaked(h: HWND) -> bool {
     ok.is_ok() && cloaked != 0
 }
 
+/// [`NO_TILING`] as the NUL-terminated wide string `GetPropW` takes.
+static NO_TILING_NAME: LazyLock<Vec<u16>> = LazyLock::new(|| to_wide(NO_TILING));
+
+/// Whether the window carries [`NO_TILING`]. Any value but zero counts.
+fn marked_no_tiling(h: HWND) -> bool {
+    // SAFETY: GetPropW tolerates any handle value, and the name is a
+    // NUL-terminated buffer that lives as long as the process.
+    !unsafe { GetPropW(h, windows::core::PCWSTR(NO_TILING_NAME.as_ptr())) }
+        .0
+        .is_null()
+}
+
 fn dwm_frame(h: HWND) -> Rect {
     let mut r = RECT::default();
     let ok = unsafe {
@@ -634,6 +647,7 @@ fn read_window(h: HWND) -> WindowInfo {
         owner,
         monitor,
         reachable: !is_denied(from_hwnd(h)),
+        no_tiling: marked_no_tiling(h),
     }
 }
 
@@ -914,6 +928,10 @@ impl Platform for Win32Platform {
         unsafe { IsWindowVisible(handle) }.as_bool() && !dwm_cloaked(handle)
     }
 
+    fn no_tiling(&self, h: Hwnd) -> bool {
+        marked_no_tiling(hwnd(h))
+    }
+
     fn take_unreachable(&self) -> Vec<Hwnd> {
         std::mem::take(&mut *UNREPORTED.write().unwrap_or_else(PoisonError::into_inner))
     }
@@ -1179,6 +1197,109 @@ mod tests {
     fn a_dead_handle_is_not_a_window() {
         assert!(!is_window(Hwnd::NULL));
         assert!(!is_window(Hwnd(0x7fff_ffff)));
+    }
+
+    /// A top-level window of this test's own, created without `WS_VISIBLE`,
+    /// so it never reaches the screen and never takes the focus.
+    struct HiddenWindow(HWND);
+
+    impl HiddenWindow {
+        fn new() -> Self {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, WINDOW_EX_STYLE, WS_OVERLAPPED,
+            };
+            let class = to_wide("STATIC");
+            let title = to_wide("no tiling test");
+            // SAFETY: both strings are NUL-terminated and outlive the call.
+            let h = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    windows::core::PCWSTR(class.as_ptr()),
+                    windows::core::PCWSTR(title.as_ptr()),
+                    WS_OVERLAPPED,
+                    0,
+                    0,
+                    400,
+                    300,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .expect("a hidden window of our own");
+            Self(h)
+        }
+
+        fn mark(&self, value: usize) {
+            use windows::Win32::UI::WindowsAndMessaging::SetPropW;
+            // SAFETY: the window is ours and alive; the name is NUL-terminated.
+            unsafe {
+                SetPropW(
+                    self.0,
+                    windows::core::PCWSTR(NO_TILING_NAME.as_ptr()),
+                    Some(HANDLE(value as *mut c_void)),
+                )
+            }
+            .expect("SetPropW");
+        }
+
+        fn unmark(&self) {
+            use windows::Win32::UI::WindowsAndMessaging::RemovePropW;
+            // SAFETY: as in `mark`.
+            unsafe { RemovePropW(self.0, windows::core::PCWSTR(NO_TILING_NAME.as_ptr())) }
+                .expect("RemovePropW");
+        }
+    }
+
+    impl Drop for HiddenWindow {
+        fn drop(&mut self) {
+            use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+            // SAFETY: the window was created on this thread and is destroyed once.
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn the_no_tiling_marker_is_read_from_the_window() {
+        let p = Win32Platform::new();
+        let window = HiddenWindow::new();
+        let h = from_hwnd(window.0);
+        assert!(!p.no_tiling(h), "a window nobody marked");
+        assert!(!p.window_info(h).unwrap().no_tiling);
+        assert!(
+            !p.window_info(h).unwrap().visible,
+            "the test window is on screen"
+        );
+
+        window.mark(1);
+        assert!(p.no_tiling(h), "the marker was set and not seen");
+        assert!(p.window_info(h).unwrap().no_tiling);
+
+        window.unmark();
+        assert!(!p.no_tiling(h), "the marker was removed and still seen");
+        assert!(!p.window_info(h).unwrap().no_tiling);
+    }
+
+    #[test]
+    fn a_window_beside_a_marked_one_is_not_marked() {
+        let p = Win32Platform::new();
+        let marked = HiddenWindow::new();
+        let plain = HiddenWindow::new();
+        marked.mark(1);
+        assert!(p.no_tiling(from_hwnd(marked.0)));
+        assert!(!p.no_tiling(from_hwnd(plain.0)));
+    }
+
+    #[test]
+    fn a_dead_handle_carries_no_marker() {
+        let p = Win32Platform::new();
+        let window = HiddenWindow::new();
+        window.mark(1);
+        let h = from_hwnd(window.0);
+        drop(window);
+        assert!(!p.no_tiling(h));
+        assert!(!p.no_tiling(Hwnd::NULL));
     }
 
     #[test]
