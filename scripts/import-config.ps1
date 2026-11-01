@@ -103,7 +103,8 @@ function Get-Newline {
 
 function Split-Lines {
     param([Parameter(Mandatory)][AllowEmptyString()][string] $Text)
-    return @($Text -split "`r?`n")
+    # The leading comma keeps a single line an array instead of letting the output unroll it.
+    return , @($Text -split "`r?`n")
 }
 
 function Show-LineDiff {
