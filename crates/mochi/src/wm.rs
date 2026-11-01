@@ -1382,6 +1382,29 @@ impl WindowManager {
         }
     }
 
+    /// Lets go of every managed window that has been given the `NoTiling`
+    /// property since Mochi took it.
+    ///
+    /// The property can be set the instant after a window appears, by which
+    /// time Mochi may already have tiled it, and setting it raises no event.
+    /// So every managed window is asked on every event, hidden workspaces
+    /// included: a window Mochi cloaked has to be uncloaked as it leaves,
+    /// which `unmanage` does. The drag path is no exception, because a move
+    /// by whoever marked the window is often the first event that follows,
+    /// and handling it while the window is still managed pulls it back into
+    /// its tile. One property read per window.
+    fn drop_marked_windows(&mut self) {
+        let marked: Vec<Hwnd> = self
+            .core
+            .all_window_ids()
+            .map(handle)
+            .filter(|hwnd| self.platform.no_tiling(*hwnd))
+            .collect();
+        for hwnd in marked {
+            self.unmanage(hwnd, "marked no tiling");
+        }
+    }
+
     /// Lets go of a window that has gone off screen without Mochi hiding it.
     ///
     /// Mochi drops a managed window when it is told the cloak or the hide
@@ -1929,6 +1952,7 @@ impl WindowManager {
 
     fn on_event(&mut self, event: Event) -> Flow {
         self.drop_unreachable_windows();
+        self.drop_marked_windows();
         // Never on the flood paths. A window does not stop being on screen
         // because it moved or because its title changed, and a drag delivers
         // `LocationChange` hundreds of times a second. Measured on this
@@ -5279,6 +5303,20 @@ mod tests {
             }
         }
 
+        /// Sets or removes the window's `NoTiling` property, the way the
+        /// program that placed it would. No event is raised for it.
+        fn mark_no_tiling(&self, hwnd: Hwnd, marked: bool) {
+            if let Some(w) = self
+                .windows
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|w| w.hwnd == hwnd)
+            {
+                w.no_tiling = marked;
+            }
+        }
+
         /// Forgets every move made so far.
         fn clear_history(&self) {
             self.history.lock().unwrap().clear();
@@ -5382,6 +5420,13 @@ mod tests {
                 .iter()
                 .find(|w| w.hwnd == hwnd)
                 .is_none_or(|w| w.visible && !w.cloaked)
+        }
+        fn no_tiling(&self, hwnd: Hwnd) -> bool {
+            self.windows
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|w| w.hwnd == hwnd && w.no_tiling)
         }
         fn set_positions(&self, placements: &[WindowPlacement]) -> Result<()> {
             // The real platform falls back to one window at a time when a
@@ -6947,6 +6992,193 @@ alt + j : focus down
             !wm.state().is_managed(window_id(Hwnd(2))),
             "an event that can mean something did not sweep"
         );
+    }
+
+    fn marked(info: WindowInfo) -> WindowInfo {
+        WindowInfo {
+            no_tiling: true,
+            ..info
+        }
+    }
+
+    fn window_event(wm: &mut WindowManager, kind: WindowEventKind, hwnd: isize) {
+        wm.on_event(Event::Window {
+            kind,
+            hwnd: Hwnd(hwnd),
+        });
+    }
+
+    /// How often one window was moved and how often cloaked or uncloaked.
+    fn touches(platform: &FakePlatform, hwnd: isize) -> (usize, usize) {
+        let moves = platform
+            .history
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(h, _)| *h == Hwnd(hwnd))
+            .count();
+        let cloaks = platform
+            .cloaks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(h, _)| *h == Hwnd(hwnd))
+            .count();
+        (moves, cloaks)
+    }
+
+    #[test]
+    fn a_window_marked_no_tiling_is_not_managed_when_it_appears() {
+        // One already on the desktop at startup, one that appears later.
+        let (mut wm, platform) = manager(vec![
+            process_window(1, "Editor", 10),
+            marked(process_window(2, "Placed one", 20)),
+        ]);
+        assert!(wm.state().is_managed(window_id(Hwnd(1))));
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(2))),
+            "a marked window was adopted at startup"
+        );
+
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .push(marked(process_window(3, "Placed two", 20)));
+        for kind in [
+            WindowEventKind::Created,
+            WindowEventKind::Shown,
+            WindowEventKind::Uncloaked,
+            WindowEventKind::MinimizeEnd,
+            WindowEventKind::Foreground,
+        ] {
+            window_event(&mut wm, kind, 3);
+            assert!(
+                !wm.state().is_managed(window_id(Hwnd(3))),
+                "a marked window was managed on {kind:?}"
+            );
+        }
+        assert_eq!(touches(&platform, 2), (0, 0), "a marked window was touched");
+        assert_eq!(touches(&platform, 3), (0, 0), "a marked window was touched");
+
+        // The same process, unmarked, is tiled as before.
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .push(process_window(4, "Own terminal", 20));
+        window_event(&mut wm, WindowEventKind::Shown, 4);
+        assert!(wm.state().is_managed(window_id(Hwnd(4))));
+        assert!(platform.rect_of(Hwnd(4)).is_some(), "it was never tiled");
+    }
+
+    #[test]
+    fn manage_and_why_refuse_a_marked_window() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), marked(window(2, "Placed"))]);
+        wm.foreground = Some(Hwnd(2));
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert!(response.error_message().is_some(), "{response:?}");
+        assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        assert!(platform.rect_of(Hwnd(2)).is_none());
+
+        let (Response::Why { why }, _) = wm.handle_command(Command::Why) else {
+            panic!("why did not answer with an explanation");
+        };
+        assert_eq!(why["managed"], false);
+        assert_eq!(why["reason"], "no-tiling marker");
+        assert_eq!(why["overridable"], false);
+    }
+
+    #[test]
+    fn a_managed_window_that_gets_marked_leaves_on_the_next_event_and_is_not_moved_again() {
+        let (mut wm, platform) = manager(vec![
+            process_window(1, "Placed", 20),
+            process_window(2, "Own terminal", 20),
+        ]);
+        assert!(wm.state().is_managed(window_id(Hwnd(1))));
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
+
+        // Whoever placed it marks it and moves it to a place of its own. The
+        // move is the first thing Mochi hears.
+        platform.mark_no_tiling(Hwnd(1), true);
+        platform.moves_by_itself(Hwnd(1), Rect::new(100, 100, 900, 700));
+        platform.clear_history();
+        platform.cloaks.lock().unwrap().clear();
+        window_event(&mut wm, WindowEventKind::LocationChange, 1);
+        assert!(
+            !wm.state().is_managed(window_id(Hwnd(1))),
+            "the marked window kept its tile"
+        );
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
+        assert!(
+            platform.rect_of(Hwnd(2)).is_some(),
+            "the window left behind did not get the room"
+        );
+
+        // Nothing that follows moves or hides it again.
+        for kind in [
+            WindowEventKind::LocationChange,
+            WindowEventKind::MoveSizeEnd,
+            WindowEventKind::Foreground,
+            WindowEventKind::Shown,
+            WindowEventKind::NameChange,
+        ] {
+            window_event(&mut wm, kind, 1);
+        }
+        wm.handle_command(Command::Retile);
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+        assert!(!wm.state().is_managed(window_id(Hwnd(1))));
+        assert_eq!(
+            touches(&platform, 1),
+            (0, 0),
+            "the marked window was moved or hidden after it left"
+        );
+        assert!(wm.state().is_managed(window_id(Hwnd(2))));
+    }
+
+    #[test]
+    fn a_marked_window_mochi_hid_is_uncloaked_as_it_leaves() {
+        let (mut wm, platform) = manager(vec![window(1, "Placed"), window(2, "Editor")]);
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert!(wm.we_hid(Hwnd(1)), "the workspace switch did not hide it");
+        platform.cloaks.lock().unwrap().clear();
+
+        platform.mark_no_tiling(Hwnd(1), true);
+        window_event(&mut wm, WindowEventKind::LocationChange, 2);
+
+        assert!(!wm.state().is_managed(window_id(Hwnd(1))));
+        assert_eq!(
+            *platform.cloaks.lock().unwrap(),
+            vec![(Hwnd(1), false)],
+            "the marked window was left cloaked"
+        );
+        assert!(!wm.we_hid(Hwnd(1)), "the record still owes it back");
+        assert!(wm.we_hid(Hwnd(2)), "the other hidden window was disturbed");
+
+        platform.clear_history();
+        platform.cloaks.lock().unwrap().clear();
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert_eq!(touches(&platform, 1), (0, 0));
+    }
+
+    #[test]
+    fn a_window_whose_marker_is_removed_is_taken_again_on_its_next_show_or_focus() {
+        for kind in [WindowEventKind::Shown, WindowEventKind::Foreground] {
+            let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Placed")]);
+            platform.mark_no_tiling(Hwnd(2), true);
+            window_event(&mut wm, WindowEventKind::LocationChange, 1);
+            assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+
+            platform.mark_no_tiling(Hwnd(2), false);
+            window_event(&mut wm, kind, 2);
+            assert!(
+                wm.state().is_managed(window_id(Hwnd(2))),
+                "an unmarked window was not taken back on {kind:?}"
+            );
+        }
     }
 
     #[test]

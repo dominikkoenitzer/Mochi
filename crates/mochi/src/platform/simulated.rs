@@ -209,6 +209,10 @@ impl Platform for SimulatedMonitors {
         self.inner.is_on_screen(hwnd)
     }
 
+    fn no_tiling(&self, hwnd: Hwnd) -> bool {
+        self.inner.no_tiling(hwnd)
+    }
+
     fn take_unreachable(&self) -> Vec<Hwnd> {
         self.inner.take_unreachable()
     }
@@ -350,6 +354,9 @@ mod tests {
         }
         fn is_on_screen(&self, _hwnd: Hwnd) -> bool {
             true
+        }
+        fn no_tiling(&self, _hwnd: Hwnd) -> bool {
+            false
         }
         fn set_positions(&self, _placements: &[WindowPlacement]) -> Result<()> {
             Ok(())
