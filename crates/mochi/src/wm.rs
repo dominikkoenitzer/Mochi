@@ -1393,6 +1393,9 @@ impl WindowManager {
     /// by whoever marked the window is often the first event that follows,
     /// and handling it while the window is still managed pulls it back into
     /// its tile. One property read per window.
+    ///
+    /// A scratchpad's window is let go the same way: put back on screen if
+    /// Mochi hid it, and neither summoned nor given back to the layout again.
     fn drop_marked_windows(&mut self) {
         let marked: Vec<Hwnd> = self
             .core
@@ -1402,6 +1405,25 @@ impl WindowManager {
             .collect();
         for hwnd in marked {
             self.unmanage(hwnd, "marked no tiling");
+        }
+        let mut released = false;
+        for index in 0..self.scratchpads.len() {
+            let Some(hwnd) = self.scratchpads[index].hwnd else {
+                continue;
+            };
+            if !self.platform.no_tiling(hwnd) {
+                continue;
+            }
+            tracing::info!(%hwnd, name = %self.scratchpads[index].config.name, "scratchpad window marked no tiling, letting go");
+            self.scratchpads[index].hwnd = None;
+            if self.we_hid(hwnd) {
+                self.show_window(hwnd);
+            }
+            record(&self.hidden).show(hwnd);
+            released = true;
+        }
+        if released {
+            self.draw_visuals();
         }
     }
 
@@ -7177,6 +7199,47 @@ alt + j : focus down
             assert!(
                 wm.state().is_managed(window_id(Hwnd(2))),
                 "an unmarked window was not taken back on {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scratchpad_window_that_gets_marked_is_let_go_and_not_moved_again() {
+        for on_screen in [true, false] {
+            let (mut wm, platform) = scratch_manager(vec![
+                process_window(1, "Editor", 10),
+                process_window(2, "scratch", 20),
+            ]);
+            assert_eq!(toggle(&mut wm), Response::Ok);
+            if !on_screen {
+                assert_eq!(toggle(&mut wm), Response::Ok);
+                assert!(wm.we_hid(Hwnd(2)));
+            }
+            platform.clear_history();
+            platform.cloaks.lock().unwrap().clear();
+
+            platform.mark_no_tiling(Hwnd(2), true);
+            window_event(&mut wm, WindowEventKind::LocationChange, 2);
+            assert_eq!(
+                wm.scratchpad_holding(Hwnd(2)),
+                None,
+                "the scratchpad kept a marked window"
+            );
+            assert!(!wm.we_hid(Hwnd(2)), "the marked window was left cloaked");
+            let uncloaks: &[bool] = if on_screen { &[] } else { &[false] };
+            assert_eq!(cloak_calls(&platform, Hwnd(2)), uncloaks);
+            platform.cloaks.lock().unwrap().clear();
+
+            // The next toggle starts the command again rather than reach for it.
+            toggle(&mut wm);
+            window_event(&mut wm, WindowEventKind::Shown, 2);
+            toggle(&mut wm);
+            assert_eq!(wm.scratchpad_holding(Hwnd(2)), None);
+            assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+            assert_eq!(
+                touches(&platform, 2),
+                (0, 0),
+                "the marked window was moved or hidden after it was let go"
             );
         }
     }
