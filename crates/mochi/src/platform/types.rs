@@ -220,7 +220,16 @@ pub struct WindowInfo {
     /// put in, so the tile stays empty, its border is drawn around nothing and
     /// every other window on the screen is squeezed around a hole.
     pub reachable: bool,
+    /// True when the window carries the [`NO_TILING`] property: whoever
+    /// placed it asks that no window manager arranges it.
+    pub no_tiling: bool,
 }
+
+/// The window property that keeps a window out of every layout.
+///
+/// Set by the program that owns or places the window (`SetPropW`, value 1)
+/// and removed when it lets go. Mochi only ever reads it.
+pub const NO_TILING: &str = "NoTiling";
 
 impl WindowInfo {
     /// A blank window, for tests and for events about windows that already died.
@@ -246,6 +255,7 @@ impl WindowInfo {
             // that a test window and an event about a window that already died
             // are judged on the rest of the fields.
             reachable: true,
+            no_tiling: false,
         }
     }
 
@@ -334,6 +344,8 @@ pub enum Unmanageable {
     AlwaysOnTop,
     /// `WS_EX_TRANSPARENT`: mouse input falls straight through the window.
     ClickThrough,
+    /// The window carries the [`NO_TILING`] property.
+    NoTiling,
 }
 
 impl Unmanageable {
@@ -353,6 +365,7 @@ impl Unmanageable {
             Self::OutOfReach => "elevated, out of reach",
             Self::AlwaysOnTop => "always on top",
             Self::ClickThrough => "click-through overlay",
+            Self::NoTiling => "no-tiling marker",
         }
     }
 }
@@ -403,6 +416,11 @@ pub fn is_manageable_with(w: &WindowInfo, allow_tool_window: bool) -> Result<(),
     // the same reason.
     if !w.reachable {
         return Err(Unmanageable::OutOfReach);
+    }
+    // Whoever placed the window asked for it to be left alone. Not a guess
+    // about the window, so neither a rule nor `--manage-class` lifts it.
+    if w.no_tiling {
+        return Err(Unmanageable::NoTiling);
     }
     if w.has_style(style::WS_CHILD) {
         return Err(Unmanageable::Child);
@@ -811,6 +829,27 @@ mod tests {
         // is a real window. It may not insist that Windows will let us move
         // one, which is a fact about Mochi's own privileges.
         assert!(!Unmanageable::OutOfReach.is_overridable());
+    }
+
+    #[test]
+    fn a_window_marked_no_tiling_is_never_a_candidate() {
+        let mut w = app_window();
+        assert_eq!(is_manageable(&w), Ok(()));
+        w.no_tiling = true;
+        assert_eq!(is_manageable(&w), Err(Unmanageable::NoTiling));
+        // `--manage-class` lifts the tool window rule and nothing else.
+        assert_eq!(is_manageable_with(&w, true), Err(Unmanageable::NoTiling));
+        // Minimized or cloaked, it is still the marker that decides.
+        w.minimized = true;
+        assert_eq!(is_manageable(&w), Err(Unmanageable::NoTiling));
+        w.minimized = false;
+        w.cloaked = true;
+        assert_eq!(is_manageable(&w), Err(Unmanageable::NoTiling));
+    }
+
+    #[test]
+    fn the_no_tiling_marker_is_not_something_a_rule_may_overrule() {
+        assert!(!Unmanageable::NoTiling.is_overridable());
     }
 
     #[test]

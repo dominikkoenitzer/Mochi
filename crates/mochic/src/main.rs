@@ -1600,6 +1600,10 @@ fn advice(reason: &str, exe: &str) -> (String, Option<String>) {
             "it is part of Windows itself: the desktop, the taskbar, or a menu. Mochi never touches those.".into(),
             None,
         ),
+        "no-tiling marker" => (
+            "the program that placed it marked it NoTiling, which asks every window manager to leave it alone.".into(),
+            Some("nothing to do: Mochi takes it once the marker is removed and the window is shown or focused again.".into()),
+        ),
         "not visible" => (
             "Windows says it is not visible at the moment.".into(),
             Some("nothing to do: Mochi will take it when it is shown.".into()),
@@ -1899,6 +1903,7 @@ mod tests {
             "elevated, out of reach",
             "always on top",
             "click-through overlay",
+            "no-tiling marker",
             "paused",
             "rule",
             "manage-class",
