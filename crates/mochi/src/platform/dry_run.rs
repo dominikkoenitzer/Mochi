@@ -90,6 +90,10 @@ impl<P: Platform> Platform for DryRunPlatform<P> {
         self.inner.is_on_screen(hwnd)
     }
 
+    fn no_tiling(&self, hwnd: Hwnd) -> bool {
+        self.inner.no_tiling(hwnd)
+    }
+
     fn set_positions(&self, placements: &[WindowPlacement]) -> Result<()> {
         for p in placements {
             tracing::info!(

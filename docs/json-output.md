@@ -359,6 +359,7 @@ and when one does, `why` goes on to `rule` or `unknown`.
 | `elevated, out of reach` | false | It runs as administrator and Mochi does not (the `elevated` setting is off, or the daemon was started with normal rights anyway), so Windows refuses every call against it. |
 | `always on top` | true | An always-on-top overlay that does not ask for a taskbar button. |
 | `click-through overlay` | true | Mouse input falls straight through it. |
+| `no-tiling marker` | false | It carries the `NoTiling` window property, which asks window managers to leave it alone. A managed window that is given the property leaves the layout on the next event. |
 
 ### hotkeys
 

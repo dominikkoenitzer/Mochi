@@ -22,7 +22,7 @@ pub use appview::disconnect as disconnect_shell;
 pub use dry_run::DryRunPlatform;
 pub use simulated::SimulatedMonitors;
 pub use types::{
-    FRAME_HOST, Hwnd, MonitorInfo, Unmanageable, WindowInfo, WindowShape, is_frame_host,
+    FRAME_HOST, Hwnd, MonitorInfo, NO_TILING, Unmanageable, WindowInfo, WindowShape, is_frame_host,
     is_fullscreen, is_manageable, is_manageable_with,
 };
 pub use win32::Win32Platform;
@@ -198,6 +198,14 @@ pub trait Platform: Send + Sync {
     /// which has simply died is left to the destroy path rather than being
     /// swept up here.
     fn is_on_screen(&self, hwnd: Hwnd) -> bool;
+
+    /// Whether the window carries the [`NO_TILING`] property.
+    ///
+    /// Its own call for the same reason as [`Platform::is_on_screen`]: it is
+    /// asked about every managed window on every event, the flood path
+    /// included, because the property can be set without any event at all.
+    /// One property read. A handle that is no longer a window answers false.
+    fn no_tiling(&self, hwnd: Hwnd) -> bool;
 
     /// Windows that have turned a call down since this was last asked, and so
     /// can no longer be tiled.
