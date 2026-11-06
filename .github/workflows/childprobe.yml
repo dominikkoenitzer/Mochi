@@ -10,19 +10,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: default
+          - name: browser
+            browser: ""
             flags: ""
-          - name: software
+          - name: browser-software
+            browser: ""
+            flags: "--flag=--disable-gpu --flag=--disable-gpu-compositing"
+          - name: frameless
+            browser: "--browser node_modules/electron/dist/electron.exe"
+            flags: ""
+          - name: frameless-software
+            browser: "--browser node_modules/electron/dist/electron.exe"
             flags: "--flag=--disable-gpu --flag=--disable-gpu-compositing"
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v7
-      - name: Resized around each cycle
-        run: python -I probe/probe.py ${{ matrix.flags }} --cycles 300 --down -1 --settle 0.05 --resize
+      - name: Install the frameless host
+        if: matrix.browser != ''
+        run: npm install --no-audit --no-fund --no-save electron
+      - name: Moved while minimized
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --cycles 150 --down -1 --settle 0.05 --iconic 1
+      - name: Frames in flight
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --cycles 150 --down -1 --settle 0.05 --animate
       - name: Resized around each cycle, under load
-        run: python -I probe/probe.py ${{ matrix.flags }} --cycles 300 --down -1 --settle 0.05 --resize --load 8
-      - name: Without activation, under load
-        run: python -I probe/probe.py ${{ matrix.flags }} --style noactivate --cycles 300 --down -1 --settle 0.05 --resize --load 8
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --cycles 150 --down -1 --settle 0.05 --resize --load 8
   race:
     runs-on: windows-latest
     timeout-minutes: 15

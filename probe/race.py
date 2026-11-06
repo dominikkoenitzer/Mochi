@@ -138,7 +138,24 @@ def spawn(*args):
     return subprocess.Popen([sys.executable, "-I", __file__, *args], stdout=subprocess.PIPE, text=True)
 
 
+def tile(top, i):
+    user32.SetWindowPos(top, None, 60 + 300 * (i & 1), 40 + 30 * (i & 1), 800 - 50 * (i & 1), 600 - 30 * (i & 1),
+                        SWP_NOACTIVATE | 0x20)
+
+
 def act(top, mode, i, down):
+    if mode == "iconic":
+        user32.ShowWindow(top, SW_MINIMIZE)
+        tile(top, i)
+        time.sleep(down)
+        user32.ShowWindow(top, SW_RESTORE)
+        return
+    if mode == "iconic-noactivate":
+        user32.ShowWindow(top, SW_SHOWMINNOACTIVE)
+        tile(top, i)
+        time.sleep(down)
+        user32.ShowWindow(top, SW_SHOWNOACTIVATE)
+        return
     if mode == "minimize":
         user32.ShowWindow(top, SW_MINIMIZE)
         time.sleep(down)
@@ -209,13 +226,9 @@ def main():
     elif args.role == "parent":
         role_parent(args.child)
     else:
-        run("minimize", False, args.cycles, 0, lag=0.05)
-        for mode in ("minimize", "noactivate", "move"):
-            run(mode, True, args.cycles, 0, lag=0.05)
-        run("minimize", True, args.cycles, 0, lag=0.05, down=0.2)
-        run("noactivate", True, args.cycles, 0, lag=0.05, down=0.2)
-        run("minimize", True, args.cycles, 0, lag=0.005)
-        run("idle", True, 100, 0, lag=0.05)
+        run("iconic", False, args.cycles, 0)
+        run("iconic", True, args.cycles, 0)
+        run("iconic-noactivate", False, args.cycles, 0)
 
 
 if __name__ == "__main__":

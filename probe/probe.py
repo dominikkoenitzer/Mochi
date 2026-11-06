@@ -13,6 +13,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import winreg
 from ctypes import wintypes as w
@@ -22,7 +23,9 @@ gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 
 SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWMINNOACTIVE = 6, 9, 4, 7
-SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE = 0x1, 0x4, 0x10
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE = 0x1, 0x2, 0x4, 0x10
+SWP_FRAMECHANGED = 0x20
+MOVE_FLAGS = SWP_NOACTIVATE | SWP_FRAMECHANGED
 CHILD_CLASS = "Intermediate D3D Window"
 ENUM = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
 
@@ -152,11 +155,29 @@ g.fillRect((n*3+i*23)%900,(i*17)%700,22,22)}}requestAnimationFrame(f)}})();
 </script>"""
 
 
+def tile(hwnd, i):
+    """One move the way a window manager makes it, frame recalculation included."""
+    user32.SetWindowPos(hwnd, None, 40 + 300 * (i % 2), 30 + 40 * (i % 2),
+                        1000 - 60 * (i % 2), 760 - 40 * (i % 2), MOVE_FLAGS)
+
+
+def animate(hwnd, stop_event):
+    """Frames in flight, independent of whatever else happens to the window."""
+    i = 0
+    while not stop_event.is_set():
+        i += 1
+        tile(hwnd, i)
+        time.sleep(0.016)
+
+
 def launch(browser, flags, marker, workdir):
     page = os.path.join(workdir, "page.html")
     with open(page, "w", encoding="ascii") as out:
         out.write(PAGE.format(marker=marker))
     profile = os.path.join(workdir, "profile")
+    if os.path.basename(browser).lower().startswith("electron"):
+        app = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app")
+        return subprocess.Popen([browser, app, f"--user-data-dir={profile}", "--mute-audio", *flags, page])
     command = [
         browser, f"--user-data-dir={profile}", "--no-first-run",
         "--no-default-browser-check", "--disable-sync", "--mute-audio",
@@ -206,7 +227,7 @@ def resize(hwnd, i):
                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
 
 
-def cycle(hwnd, style, down, settle, move=None, jitter=None):
+def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0):
     if move:
         place(hwnd, *move[0])
     if jitter is not None:
@@ -220,6 +241,8 @@ def cycle(hwnd, style, down, settle, move=None, jitter=None):
         user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
     else:
         user32.ShowWindow(hwnd, SW_MINIMIZE)
+        for n in range(iconic):
+            tile(hwnd, step + n)
         time.sleep(down)
         user32.ShowWindow(hwnd, SW_RESTORE)
     if move:
@@ -231,7 +254,8 @@ def cycle(hwnd, style, down, settle, move=None, jitter=None):
 
 def run(args):
     args.browser = args.browser or installed_chromium()
-    report = {"browser": os.path.basename(args.browser), "flags": args.flag, "style": args.style, "cycles": args.cycles}
+    report = {"browser": os.path.basename(args.browser), "flags": args.flag, "style": args.style,
+              "cycles": args.cycles, "iconic": args.iconic, "animate": args.animate, "resize": args.resize}
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as workdir:
         marker = f"probe-{os.getpid()}"
         process = launch(args.browser, args.flag, marker, workdir)
@@ -250,11 +274,14 @@ def run(args):
             print(json.dumps(report), flush=True)
             displaced = []
             rng = random.Random(args.seed)
+            frames_stop = threading.Event()
+            if args.animate:
+                threading.Thread(target=animate, args=(hwnd, frames_stop), daemon=True).start()
             for i in range(args.cycles):
                 down = args.down if args.down >= 0 else rng.uniform(0.0, 0.7)
                 move = ((40 + 200 * (i % 2), 30), (240 - 200 * (i % 2), 90)) if args.move else None
                 jitter = (i, rng.uniform(0.0, 0.03)) if args.resize else None
-                cycle(hwnd, args.style, down, args.settle, move, jitter)
+                cycle(hwnd, args.style, down, args.settle, move, jitter, args.iconic, i)
                 now = compositor_children(hwnd)
                 rels = [relative(c, hwnd) for c in now]
                 if rels and all(outside(r, client_size(hwnd)) for r in rels):
@@ -268,6 +295,7 @@ def run(args):
                     time.sleep(0.7)
                     print(json.dumps({"one_second_later": frozen, "put_back": [relative(c, hwnd) for c in now],
                                       "colours": colours(hwnd)}), flush=True)
+            frames_stop.set()
             report["displaced"] = len(displaced)
             report["end_colours"] = colours(hwnd)
             if args.displace:
@@ -308,6 +336,8 @@ def main():
     parser.add_argument("--settle", type=float, default=0.4)
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--resize", action="store_true", help="resize the window around each cycle")
+    parser.add_argument("--iconic", type=int, default=0, help="moves to make while minimized")
+    parser.add_argument("--animate", action="store_true", help="keep making moves on another thread")
     parser.add_argument("--load", type=int, default=0, help="busy processes to run alongside")
     parser.add_argument("--displace", action="store_true")
     parser.add_argument("--move", action="store_true", help="move the window around each cycle")
