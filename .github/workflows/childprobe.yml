@@ -17,14 +17,12 @@ jobs:
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v7
-      - name: Fixed gap
-        run: python -I probe/probe.py ${{ matrix.flags }} --cycles 60 --down 0.6 --settle 0.4 --displace
-      - name: Random gap, no settle
-        run: python -I probe/probe.py ${{ matrix.flags }} --cycles 150 --down -1 --settle 0.05
-      - name: Random gap, moved around each cycle
-        run: python -I probe/probe.py ${{ matrix.flags }} --cycles 150 --down -1 --settle 0.05 --move
-      - name: Without activation
-        run: python -I probe/probe.py ${{ matrix.flags }} --style noactivate --cycles 60 --down 0.6 --settle 0.4
+      - name: Resized around each cycle
+        run: python -I probe/probe.py ${{ matrix.flags }} --cycles 300 --down -1 --settle 0.05 --resize
+      - name: Resized around each cycle, under load
+        run: python -I probe/probe.py ${{ matrix.flags }} --cycles 300 --down -1 --settle 0.05 --resize --load 8
+      - name: Without activation, under load
+        run: python -I probe/probe.py ${{ matrix.flags }} --style noactivate --cycles 300 --down -1 --settle 0.05 --resize --load 8
   race:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -32,4 +30,4 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Three process stand-in
-        run: python -I probe/race.py --cycles 2000
+        run: python -I probe/race.py --cycles 500

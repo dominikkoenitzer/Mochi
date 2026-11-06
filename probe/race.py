@@ -52,6 +52,7 @@ user32.ShowWindow.argtypes = [w.HWND, ctypes.c_int]
 user32.GetWindowRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
 user32.ClientToScreen.argtypes = [w.HWND, ctypes.POINTER(w.POINT)]
 user32.IsWindow.argtypes = [w.HWND]
+user32.PeekMessageW.argtypes = [ctypes.POINTER(w.MSG), w.HWND, w.UINT, w.UINT, w.UINT]
 
 
 def register(name):
@@ -79,7 +80,17 @@ def pump():
         user32.DispatchMessageW(ctypes.byref(message))
 
 
-def role_child(pause):
+def slow_pump(lag):
+    """Answers messages only every so often, like a thread short of CPU time."""
+    message = w.MSG()
+    while True:
+        while user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
+            user32.TranslateMessage(ctypes.byref(message))
+            user32.DispatchMessageW(ctypes.byref(message))
+        time.sleep(lag)
+
+
+def role_child(pause, lag):
     """Owns the child on one thread, resizes it from another."""
     made = threading.Event()
     box = {}
@@ -91,7 +102,10 @@ def role_child(pause):
         box["child"] = create(EX_NOPARENTNOTIFY | EX_LAYERED | EX_TRANSPARENT | EX_NOREDIRECTIONBITMAP,
                               "StandinChild", WS_CHILD | WS_DISABLED | WS_VISIBLE, 0, 0, 1, 1, hidden)
         made.set()
-        pump()
+        if lag:
+            slow_pump(lag)
+        else:
+            pump()
 
     threading.Thread(target=owner, daemon=True).start()
     made.wait()
@@ -124,12 +138,14 @@ def spawn(*args):
     return subprocess.Popen([sys.executable, "-I", __file__, *args], stdout=subprocess.PIPE, text=True)
 
 
-def act(top, mode, i):
+def act(top, mode, i, down):
     if mode == "minimize":
         user32.ShowWindow(top, SW_MINIMIZE)
+        time.sleep(down)
         user32.ShowWindow(top, SW_RESTORE)
     elif mode == "noactivate":
         user32.ShowWindow(top, SW_SHOWMINNOACTIVE)
+        time.sleep(down)
         user32.ShowWindow(top, SW_SHOWNOACTIVATE)
     elif mode == "move":
         user32.SetWindowPos(top, None, 60 + 300 * (i & 1), 40, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
@@ -137,31 +153,46 @@ def act(top, mode, i):
         raise SystemExit(mode)
 
 
-def run(mode, resizing, cycles, pause):
-    args = ["--role", "child", "--pause", str(pause)]
-    if not resizing:
-        args = ["--role", "child", "--pause", "1000"]
+def client_origin(top):
+    p = w.POINT(0, 0)
+    user32.ClientToScreen(top, ctypes.byref(p))
+    return (p.x, p.y)
+
+
+def run(mode, resizing, cycles, pause, lag=0.0, down=0.0):
+    args = ["--role", "child", "--pause", str(pause if resizing else 1000), "--lag", str(lag)]
     child_process = spawn(*args)
     child = int(child_process.stdout.readline())
     parent_process = spawn("--role", "parent", "--child", str(child))
     top = int(parent_process.stdout.readline())
     time.sleep(0.5)
     seen = []
+    sticky = None
     start = time.time()
     try:
         for i in range(cycles):
-            act(top, mode, i)
+            act(top, mode, i, down)
             time.sleep(0.03)
             rel = origin_rel(child, top)
             if rel != (0, 0):
                 seen.append(rel)
+                if sticky is None:
+                    # Does it stay there, and does it follow the parent?
+                    time.sleep(1)
+                    later = origin_rel(child, top)
+                    user32.SetWindowPos(top, None, 200, 120, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                    time.sleep(0.2)
+                    moved = origin_rel(child, top)
+                    user32.SetWindowPos(top, None, 60, 40, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                    sticky = {"at_once": rel, "after_1s": later, "after_parent_moved": moved,
+                              "parent_origin": client_origin(top)}
                 user32.SetWindowPos(child, None, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
                 time.sleep(0.01)
     finally:
         parent_process.kill()
         child_process.kill()
-    print(json.dumps({"mode": mode, "child_resizing": resizing, "cycles": cycles,
-                      "displaced": len(seen), "distinct": sorted(set(seen))[:12],
+    print(json.dumps({"mode": mode, "child_resizing": resizing, "lag": lag, "down": down,
+                      "cycles": cycles, "sticky": sticky, "displaced": len(seen), "distinct": sorted(set(seen))[:12],
                       "seconds": round(time.time() - start, 1)}), flush=True)
 
 
@@ -171,17 +202,20 @@ def main():
     parser.add_argument("--child", type=int)
     parser.add_argument("--pause", type=float, default=0.0)
     parser.add_argument("--cycles", type=int, default=2000)
+    parser.add_argument("--lag", type=float, default=0.0)
     args = parser.parse_args()
     if args.role == "child":
-        role_child(args.pause)
+        role_child(args.pause, args.lag)
     elif args.role == "parent":
         role_parent(args.child)
     else:
+        run("minimize", False, args.cycles, 0, lag=0.05)
         for mode in ("minimize", "noactivate", "move"):
-            run(mode, False, args.cycles, 0)
-            run(mode, True, args.cycles, 0)
-        run("minimize", True, args.cycles, 0.016)
-        run("idle", True, 200, 0)
+            run(mode, True, args.cycles, 0, lag=0.05)
+        run("minimize", True, args.cycles, 0, lag=0.05, down=0.2)
+        run("noactivate", True, args.cycles, 0, lag=0.05, down=0.2)
+        run("minimize", True, args.cycles, 0, lag=0.005)
+        run("idle", True, 100, 0, lag=0.05)
 
 
 if __name__ == "__main__":
