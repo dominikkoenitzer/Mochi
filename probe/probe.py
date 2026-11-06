@@ -155,19 +155,69 @@ g.fillRect((n*3+i*23)%900,(i*17)%700,22,22)}}requestAnimationFrame(f)}})();
 </script>"""
 
 
-def tile(hwnd, i):
+def tile(hwnd, i, flags=MOVE_FLAGS):
     """One move the way a window manager makes it, frame recalculation included."""
     user32.SetWindowPos(hwnd, None, 40 + 300 * (i % 2), 30 + 40 * (i % 2),
-                        1000 - 60 * (i % 2), 760 - 40 * (i % 2), MOVE_FLAGS)
+                        1000 - 60 * (i % 2), 760 - 40 * (i % 2), flags)
 
 
-def animate(hwnd, stop_event):
+def animate(hwnd, stop_event, hold, flags, skip_iconic):
     """Frames in flight, independent of whatever else happens to the window."""
     i = 0
+    sent = skipped = 0
     while not stop_event.is_set():
+        if hold.is_set():
+            time.sleep(0.016)
+            continue
         i += 1
-        tile(hwnd, i)
+        if skip_iconic and user32.IsIconic(hwnd):
+            skipped += 1
+        else:
+            tile(hwnd, i, flags)
+            sent += 1
         time.sleep(0.016)
+    FRAME_COUNTS.update(sent=sent, skipped=skipped)
+
+
+FRAME_COUNTS = {}
+
+
+def pixels_hash(hwnd):
+    x, y = client_origin(hwnd)
+    width, height = client_size(hwnd)
+    if width <= 0 or height <= 0:
+        return 0
+    screen = user32.GetDC(None)
+    dc = gdi32.CreateCompatibleDC(screen)
+    bitmap = gdi32.CreateCompatibleBitmap(screen, width, height)
+    gdi32.SelectObject(dc, bitmap)
+    gdi32.BitBlt(dc, 0, 0, width, height, screen, x, y, 0x00CC0020)
+    data = (ctypes.c_uint32 * (width * height))()
+
+    class Header(ctypes.Structure):
+        _fields_ = [
+            ("size", w.DWORD), ("width", w.LONG), ("height", w.LONG),
+            ("planes", w.WORD), ("bits", w.WORD), ("compression", w.DWORD),
+            ("image", w.DWORD), ("xppm", w.LONG), ("yppm", w.LONG),
+            ("used", w.DWORD), ("important", w.DWORD),
+        ]
+
+    header = Header(ctypes.sizeof(Header), width, -height, 1, 32, 0, 0, 0, 0, 0, 0)
+    gdi32.GetDIBits(dc, bitmap, 0, height, data, ctypes.byref(header), 0)
+    gdi32.DeleteObject(bitmap)
+    gdi32.DeleteDC(dc)
+    user32.ReleaseDC(None, screen)
+    return hash(bytes(data))
+
+
+def is_live(hwnd):
+    """The test page animates without pause, so a picture that holds still is stuck."""
+    first = pixels_hash(hwnd)
+    for _ in range(6):
+        time.sleep(0.1)
+        if pixels_hash(hwnd) != first:
+            return True
+    return False
 
 
 def launch(browser, flags, marker, workdir):
@@ -190,7 +240,10 @@ def launch(browser, flags, marker, workdir):
 def stop(process):
     subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
                    capture_output=True, check=False)
-    process.wait(timeout=30)
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        print("browser still closing after 30 s", flush=True)
 
 
 def installed_chromium():
@@ -227,7 +280,7 @@ def resize(hwnd, i):
                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
 
 
-def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0):
+def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0, gap=0.0):
     if move:
         place(hwnd, *move[0])
     if jitter is not None:
@@ -243,6 +296,7 @@ def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0):
         user32.ShowWindow(hwnd, SW_MINIMIZE)
         for n in range(iconic):
             tile(hwnd, step + n)
+            time.sleep(gap)
         time.sleep(down)
         user32.ShowWindow(hwnd, SW_RESTORE)
     if move:
@@ -255,7 +309,8 @@ def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0):
 def run(args):
     args.browser = args.browser or installed_chromium()
     report = {"browser": os.path.basename(args.browser), "flags": args.flag, "style": args.style,
-              "cycles": args.cycles, "iconic": args.iconic, "animate": args.animate, "resize": args.resize}
+              "cycles": args.cycles, "iconic": args.iconic, "gap": args.gap, "animate": args.animate, "resize": args.resize,
+              "no_framechanged": args.no_framechanged, "skip_iconic": args.skip_iconic}
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as workdir:
         marker = f"probe-{os.getpid()}"
         process = launch(args.browser, args.flag, marker, workdir)
@@ -264,6 +319,7 @@ def run(args):
             time.sleep(4)
             size = client_size(hwnd)
             healthy = colours(hwnd)
+            report["live_at_start"] = is_live(hwnd)
             found = compositor_children(hwnd)
             report.update(
                 parent_rect=rect(hwnd), client_origin=client_origin(hwnd), client=size,
@@ -275,27 +331,36 @@ def run(args):
             displaced = []
             rng = random.Random(args.seed)
             frames_stop = threading.Event()
+            frames_hold = threading.Event()
+            frame_flags = SWP_NOACTIVATE if args.no_framechanged else MOVE_FLAGS
+            frames = None
             if args.animate:
-                threading.Thread(target=animate, args=(hwnd, frames_stop), daemon=True).start()
+                frames = threading.Thread(
+                    target=animate, args=(hwnd, frames_stop, frames_hold, frame_flags, args.skip_iconic), daemon=True)
+                frames.start()
             for i in range(args.cycles):
                 down = args.down if args.down >= 0 else rng.uniform(0.0, 0.7)
                 move = ((40 + 200 * (i % 2), 30), (240 - 200 * (i % 2), 90)) if args.move else None
                 jitter = (i, rng.uniform(0.0, 0.03)) if args.resize else None
-                cycle(hwnd, args.style, down, args.settle, move, jitter, args.iconic, i)
+                cycle(hwnd, args.style, down, args.settle, move, jitter, args.iconic, i, args.gap)
                 now = compositor_children(hwnd)
                 rels = [relative(c, hwnd) for c in now]
                 if rels and all(outside(r, client_size(hwnd)) for r in rels):
-                    seen = colours(hwnd)
-                    displaced.append({"cycle": i, "down": round(down, 3), "rels": rels, "colours": seen})
-                    print(json.dumps(displaced[-1]), flush=True)
-                    time.sleep(1)
-                    frozen = [colours(hwnd), [relative(c, hwnd) for c in now]]
+                    frames_hold.set()
+                    time.sleep(0.5)
+                    entry = {"cycle": i, "down": round(down, 3), "rels": rels,
+                             "origin": client_origin(hwnd), "colours": colours(hwnd), "live": is_live(hwnd)}
+                    displaced.append(entry)
                     for c in now:
                         user32.SetWindowPos(c, None, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
                     time.sleep(0.7)
-                    print(json.dumps({"one_second_later": frozen, "put_back": [relative(c, hwnd) for c in now],
-                                      "colours": colours(hwnd)}), flush=True)
+                    entry["put_back"] = {"colours": colours(hwnd), "live": is_live(hwnd)}
+                    print(json.dumps(entry), flush=True)
+                    frames_hold.clear()
             frames_stop.set()
+            if frames:
+                frames.join(5)
+                report["frames"] = dict(FRAME_COUNTS)
             report["displaced"] = len(displaced)
             report["end_colours"] = colours(hwnd)
             if args.displace:
@@ -338,6 +403,9 @@ def main():
     parser.add_argument("--resize", action="store_true", help="resize the window around each cycle")
     parser.add_argument("--iconic", type=int, default=0, help="moves to make while minimized")
     parser.add_argument("--animate", action="store_true", help="keep making moves on another thread")
+    parser.add_argument("--gap", type=float, default=0.0, help="pause after each move while minimized")
+    parser.add_argument("--no-framechanged", action="store_true", help="frames without the frame recalculation")
+    parser.add_argument("--skip-iconic", action="store_true", help="frames leave out a minimized window")
     parser.add_argument("--load", type=int, default=0, help="busy processes to run alongside")
     parser.add_argument("--displace", action="store_true")
     parser.add_argument("--move", action="store_true", help="move the window around each cycle")
