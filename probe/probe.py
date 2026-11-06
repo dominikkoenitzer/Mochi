@@ -7,6 +7,7 @@ import argparse
 import ctypes
 import glob
 import json
+import multiprocessing
 import os
 import random
 import subprocess
@@ -195,9 +196,24 @@ def place(hwnd, x, y):
     user32.SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
 
 
-def cycle(hwnd, style, down, settle, move=None):
+def burn():
+    while True:
+        pass
+
+
+def resize(hwnd, i):
+    user32.SetWindowPos(hwnd, None, 0, 0, 1000 + 40 * (i % 2), 760 + 30 * (i % 2),
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
+
+
+def cycle(hwnd, style, down, settle, move=None, jitter=None):
     if move:
         place(hwnd, *move[0])
+    if jitter is not None:
+        # A layout change right before the minimize, so the GPU process is
+        # resizing its child while the parent goes away.
+        resize(hwnd, jitter[0])
+        time.sleep(jitter[1])
     if style == "noactivate":
         user32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
         time.sleep(down)
@@ -208,6 +224,8 @@ def cycle(hwnd, style, down, settle, move=None):
         user32.ShowWindow(hwnd, SW_RESTORE)
     if move:
         place(hwnd, *move[1])
+    if jitter is not None:
+        resize(hwnd, jitter[0] + 1)
     time.sleep(settle)
 
 
@@ -235,22 +253,21 @@ def run(args):
             for i in range(args.cycles):
                 down = args.down if args.down >= 0 else rng.uniform(0.0, 0.7)
                 move = ((40 + 200 * (i % 2), 30), (240 - 200 * (i % 2), 90)) if args.move else None
-                cycle(hwnd, args.style, down, args.settle, move)
+                jitter = (i, rng.uniform(0.0, 0.03)) if args.resize else None
+                cycle(hwnd, args.style, down, args.settle, move, jitter)
                 now = compositor_children(hwnd)
                 rels = [relative(c, hwnd) for c in now]
                 if rels and all(outside(r, client_size(hwnd)) for r in rels):
                     seen = colours(hwnd)
                     displaced.append({"cycle": i, "down": round(down, 3), "rels": rels, "colours": seen})
                     print(json.dumps(displaced[-1]), flush=True)
-                    if args.repair:
-                        origin = client_origin(hwnd)
-                        window = rect(hwnd)
-                        for c in now:
-                            user32.SetWindowPos(c, None, window[0] - origin[0], window[1] - origin[1],
-                                                0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
-                        time.sleep(0.5)
-                        print(json.dumps({"repaired": [relative(c, hwnd) for c in now],
-                                          "colours": colours(hwnd)}), flush=True)
+                    time.sleep(1)
+                    frozen = [colours(hwnd), [relative(c, hwnd) for c in now]]
+                    for c in now:
+                        user32.SetWindowPos(c, None, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                    time.sleep(0.7)
+                    print(json.dumps({"one_second_later": frozen, "put_back": [relative(c, hwnd) for c in now],
+                                      "colours": colours(hwnd)}), flush=True)
             report["displaced"] = len(displaced)
             report["end_colours"] = colours(hwnd)
             if args.displace:
@@ -268,11 +285,8 @@ def run(args):
                 time.sleep(3)
                 later_rels = [relative(c, hwnd) for c in now]
                 later = colours(hwnd)
-                origin = client_origin(hwnd)
-                window = rect(hwnd)
                 for c in now:
-                    user32.SetWindowPos(c, None, window[0] - origin[0], window[1] - origin[1], 0, 0,
-                                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+                    user32.SetWindowPos(c, None, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
                 time.sleep(1)
                 report["displace"] = {
                     "before": before, "moved": moved, "moved_rels": moved_rels,
@@ -293,10 +307,19 @@ def main():
     parser.add_argument("--down", type=float, default=0.6, help="seconds minimized; negative picks at random")
     parser.add_argument("--settle", type=float, default=0.4)
     parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--repair", action="store_true")
+    parser.add_argument("--resize", action="store_true", help="resize the window around each cycle")
+    parser.add_argument("--load", type=int, default=0, help="busy processes to run alongside")
     parser.add_argument("--displace", action="store_true")
     parser.add_argument("--move", action="store_true", help="move the window around each cycle")
-    run(parser.parse_args())
+    args = parser.parse_args()
+    burners = [multiprocessing.Process(target=burn, daemon=True) for _ in range(args.load)]
+    for burner in burners:
+        burner.start()
+    try:
+        run(args)
+    finally:
+        for burner in burners:
+            burner.terminate()
 
 
 if __name__ == "__main__":
