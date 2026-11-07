@@ -61,7 +61,7 @@ param(
     [Parameter(Mandatory)][string] $Command,
     [string] $MochiConfig = (Join-Path $env:USERPROFILE 'mochi.json'),
     [string] $HotkeyDir = (Join-Path $env:USERPROFILE '.config\mochi'),
-    [string] $SchemaUrl = 'https://get-mochi.vercel.app/schema.json',
+    [string] $SchemaUrl = 'https://mochi.punds.ch/schema.json',
     [switch] $Apply,
     [switch] $Force
 )
