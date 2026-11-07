@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tag: [v0.1.27]
+        tag: [v0.1.27, v0.1.28]
     name: scan ${{ matrix.tag }}
     env:
       GH_TOKEN: ${{ github.token }}
@@ -77,8 +77,26 @@ jobs:
       - name: Install and uninstall under real-time protection
         shell: pwsh
         run: |
+          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+          "policy keys:"
+          if (Test-Path $policy) { Get-ChildItem $policy -Recurse | ForEach-Object { $_.Name; $_.Property -join ', ' }; (Get-Item $policy).Property -join ', ' } else { "none" }
+          "preference off switches: realtime $((Get-MpPreference).DisableRealtimeMonitoring), behaviour $((Get-MpPreference).DisableBehaviorMonitoring), download $((Get-MpPreference).DisableIOAVProtection)"
+          sc.exe qc WinDefend
+          sc.exe query WinDefend
+          sc.exe qc WdFilter
+          sc.exe query WdFilter
+          fltmc filters
+          if (Test-Path $policy) { Remove-Item $policy -Recurse -Force -ErrorAction Continue }
+          sc.exe config WdFilter start= boot
+          sc.exe start WdFilter
+          "filter start exit $LASTEXITCODE"
           Set-MpPreference -DisableRealtimeMonitoring $false
-          $status = Get-MpComputerStatus
+          foreach ($wait in 1..7) {
+              Start-Sleep -Seconds 8
+              $status = Get-MpComputerStatus
+              if ($status.RealTimeProtectionEnabled) { break }
+          }
+          fltmc filters
           "real-time on: $($status.RealTimeProtectionEnabled), on access $($status.OnAccessProtectionEnabled), behaviour $($status.BehaviorMonitorEnabled), download check $($status.IoavProtectionEnabled)"
           $root = Join-Path $env:RUNNER_TEMP 'scan'
           $live = Join-Path $root 'live'
