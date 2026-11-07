@@ -220,6 +220,14 @@ pub fn start(
         }
         return Ok(());
     }
+    // A watchdog restarts Mochi through this very call, and it fires on a
+    // clock of its own: between an installer's stop and its copy it brought
+    // back the Mochi being replaced, and the copy then failed on files in use.
+    if launch.install_is_running() {
+        bail!(
+            "Mochi is being installed right now, so it was not started. Start it again once the install has finished."
+        );
+    }
     if launch.daemon_is_running() {
         println!("mochi is already running");
         return Ok(());
