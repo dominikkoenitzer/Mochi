@@ -17,6 +17,7 @@ jobs:
     env:
       MOCHI_E2E: "1"
       MOCHI_E2E_CLOAK: "1"
+      MOCHI_E2E_ENGINE_CYCLES: ${{ matrix.side == 'after' && '1100' || '150' }}
     steps:
       - uses: actions/checkout@v7
         with:
