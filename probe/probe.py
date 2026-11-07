@@ -1,4 +1,4 @@
-"""Drives a throwaway Chromium window through minimize and restore and reads
+"""Drives a throwaway browser engine window through minimize and restore and reads
 where its compositor child window ends up.
 
 Runs on a CI runner only. It moves real windows.
@@ -41,6 +41,8 @@ user32.IsZoomed.argtypes = [w.HWND]
 user32.ShowWindowAsync.argtypes = [w.HWND, ctypes.c_int]
 user32.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
 user32.GetForegroundWindow.restype = w.HWND
+user32.FindWindowW.restype = w.HWND
+user32.FindWindowW.argtypes = [w.LPCWSTR, w.LPCWSTR]
 user32.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
 user32.SetWindowPos.argtypes = [w.HWND, w.HWND] + [ctypes.c_int] * 4 + [w.UINT]
@@ -254,8 +256,8 @@ def stop(process):
         print("browser still closing after 30 s", flush=True)
 
 
-def installed_chromium():
-    """The first registered browser that is built on Chromium."""
+def installed_engine_browser():
+    """The first registered browser that is built on the engine."""
     root = r"SOFTWARE\Clients\StartMenuInternet"
     for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
         try:
@@ -271,7 +273,7 @@ def installed_chromium():
             exe = command.strip().strip('"').split('"')[0]
             if glob.glob(os.path.join(os.path.dirname(exe), "*", "*_elf.dll")):
                 return exe
-    raise SystemExit("no Chromium browser registered")
+    raise SystemExit("no browser built on the engine is registered")
 
 
 def place(hwnd, x, y):
@@ -294,6 +296,11 @@ def transition(hwnd, route, command, system):
         user32.ShowWindow(hwnd, command)
     elif route == "posted":
         user32.ShowWindowAsync(hwnd, command)
+    elif route == "shell":
+        tray = user32.FindWindowW("Shell_TrayWnd", None)
+        if not tray:
+            raise SystemExit("no shell on this machine")
+        user32.PostMessageW(tray, 0x111, 419 if system == SC_MINIMIZE else 416, 0)
     else:
         user32.PostMessageW(hwnd, WM_SYSCOMMAND, system, 0)
 
@@ -302,7 +309,10 @@ def wait_iconic(hwnd, wanted):
     end = time.time() + 2
     while bool(user32.IsIconic(hwnd)) != wanted and time.time() < end:
         time.sleep(0.002)
-    return bool(user32.IsIconic(hwnd)) == wanted
+    if bool(user32.IsIconic(hwnd)) != wanted:
+        FRAME_COUNTS["missed"] = FRAME_COUNTS.get("missed", 0) + 1
+        return False
+    return True
 
 
 def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0, gap=0.0, route="direct"):
@@ -336,7 +346,7 @@ def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0, g
 
 
 def run(args):
-    args.browser = args.browser or installed_chromium()
+    args.browser = args.browser or installed_engine_browser()
     report = {"browser": os.path.basename(args.browser), "flags": args.flag, "style": args.style,
               "cycles": args.cycles, "iconic": args.iconic, "gap": args.gap, "animate": args.animate, "resize": args.resize,
               "no_framechanged": args.no_framechanged, "skip_iconic": args.skip_iconic,
@@ -412,6 +422,7 @@ def run(args):
                 report["landed"] = rect(hwnd) == (40 + 300 * (last % 2), 30 + 40 * (last % 2),
                                                   1040 + 240 * (last % 2), 790 - 0 * (last % 2))
             report["displaced"] = len(displaced)
+            report["missed"] = FRAME_COUNTS.get("missed", 0)
             report["end_colours"] = colours(hwnd)
             if args.displace:
                 # The state itself, made on purpose: is it a blank, and does
@@ -457,7 +468,7 @@ def main():
     parser.add_argument("--no-framechanged", action="store_true", help="frames without the frame recalculation")
     parser.add_argument("--skip-iconic", action="store_true", help="frames leave out a minimized window")
     parser.add_argument("--posted-frames", action="store_true", help="frames run on the thread that owns the window")
-    parser.add_argument("--route", choices=("direct", "posted", "syscommand"), default="direct",
+    parser.add_argument("--route", choices=("direct", "posted", "syscommand", "shell"), default="direct",
                         help="how the minimize and the restore reach the window")
     parser.add_argument("--maximized", action="store_true", help="start from a maximized window")
     parser.add_argument("--load", type=int, default=0, help="busy processes to run alongside")

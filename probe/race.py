@@ -1,4 +1,4 @@
-"""Three processes in the layout a Chromium window has: one owns a top level
+"""Three processes in the layout a browser engine window has: one owns a top level
 window, one owns a child window on a thread of its own and resizes it from
 another thread, and this one minimizes and moves the top level window.
 
