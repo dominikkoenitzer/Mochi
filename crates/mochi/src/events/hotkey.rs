@@ -18,7 +18,7 @@
 //! binding goes quiet until Mochi restarts. So the hook thread also reads the
 //! keyboard's raw input, which reaches it whether the hook is installed or
 //! not, and installs the hook again when keys arrive that the hook never saw.
-//! See [`HookWatch`].
+//! `HookWatch` decides when.
 //!
 //! **Swallow nothing that was not asked for.** A key press is only ever
 //! withheld from the desktop when it matches a binding exactly. Every other key,
