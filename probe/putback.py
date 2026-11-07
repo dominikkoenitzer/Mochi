@@ -41,9 +41,16 @@ def activating():
          "                tracing::debug!(%hwnd, error = %e, \"could not restore a redrawn window\");")
 
 
+def no_second_pass():
+    swap("crates/mochi/src/wm.rs",
+         "                self.minimized.remove(&hwnd);\n                self.window_appeared(hwnd);\n",
+         "                self.minimized.remove(&hwnd);\n")
+
+
 def parked_start():
     swap("crates/mochi/src/visuals.rs", "Ok(info) if info.minimized => {", "Ok(info) if false && info.minimized => {")
 
 
-{"everything": everything, "posted": posted, "activating": activating, "parked_start": parked_start}[sys.argv[1]]()
+{"everything": everything, "posted": posted, "activating": activating, "parked_start": parked_start,
+ "no_second_pass": no_second_pass}[sys.argv[1]]()
 print("put back:", sys.argv[1])

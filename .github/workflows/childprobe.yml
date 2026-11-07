@@ -112,6 +112,18 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
           git checkout -- .
           exit 0
+      - name: No second layout pass fails its test
+        working-directory: repo
+        env:
+          MOCHI_E2E: "1"
+          MOCHI_E2E_CLOAK: "1"
+        run: |
+          python -I ../scratch/probe/putback.py no_second_pass
+          cargo build --locked -p mochi-testbed --bin mochi-testwin
+          cargo test --locked -p mochi --test e2e_testbed a_restored_engine_window_ends_exactly_on_its_tile -- --test-threads 1 --nocapture
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
 
   residual:
     runs-on: windows-latest
