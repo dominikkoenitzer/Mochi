@@ -95,7 +95,7 @@ jobs:
 
   mutations:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 57
     name: bug put back
     env:
       MOCHI_E2E: "1"
@@ -157,8 +157,77 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
           git checkout -- .
           exit 0
+      - name: A late minimize taken for the user's fails its tests
+        working-directory: repo
+        run: |
+          python -I ../scratch/probe/putback.py late_minimize
+          cargo test --locked -p mochi --lib --no-run
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --lib a_minimize_reporting_in_after_the_redraw_keeps_the_tile
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          cargo test --locked -p mochi --lib a_minimize_reporting_in_after_the_switch_back_keeps_the_tile
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
+      - name: A move over by the clock alone fails its test
+        working-directory: repo
+        run: |
+          python -I ../scratch/probe/putback.py stale_read
+          cargo test --locked -p mochi --lib --no-run
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --lib a_window_that_has_not_run_its_move_is_not_taken_for_settled
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
+      - name: One look at a window fails its test
+        working-directory: repo
+        run: |
+          python -I ../scratch/probe/putback.py torn_read
+          cargo test --locked -p mochi --lib --no-run
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --lib a_restore_landing_between_two_reads_is_not_measured
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
+      - name: A queued hide fails its test
+        working-directory: repo
+        run: |
+          python -I ../scratch/probe/putback.py posted_hide
+          cargo build --locked -p mochi-testbed --bin mochi-testwin
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --test e2e_testbed --no-run
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --test e2e_testbed hiding_and_showing_an_engine_window_have_landed_when_the_call_returns -- --test-threads 1 --nocapture
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
+      - name: A minimize that hands the keyboard on fails its test
+        working-directory: repo
+        run: |
+          python -I ../scratch/probe/putback.py holder_minimize
+          cargo build --locked -p mochi-testbed --bin mochi-testwin
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --test e2e_testbed --no-run
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --test e2e_testbed a_redrawn_window_keeps_the_keyboard_it_holds -- --test-threads 1 --nocapture
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
+      - name: A restore to the normal size fails its test
+        working-directory: repo
+        run: |
+          python -I ../scratch/probe/putback.py zoom_lost
+          cargo build --locked -p mochi-testbed --bin mochi-testwin
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --test e2e_testbed --no-run
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --test e2e_testbed a_redraw_keeps_a_maximized_engine_window_maximized -- --test-threads 1 --nocapture
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
 
   residual:
+    if: false
     runs-on: windows-latest
     timeout-minutes: 45
     strategy:
