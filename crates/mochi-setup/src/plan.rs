@@ -15,6 +15,10 @@ pub const ENV_KEY: &str = "Environment";
 pub const WATCHDOG_TASK: &str = "MochiWatchdog";
 pub const SETUP_NAME: &str = "Mochi-Setup.exe";
 pub const BINARIES: [&str; 2] = ["mochi.exe", "mochic.exe"];
+/// Held open in the bin folder while the binaries are stopped and replaced;
+/// `mochic start` refuses to start Mochi while it is held, so no watchdog can
+/// bring back the Mochi being replaced. mochic reads the same name.
+pub const INSTALL_LOCK: &str = "install.lock";
 
 /// Every place the setup reads or writes, worked out from the folders
 /// Windows names for the user.

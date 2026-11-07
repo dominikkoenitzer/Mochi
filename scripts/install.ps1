@@ -110,6 +110,8 @@ $EnvValueName = 'Path'
 # table rather than separate variables, because a function can change an
 # entry of a table it can see but cannot assign a variable of this scope.
 $acquired = @{ SourceDir = $null; TempWork = $null }
+# The install lock while it is held, see Lock-Install.
+$held = @{ Lock = $null }
 
 # Mochi reads either name from that directory, so a summary that always
 # printed the first one would point at a file that is not there.
@@ -751,7 +753,45 @@ function Remove-EmptyBinDir {
     }
 }
 
+# A watchdog, the MochiWatchdog task or one a user set up, brings Mochi back
+# through 'mochic start' on a clock of its own. Run between the stop and the
+# copy, it restarted the Mochi being replaced and the copy failed on files in
+# use. 'mochic start' refuses while this file in the bin directory is held.
+# It is shared with nobody and goes with its last handle, so a run that dies
+# leaves nothing behind. Mochi-Setup holds the same file.
+function Lock-Install {
+    if ($WhatIfPreference -or -not (Test-Path -LiteralPath $BinDir)) { return }
+    $path = Join-Path $BinDir 'install.lock'
+    try {
+        $held.Lock = [System.IO.FileStream]::new(
+            $path,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None,
+            1,
+            [System.IO.FileOptions]::DeleteOnClose)
+    } catch {
+        $problem = $_.Exception
+        while ($problem.InnerException -and $problem -isnot [System.IO.IOException]) {
+            $problem = $problem.InnerException
+        }
+        # ERROR_SHARING_VIOLATION: another install holds it.
+        if ($problem -is [System.IO.IOException] -and ($problem.HResult -band 0xFFFF) -eq 32) {
+            throw "Another Mochi install is running in $BinDir. Let it finish, then run this again."
+        }
+        Write-Detail "could not hold $path ($($problem.Message)), a watchdog may start Mochi during the install"
+    }
+}
+
+function Unlock-Install {
+    if ($held.Lock) {
+        $held.Lock.Dispose()
+        $held.Lock = $null
+    }
+}
+
 function Install-Mochi {
+    Lock-Install
     if ($Version) {
         Save-ReleaseAsset -Tag $Version
     } elseif (-not (Find-RepoRoot)) {
@@ -831,6 +871,7 @@ function Install-Mochi {
             Write-Detail "$line"
         }
     }
+    Unlock-Install
     # Only now. Throwing the download away before the installed binaries had
     # proven they run left a broken install in place with nothing to retry
     # from, and autostart pointing straight at it.
@@ -989,6 +1030,10 @@ if ($Uninstall) {
     Uninstall-Mochi
     Clear-InstallRoot
 } else {
-    Install-Mochi
+    try {
+        Install-Mochi
+    } finally {
+        Unlock-Install
+    }
 }
 } @args
