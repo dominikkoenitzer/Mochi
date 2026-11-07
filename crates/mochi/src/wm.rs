@@ -6243,6 +6243,45 @@ mod tests {
     }
 
     #[test]
+    fn a_minimized_window_stays_down_whatever_it_reports_until_it_is_restored() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        assert!(!wm.state().is_managed(WindowId(2)));
+        platform.history.lock().unwrap().clear();
+
+        // A page with a clock in its title renames its window every second,
+        // and a player renames its window on every song.
+        platform.windows.lock().unwrap()[1].title = "Two, renamed".into();
+        for kind in [
+            WindowEventKind::NameChange,
+            WindowEventKind::Shown,
+            WindowEventKind::Uncloaked,
+            WindowEventKind::Foreground,
+        ] {
+            wm.on_window_event(kind, Hwnd(2));
+            assert!(
+                !wm.state().is_managed(WindowId(2)),
+                "{} took a minimized window back into the layout",
+                kind.as_str()
+            );
+        }
+        assert!(
+            !platform
+                .history
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(hwnd, _)| *hwnd == Hwnd(2)),
+            "a minimized window was laid out, which restores it"
+        );
+
+        platform.windows.lock().unwrap()[1].minimized = false;
+        wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(2));
+        assert!(wm.state().is_managed(WindowId(2)));
+    }
+
+    #[test]
     fn a_window_that_only_gets_its_title_later_is_managed_on_the_name_change() {
         let mut late = window(3, "");
         late.title = String::new();
