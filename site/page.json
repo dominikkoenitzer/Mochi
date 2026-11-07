@@ -164,11 +164,9 @@
     "code": "{\n  \"mcpServers\": {\n    \"mochi\": {\n      \"command\": \"C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Programs\\\\Mochi\\\\bin\\\\mochic.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}"
   },
   "new": {
-    "version": "0.1.28",
+    "version": "0.1.29",
     "items": [
-      "Moving a browser or web-based app while it is minimized or restored no longer leaves its window blank.",
-      "The redraw after a display change no longer takes the keyboard from the window you are in.",
-      "<code>mochic state --exe</code> and <code>--title</code> pick out windows by program and title, and a window that carries the <code>NoTiling</code> property stays out of the layout."
+      "A minimized window stays down until you restore it, even when its program keeps changing the title."
     ]
   },
   "requirements": [
