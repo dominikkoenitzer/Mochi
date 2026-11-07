@@ -140,6 +140,7 @@ impl SpawnRequest {
             owned: self.owned,
             no_title: self.no_title,
             menu_bar: self.menu_bar,
+            engine_class: false,
             taskbar: self.taskbar,
         }
     }

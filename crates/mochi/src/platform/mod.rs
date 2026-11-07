@@ -88,6 +88,8 @@ pub enum ShowState {
     Restore,
     /// Minimize the window.
     Minimize,
+    /// Minimize the window and leave the activation where it is.
+    MinimizeNoActivate,
     /// Maximize the window.
     Maximize,
     /// Show the window without activating it.
@@ -227,6 +229,9 @@ pub trait Platform: Send + Sync {
     // ---- writes ---------------------------------------------------------
 
     /// WRITE. Moves and resizes several windows in one `DeferWindowPos` batch.
+    ///
+    /// A window of the browser engine leaves the batch: its move is posted to
+    /// its own thread, so it may not have landed yet when this returns.
     fn set_positions(&self, placements: &[WindowPlacement]) -> Result<()>;
 
     /// WRITE. Moves and resizes one window.
