@@ -13,9 +13,21 @@ use super::*;
 #[test]
 fn an_elevated_window_is_left_alone_and_the_rest_tile_around_it() {
     skip_unless_allowed!("an_elevated_window_is_left_alone_and_the_rest_tile_around_it");
+    an_elevated_window_is_left_alone(false);
+}
+
+/// A window of the browser engine is moved by a posted call, so what keeps it
+/// out is its rank, read before any move, and not a refusal coming back.
+#[test]
+fn an_elevated_engine_window_is_left_alone_and_the_rest_tile_around_it() {
+    skip_unless_allowed!("an_elevated_engine_window_is_left_alone_and_the_rest_tile_around_it");
+    an_elevated_window_is_left_alone(true);
+}
+
+fn an_elevated_window_is_left_alone(engine_class: bool) {
     if !integrity::current_is_high() {
         eprintln!(
-            "skipping an_elevated_window_is_left_alone_and_the_rest_tile_around_it: \
+            "skipping the elevated window test: \
              this process is not elevated, so nothing it opens outranks a daemon it starts"
         );
         return;
@@ -31,6 +43,7 @@ fn an_elevated_window_is_left_alone_and_the_rest_tile_around_it() {
     // two ordinary ones.
     let admin = TestWindows::spawn_with(&SpawnOptions {
         title_prefix: "Admin".to_owned(),
+        engine_class,
         ..SpawnOptions::new(1, 0)
     })
     .expect("could not spawn the elevated window");
@@ -453,12 +466,13 @@ mod integrity {
             let log = super::temp_dir().join(format!("mochi-{tag}.log"));
             let daemon = super::daemon_binary().ok_or("no mochi binary")?;
             let line = format!(
-                "cmd.exe /d /c \"set RUST_LOG=debug&& \"{}\" {} {} --config \"{}\" --no-hotkeys > \"{}\" 2>&1\"",
+                "cmd.exe /d /c \"set RUST_LOG=debug&& \"{}\" {flag} {} {flag} {} --config \"{}\" --no-hotkeys > \"{}\" 2>&1\"",
                 daemon.display(),
-                mochi_testbed::DAEMON_MANAGE_FLAG,
                 mochi_testbed::TEST_WINDOW_CLASS,
+                mochi_testbed::TEST_ENGINE_WINDOW_CLASS,
                 config.display(),
-                log.display()
+                log.display(),
+                flag = mochi_testbed::DAEMON_MANAGE_FLAG,
             );
             let shell = spawn_medium(&line)?;
             let lowered = Lowered { shell, log };

@@ -41,6 +41,11 @@ pub use info::{MonitorInfo, TestWindowInfo, WS_EX_LAYERED_BIT, WS_EX_TOOLWINDOW_
 /// know about the testbed.
 pub const TEST_WINDOW_CLASS: &str = "MochiTestWindow";
 
+/// The class of a window spawned with [`SpawnOptions::engine_class`]: the
+/// prefix every window of the browser engine carries, and nothing else of it.
+#[cfg(windows)]
+pub const TEST_ENGINE_WINDOW_CLASS: &str = "Chrome_WidgetWin_MochiTest";
+
 /// The class of the hidden owner window behind a `spawn --owned` popup. It is
 /// never shown and never listed, and it is deliberately not
 /// [`TEST_WINDOW_CLASS`] so that the desktop wide listing cannot return it.
@@ -73,7 +78,7 @@ pub use win32::{
     window_exists, window_info, window_owner, window_rect, windows_of_class,
 };
 #[cfg(windows)]
-pub use window::{SpawnOptions, TestWindow, TestWindows};
+pub use window::{SpawnOptions, TestWindow, TestWindows, stall_window};
 
 #[cfg(test)]
 mod tests {

@@ -39,6 +39,13 @@ const fn hwnd_of(handle: WindowHandle) -> Hwnd {
     Hwnd(handle.0)
 }
 
+/// A move an animation was given.
+#[derive(Debug, Clone, Copy)]
+struct Moving {
+    until: std::time::Instant,
+    to: Rect,
+}
+
 /// Everything [`Visuals::update`] needs for one workspace: which window has
 /// the focus, every visible window with the rectangle and [`BorderKind`] it
 /// should be drawn with, and the subset that should be faded.
@@ -69,7 +76,11 @@ pub struct Visuals {
     /// except when it is only there in passing: an animation still on its way
     /// to the previous layout would carry it off again, so it is handed a job
     /// that replaces that one.
-    moving: Mutex<HashMap<Hwnd, std::time::Instant>>,
+    ///
+    /// The time alone cannot say it is over. A busy window sits on moves posted
+    /// to it for as long as it likes and reads as where it was until then, so a
+    /// move is over once the time is up and the window has reached its target.
+    moving: Mutex<HashMap<Hwnd, Moving>>,
     /// Windows this pass has faded, mirrored into `hidden` so a crash undoes
     /// them; kept here so the next pass knows what to un-mirror.
     faded: BTreeSet<Hwnd>,
@@ -180,8 +191,8 @@ impl Visuals {
                     .collect();
                 // Borders first, and the order is the whole point. This one
                 // only drops a message in the border thread's channel and
-                // returns, while `set_positions` is synchronous and blocks on
-                // each target application's message pump - `SWP_FRAMECHANGED`
+                // returns, while `set_positions` is synchronous for an ordinary
+                // window and blocks on its application's message pump - `SWP_FRAMECHANGED`
                 // makes every one of them recalculate and repaint its frame
                 // before the call comes back. Moving the window first meant
                 // the border could not even begin to follow until that had
@@ -221,7 +232,9 @@ impl Visuals {
                 .moving
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            moving.retain(|_, until| *until > now);
+            moving.retain(|hwnd, move_| {
+                move_.until > now || placements.iter().any(|(target, _)| target == hwnd)
+            });
             let jobs: Vec<_> = placements
                 .iter()
                 .filter_map(|&(target, to)| {
@@ -231,6 +244,14 @@ impl Visuals {
                     // frame, so starting from the window rect would have the
                     // window jump outward by that border and ease back.
                     match self.platform.window_info(target) {
+                        // Still minimized: the restore is posted to the window's
+                        // own thread and has not run yet. A minimized window's
+                        // rectangle is the spot Windows parks it at, a whole
+                        // screen away, so it starts at its target instead of
+                        // flying in from there.
+                        Ok(info) if info.minimized => {
+                            Some(self.animation.job(handle(target), to, to))
+                        }
                         Ok(info) => {
                             let from = info.visible_frame();
                             // A window already at its target is not animated.
@@ -243,7 +264,10 @@ impl Visuals {
                             // exactly where they were, so this is most of the
                             // batch. The border path already refuses the same
                             // work for a border whose rectangle did not change.
-                            if from == to && !moving.contains_key(&target) {
+                            let under_way = moving
+                                .get(&target)
+                                .is_some_and(|move_| move_.until > now || move_.to != from);
+                            if from == to && !under_way {
                                 return None;
                             }
                             Some(self.animation.job(handle(target), from, to))
@@ -263,7 +287,7 @@ impl Visuals {
             // A frame late is still moving, so the slack is a few frames.
             let until = now + self.animation.duration() + std::time::Duration::from_millis(100);
             for job in &jobs {
-                moving.insert(hwnd_of(job.handle), until);
+                moving.insert(hwnd_of(job.handle), Moving { until, to: job.to });
             }
             drop(moving);
             if let Err(e) = animator.animate(jobs) {
@@ -674,6 +698,28 @@ mod tests {
         .expect("the animation block has to load")
     }
 
+    /// A restore posted to the window's own thread may not have run when the
+    /// layout that follows it starts, and the window must not fly in from the
+    /// spot Windows parks minimized windows at.
+    #[test]
+    fn a_window_still_minimized_starts_at_its_target() {
+        let target = Hwnd(0x1234);
+        let parked = Rect::new(-32000, -32000, -31840, -31972);
+        let mut info = WindowInfo::placeholder(target);
+        info.rect = parked;
+        info.frame = parked;
+        info.minimized = true;
+        let platform = Arc::new(RecordingPlatform::new(info));
+        let hidden = Arc::new(Mutex::new(Hidden::default()));
+        let mut visuals = Visuals::new(Arc::clone(&platform) as Arc<dyn Platform>, hidden);
+        visuals.set_settings(&animated_config());
+
+        let tile = Rect::new(1000, 100, 1800, 700);
+        visuals.apply_layout(&[(target, tile)]);
+
+        assert_eq!(platform.first_move().rect, tile);
+    }
+
     /// The first frame of an animated move is where the user already sees the
     /// window. Starting from `GetWindowRect` instead makes the platform
     /// compensate for the invisible border a second time, so every move begins
@@ -851,6 +897,33 @@ mod tests {
         assert_eq!(
             last.rect, SEEN,
             "the window ended at the target of the layout that was replaced"
+        );
+        visuals.stop();
+    }
+
+    /// A busy window holds on to its queued frames for longer than the
+    /// animation lasts, and it still reads as being where it was. A layout that
+    /// wants it there has to overrule the frames it has yet to run.
+    #[test]
+    fn a_window_that_has_not_run_its_move_is_not_taken_for_settled() {
+        let target = Hwnd(0x1234);
+        let mut info = WindowInfo::placeholder(target);
+        info.rect = WINDOW_RECT;
+        info.frame = SEEN;
+        let platform = Arc::new(RecordingPlatform::new(info));
+        let hidden = Arc::new(Mutex::new(Hidden::default()));
+        let mut visuals = Visuals::new(Arc::clone(&platform) as Arc<dyn Platform>, hidden);
+        visuals.set_settings(&animated_config());
+
+        visuals.apply_layout(&[(target, Rect::new(1000, 100, 1800, 700))]);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        visuals.apply_layout(&[(target, SEEN)]);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        assert_eq!(
+            last_move(&platform).rect,
+            SEEN,
+            "the window was left to run a move nobody wants any more"
         );
         visuals.stop();
     }

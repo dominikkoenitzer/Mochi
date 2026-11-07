@@ -2552,6 +2552,8 @@ fn a_long_session_of_every_command_never_loses_a_window() {
 mod borders;
 #[path = "e2e_testbed/elevated.rs"]
 mod elevated;
+#[path = "e2e_testbed/engine.rs"]
+mod engine;
 #[path = "e2e_testbed/monitors.rs"]
 mod monitors;
 #[path = "e2e_testbed/performance.rs"]
