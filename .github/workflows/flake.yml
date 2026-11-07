@@ -10,12 +10,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tag: [v0.1.27, v0.1.28]
+        tag: [v0.1.28]
+        install: [none, setup]
         round: [1, 2]
-        include:
-          - tag: v0.1.28
-            round: 3
-    name: scan ${{ matrix.tag }} round ${{ matrix.round }}
+    name: scan ${{ matrix.tag }} install ${{ matrix.install }} round ${{ matrix.round }}
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ matrix.tag }}
@@ -106,6 +104,10 @@ jobs:
           if (-not $caught) { "real-time control missed, so a clean install proves nothing"; exit 1 }
           "REALTIME_PROVED=yes" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+          if ('${{ matrix.install }}' -eq 'none') {
+              foreach ($wait in 1..7) { Start-Sleep -Seconds 57; "still here $wait" }
+              exit 0
+          }
           $setup = Join-Path $live 'Mochi-Setup.exe'
           Copy-Item (Join-Path $root 'assets\Mochi-Setup.exe') $setup
           Start-Sleep -Seconds 13
