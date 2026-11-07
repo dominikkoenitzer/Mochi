@@ -10,8 +10,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [childrect, main]
-    name: rounds ${{ matrix.side }}
+        include:
+          - cell: childrect all
+            side: childrect
+            tests: "elevated::"
+          - cell: childrect without the new test
+            side: childrect
+            tests: "elevated:: --skip an_elevated_engine_window"
+          - cell: childrect alone
+            side: childrect
+            tests: "elevated::with_the_setting_on"
+          - cell: main all
+            side: main
+            tests: "elevated::"
+          - cell: main alone
+            side: main
+            tests: "elevated::with_the_setting_on"
+    name: rounds ${{ matrix.cell }}
     env:
       MOCHI_E2E: "1"
       MOCHI_E2E_CLOAK: "1"
@@ -23,6 +38,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rounds-${{ matrix.side }}
+      - name: Count the foreground answers
+        run: |
+          $note = @'
+          import pathlib
+          path = pathlib.Path("crates/mochi-testbed/src/win32.rs")
+          text = path.read_bytes().decode()
+          nl = "\r\n" if "\r\n" in text else "\n"
+          for old, new in [
+              ("    let deadline = Deadline::new(timeout);\n    loop {\n        if front() == hwnd {",
+               "    let deadline = Deadline::new(timeout);\n    let (mut asks, mut granted) = (0u32, 0u32);\n    loop {\n        if front() == hwnd {"),
+              ("to come to the front after {:?}, the foreground is 0x{:x}\",",
+               "to come to the front after {:?}, the foreground is 0x{:x}, asked {asks} granted {granted}\","),
+              ("        ask(hwnd)?;\n",
+               "        asks += 1;\n        if ask(hwnd)? {\n            granted += 1;\n        }\n"),
+          ]:
+              old, new = old.replace("\n", nl), new.replace("\n", nl)
+              assert old in text, old
+              text = text.replace(old, new)
+          path.write_bytes(text.encode())
+          '@
+          Set-Content -Path "$env:TEMP\note.py" -Value ($note -replace '(?m)^          ', '')
+          python -I "$env:TEMP\note.py"
+          if ($LASTEXITCODE -ne 0) { throw "could not patch" }
       - name: Build
         run: |
           git log -1 --format=%H
@@ -30,15 +68,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "did not compile" }
           cargo test --locked -p mochi --test e2e_testbed --no-run
           if ($LASTEXITCODE -ne 0) { throw "did not compile" }
-      - name: The elevated module 21 times
+      - name: The rounds
         run: |
           $failed = 0
-          foreach ($round in 1..21) {
-            cargo test --locked -p mochi --test e2e_testbed elevated:: -- --test-threads 1 --nocapture
+          $tests = '${{ matrix.tests }}' -split ' '
+          foreach ($round in 1..59) {
+            cargo test --locked -p mochi --test e2e_testbed -- @tests --test-threads 1 --nocapture
             if ($LASTEXITCODE -ne 0) {
               $failed += 1
               "round $round failed"
+              Get-Content "$env:TEMP\mochi-e2e\mochi-elevated-on.log" -Tail 37
+              "end of the log of round $round"
             }
           }
-          "elevated module on ${{ matrix.side }}: $failed of 21 rounds failed"
+          "cell ${{ matrix.cell }}: $failed of 59 rounds failed"
           exit 0
