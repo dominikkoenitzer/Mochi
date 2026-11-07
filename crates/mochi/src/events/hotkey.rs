@@ -247,7 +247,7 @@ impl HookWatch {
         }
         self.unanswered = None;
         self.asked = true;
-        false
+        true
     }
 
     /// Another window came to the front.
