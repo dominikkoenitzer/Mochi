@@ -77,26 +77,12 @@ jobs:
       - name: Install and uninstall under real-time protection
         shell: pwsh
         run: |
-          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
-          "policy keys:"
-          if (Test-Path $policy) { Get-ChildItem $policy -Recurse | ForEach-Object { $_.Name; $_.Property -join ', ' }; (Get-Item $policy).Property -join ', ' } else { "none" }
-          "preference off switches: realtime $((Get-MpPreference).DisableRealtimeMonitoring), behaviour $((Get-MpPreference).DisableBehaviorMonitoring), download $((Get-MpPreference).DisableIOAVProtection)"
-          sc.exe qc WinDefend
-          sc.exe query WinDefend
-          sc.exe qc WdFilter
-          sc.exe query WdFilter
-          fltmc filters
-          if (Test-Path $policy) { Remove-Item $policy -Recurse -Force -ErrorAction Continue }
-          sc.exe config WdFilter start= boot
-          sc.exe start WdFilter
-          "filter start exit $LASTEXITCODE"
           Set-MpPreference -DisableRealtimeMonitoring $false
           foreach ($wait in 1..7) {
               Start-Sleep -Seconds 8
               $status = Get-MpComputerStatus
               if ($status.RealTimeProtectionEnabled) { break }
           }
-          fltmc filters
           "real-time on: $($status.RealTimeProtectionEnabled), on access $($status.OnAccessProtectionEnabled), behaviour $($status.BehaviorMonitorEnabled), download check $($status.IoavProtectionEnabled)"
           $root = Join-Path $env:RUNNER_TEMP 'scan'
           $live = Join-Path $root 'live'
@@ -104,10 +90,16 @@ jobs:
           $parts = 'WDVPIVAlQEFQWzRcUFpYNTQoUF4pN0NDKTd9JEVJ', 'Q0FSLVNUQU5EQVJELUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo='
           $file = Join-Path $live 'control.txt'
           try { [IO.File]::WriteAllBytes($file, [Convert]::FromBase64String($parts -join '')) } catch { "control write refused: $($_.Exception.Message)" }
-          Start-Sleep -Seconds 13
-          $caught = -not (Test-Path $file)
-          "real-time control caught: $caught"
+          if (-not $status.RealTimeProtectionEnabled) { "real-time protection did not start, so a clean install proves nothing"; exit 1 }
+          $caught = $false
+          foreach ($wait in 1..7) {
+              Start-Sleep -Seconds 8
+              $seen = @(Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -ErrorAction SilentlyContinue | Where-Object { $_.Id -eq 1116 -and $_.Message -match 'EICAR' -and $_.Message -match 'live.control' })
+              if ($seen.Count -gt 0) { $caught = $true; break }
+          }
+          "real-time control caught: $caught, file still there: $(Test-Path $file)"
           if (-not $caught) { "real-time control missed, so a clean install proves nothing"; exit 1 }
+          "REALTIME_PROVED=yes" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
           $setup = Join-Path $live 'Mochi-Setup.exe'
           Copy-Item (Join-Path $root 'assets\Mochi-Setup.exe') $setup
@@ -145,10 +137,11 @@ jobs:
           $ids = 1006, 1007, 1008, 1009, 1015, 1116, 1117, 1118, 1119
           $events = @(Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -ErrorAction SilentlyContinue | Where-Object { $ids -contains $_.Id })
           foreach ($entry in $events) { "--- $($entry.TimeCreated.ToString('HH:mm:ss')) event $($entry.Id)"; ($entry.Message -split "`n" | Where-Object { $_ -match 'Name:|Path:|Severity:|Detection Source:|Detection Origin:|Process Name:' }) -join "`n" }
-          $real = @($events | Where-Object { $_.Message -notmatch 'EICAR' })
+          $other = @($events | Where-Object { $_.Message -notmatch 'EICAR' })
+          $real = @($other | Where-Object { $_.Message -match 'mochi|_temp.scan' })
           "threat history:"
           Get-MpThreatDetection -ErrorAction SilentlyContinue | Format-List ThreatID,Resources,ProcessName,InitialDetectionTime
           $status = Get-MpComputerStatus
-          "verdict ${env:TAG}: on-demand flagged ${env:ON_DEMAND_HITS}, real-time lost [${env:REALTIME_LOST}], events other than the control $($real.Count), cloud check exit ${env:CLOUD_EXIT}, signatures $($status.AntivirusSignatureVersion), engine $($status.AMEngineVersion)"
-          if ($env:ON_DEMAND_HITS -ne '0' -or $env:REALTIME_LOST -or $real.Count -gt 0) { exit 1 }
+          "verdict ${env:TAG}: on-demand flagged ${env:ON_DEMAND_HITS}, real-time lost [${env:REALTIME_LOST}], events on Mochi $($real.Count), events on other files $($other.Count - $real.Count), real-time proved ${env:REALTIME_PROVED}, cloud check exit ${env:CLOUD_EXIT}, signatures $($status.AntivirusSignatureVersion), engine $($status.AMEngineVersion)"
+          if ($env:ON_DEMAND_HITS -ne '0' -or $env:REALTIME_LOST -or $real.Count -gt 0 -or $env:REALTIME_PROVED -ne 'yes') { exit 1 }
           exit 0
