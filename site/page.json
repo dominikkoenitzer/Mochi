@@ -164,9 +164,9 @@
     "code": "{\n  \"mcpServers\": {\n    \"mochi\": {\n      \"command\": \"C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Programs\\\\Mochi\\\\bin\\\\mochic.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}"
   },
   "new": {
-    "version": "0.1.30",
+    "version": "0.1.31",
     "items": [
-      "When Windows quietly drops the keyboard hook, Mochi notices as you type and puts it back, so your shortcuts keep working."
+      "Mochi no longer starts again in the middle of an update, so the install can always replace its files."
     ]
   },
   "requirements": [
