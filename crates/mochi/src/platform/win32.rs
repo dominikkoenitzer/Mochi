@@ -38,11 +38,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetForegroundWindow, GetPropW, GetShellWindow, GetWindow, GetWindowLongPtrW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP,
     HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, IsZoomed, LWA_ALPHA, MINMAXINFO,
-    PostMessageW, SET_WINDOW_POS_FLAGS, SM_CXMAXTRACK, SM_CXMINTRACK, SM_CYMAXTRACK, SM_CYMINTRACK,
-    SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
-    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SendMessageTimeoutW, SetCursorPos, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE, WM_GETMINMAXINFO, WindowFromPoint,
+    PostMessageW, SET_WINDOW_POS_FLAGS, SHOW_WINDOW_CMD, SM_CXMAXTRACK, SM_CXMINTRACK,
+    SM_CYMAXTRACK, SM_CYMINTRACK, SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, SW_HIDE, SW_MAXIMIZE,
+    SW_MINIMIZE, SW_RESTORE, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageTimeoutW,
+    SetCursorPos, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, ShowWindowAsync, WM_CLOSE, WM_GETMINMAXINFO, WindowFromPoint,
 };
 
 use super::appview::{self, ViewCloakError};
@@ -198,7 +199,7 @@ impl Win32Platform {
                 continue;
             }
             let h = hwnd(p.hwnd);
-            let target = compensate_invisible_border(window_rect(h), dwm_frame(h), p.rect);
+            let target = outer_rect(h, p.rect);
             let (insert_after, z_flags) = z_order_args(p.z);
             match unsafe {
                 DeferWindowPos(
@@ -244,18 +245,24 @@ impl Win32Platform {
         Ok(Batch::Done)
     }
 
-    /// Fallback for [`Platform::set_positions`] when a batch has to be abandoned.
+    /// Moves windows one call each, with `extra` added to the flags of every call.
     ///
-    /// Slower and not atomic, but it moves the windows it can and reports the
-    /// ones it cannot instead of losing the whole layout.
-    fn set_positions_individually(&self, placements: &[WindowPlacement]) -> Result<()> {
+    /// The fallback when a batch has to be abandoned, slower and not atomic,
+    /// but it moves the windows it can and reports the ones it cannot instead
+    /// of losing the whole layout. Also how a window [`holds_gpu_child`] is
+    /// moved, because a batch cannot be posted.
+    fn set_positions_individually(
+        &self,
+        placements: &[WindowPlacement],
+        extra: SET_WINDOW_POS_FLAGS,
+    ) -> Result<()> {
         let mut failed = 0usize;
         for p in placements {
             if !is_window(p.hwnd) || is_denied(p.hwnd) {
                 continue;
             }
             let h = hwnd(p.hwnd);
-            let target = compensate_invisible_border(window_rect(h), dwm_frame(h), p.rect);
+            let target = outer_rect(h, p.rect);
             let (insert_after, z_flags) = z_order_args(p.z);
             if let Err(e) = unsafe {
                 SetWindowPos(
@@ -265,7 +272,7 @@ impl Win32Platform {
                     target.top,
                     target.width(),
                     target.height(),
-                    MOVE_FLAGS | z_flags,
+                    MOVE_FLAGS | z_flags | extra,
                 )
             } {
                 if is_access_denied(&e) {
@@ -288,6 +295,68 @@ impl Win32Platform {
             ))
         }
     }
+
+    /// Moves `placements` in one `DeferWindowPos` batch, falling back to one
+    /// call each when the batch cannot be made to work.
+    fn batch_positions(&self, placements: &[WindowPlacement]) -> Result<()> {
+        if placements.is_empty() {
+            return Ok(());
+        }
+        // Each rebuild follows exactly one window being written down as
+        // unreachable, and there are only so many windows in the batch, so
+        // this many attempts is a real bound. It is written as a bound rather
+        // than argued from the registry staying consistent: this runs on the
+        // animation thread, and the cost of the argument being wrong is a
+        // daemon that loops until the stack runs out.
+        for _ in 0..=placements.len() {
+            match self.try_batch(placements) {
+                Ok(Batch::Done) => return Ok(()),
+                Ok(Batch::Rebuild) => continue,
+                Ok(Batch::OneAtATime) => {
+                    return self.set_positions_individually(placements, SET_WINDOW_POS_FLAGS(0));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // Every attempt claimed a fresh refusal, which cannot honestly happen
+        // more often than there are windows. Something is answering
+        // inconsistently; finish the job the slow way rather than spin.
+        tracing::warn!(
+            count = placements.len(),
+            "a batch kept reporting new refusals, finishing it one window at a time"
+        );
+        self.set_positions_individually(placements, SET_WINDOW_POS_FLAGS(0))
+    }
+}
+
+/// True for a window of the browser engine, which moves and changes state only
+/// on its own thread.
+///
+/// Its GPU child belongs to another process and nothing ever places it by
+/// hand: it depends on Windows carrying it along whenever the window travels
+/// to and from the spot minimized windows are parked at. A `SetWindowPos` from
+/// another thread runs on that other thread, so it can land in the middle of a
+/// minimize or a restore the window is working through, and then the child
+/// misses the jump and stays a whole screen away from its window. The window
+/// keeps running and shows the same picture from then on, and nothing brings
+/// it back. Moves and state changes posted to the window's own thread run one
+/// after the other with that transition and never inside it.
+///
+/// The price is that such a window can land a frame after the windows of the
+/// batch beside it. It also means a busy application no longer holds up the
+/// caller.
+fn holds_gpu_child(h: HWND) -> bool {
+    window_class(h).starts_with(mochi_core::layering::CHROMIUM_CLASS_PREFIX)
+}
+
+/// `ShowWindow`, posted to the window's own thread when [`holds_gpu_child`] says so.
+fn set_show_state(h: HWND, cmd: SHOW_WINDOW_CMD) {
+    // Both answer with the previous visibility, not with a success flag.
+    let _ = if holds_gpu_child(h) {
+        unsafe { ShowWindowAsync(h, cmd) }
+    } else {
+        unsafe { ShowWindow(h, cmd) }
+    };
 }
 
 /// `GetWindowRect`, or an empty rectangle when the window is already gone.
@@ -673,6 +742,34 @@ pub fn compensate_invisible_border(window_rect: Rect, frame: Rect, target: Rect)
     )
 }
 
+/// The frame a minimized window will have once it is back. While minimized it
+/// reports its invisible border at the sides but none below, so the one at the
+/// side stands in for the one it gets back.
+fn restored_frame(window_rect: Rect, frame: Rect) -> Rect {
+    if frame.width() <= 0 || frame.height() <= 0 {
+        return frame;
+    }
+    Rect::new(
+        frame.left,
+        frame.top,
+        frame.right,
+        window_rect.bottom - (frame.left - window_rect.left),
+    )
+}
+
+/// The rectangle `SetWindowPos` wants to show `h` at `target`. A posted move can
+/// be measured here while the window is minimized and land after its restore.
+fn outer_rect(h: HWND, target: Rect) -> Rect {
+    let window = window_rect(h);
+    let frame = dwm_frame(h);
+    let frame = if unsafe { IsIconic(h) }.as_bool() {
+        restored_frame(window, frame)
+    } else {
+        frame
+    };
+    compensate_invisible_border(window, frame, target)
+}
+
 fn z_order_args(z: ZOrder) -> (Option<HWND>, SET_WINDOW_POS_FLAGS) {
     match z {
         ZOrder::Keep => (None, SWP_NOZORDER),
@@ -732,7 +829,7 @@ fn take_foreground(target: HWND, raise: Raise) -> bool {
         && unsafe { AttachThreadInput(current, target_thread, true) }.as_bool();
 
     if raise == Raise::Yes && unsafe { IsIconic(target) }.as_bool() {
-        let _ = unsafe { ShowWindow(target, SW_RESTORE) };
+        set_show_state(target, SW_RESTORE);
     }
     let ok = unsafe { SetForegroundWindow(target) }.as_bool();
     if raise == Raise::Yes {
@@ -937,31 +1034,14 @@ impl Platform for Win32Platform {
     }
 
     fn set_positions(&self, placements: &[WindowPlacement]) -> Result<()> {
-        if placements.is_empty() {
-            return Ok(());
-        }
-        // Each rebuild follows exactly one window being written down as
-        // unreachable, and there are only so many windows in the batch, so
-        // this many attempts is a real bound. It is written as a bound rather
-        // than argued from the registry staying consistent: this runs on the
-        // animation thread, and the cost of the argument being wrong is a
-        // daemon that loops until the stack runs out.
-        for _ in 0..=placements.len() {
-            match self.try_batch(placements) {
-                Ok(Batch::Done) => return Ok(()),
-                Ok(Batch::Rebuild) => continue,
-                Ok(Batch::OneAtATime) => return self.set_positions_individually(placements),
-                Err(e) => return Err(e),
-            }
-        }
-        // Every attempt claimed a fresh refusal, which cannot honestly happen
-        // more often than there are windows. Something is answering
-        // inconsistently; finish the job the slow way rather than spin.
-        tracing::warn!(
-            count = placements.len(),
-            "a batch kept reporting new refusals, finishing it one window at a time"
-        );
-        self.set_positions_individually(placements)
+        let (posted, batched): (Vec<WindowPlacement>, Vec<WindowPlacement>) = placements
+            .iter()
+            .copied()
+            .partition(|p| holds_gpu_child(hwnd(p.hwnd)));
+        // Posted first: those return at once, while the batch blocks on every
+        // application in it.
+        let moved = self.set_positions_individually(&posted, SWP_ASYNCWINDOWPOS);
+        self.batch_positions(&batched).and(moved)
     }
 
     fn set_cloaked(&self, h: Hwnd, cloaked: bool) -> Result<()> {
@@ -994,12 +1074,12 @@ impl Platform for Win32Platform {
         let cmd = match state {
             ShowState::Restore => SW_RESTORE,
             ShowState::Minimize => SW_MINIMIZE,
+            ShowState::MinimizeNoActivate => SW_SHOWMINNOACTIVE,
             ShowState::Maximize => SW_MAXIMIZE,
             ShowState::ShowNoActivate => SW_SHOWNOACTIVATE,
             ShowState::Hide => SW_HIDE,
         };
-        // ShowWindow returns the previous visibility, not a success flag.
-        let _ = unsafe { ShowWindow(hwnd(h), cmd) };
+        set_show_state(hwnd(h), cmd);
         Ok(())
     }
 
@@ -1174,6 +1254,25 @@ mod tests {
         assert_eq!(
             compensate_invisible_border(Rect::new(0, 0, 100, 100), Rect::default(), target),
             target
+        );
+    }
+
+    #[test]
+    fn a_minimized_window_is_measured_with_the_border_it_gets_back() {
+        let window_rect = Rect::new(-32000, -32000, -31840, -31972);
+        let frame = Rect::new(-31993, -32000, -31847, -31972);
+        let target = Rect::new(140, 120, 760, 620);
+        assert_eq!(
+            compensate_invisible_border(window_rect, restored_frame(window_rect, frame), target),
+            Rect::new(133, 120, 767, 627)
+        );
+    }
+
+    #[test]
+    fn a_minimized_window_without_a_dwm_frame_stays_without_one() {
+        assert_eq!(
+            restored_frame(Rect::new(0, 0, 100, 100), Rect::default()),
+            Rect::default()
         );
     }
 

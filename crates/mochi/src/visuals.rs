@@ -180,8 +180,8 @@ impl Visuals {
                     .collect();
                 // Borders first, and the order is the whole point. This one
                 // only drops a message in the border thread's channel and
-                // returns, while `set_positions` is synchronous and blocks on
-                // each target application's message pump - `SWP_FRAMECHANGED`
+                // returns, while `set_positions` is synchronous for an ordinary
+                // window and blocks on its application's message pump - `SWP_FRAMECHANGED`
                 // makes every one of them recalculate and repaint its frame
                 // before the call comes back. Moving the window first meant
                 // the border could not even begin to follow until that had
@@ -231,6 +231,14 @@ impl Visuals {
                     // frame, so starting from the window rect would have the
                     // window jump outward by that border and ease back.
                     match self.platform.window_info(target) {
+                        // Still minimized: the restore is posted to the window's
+                        // own thread and has not run yet. A minimized window's
+                        // rectangle is the spot Windows parks it at, a whole
+                        // screen away, so it starts at its target instead of
+                        // flying in from there.
+                        Ok(info) if info.minimized => {
+                            Some(self.animation.job(handle(target), to, to))
+                        }
                         Ok(info) => {
                             let from = info.visible_frame();
                             // A window already at its target is not animated.
@@ -672,6 +680,28 @@ mod tests {
             r#"{"animation":{"enabled":true,"duration":250,"style":"Linear","fps":60}}"#,
         )
         .expect("the animation block has to load")
+    }
+
+    /// A restore posted to the window's own thread may not have run when the
+    /// layout that follows it starts, and the window must not fly in from the
+    /// spot Windows parks minimized windows at.
+    #[test]
+    fn a_window_still_minimized_starts_at_its_target() {
+        let target = Hwnd(0x1234);
+        let parked = Rect::new(-32000, -32000, -31840, -31972);
+        let mut info = WindowInfo::placeholder(target);
+        info.rect = parked;
+        info.frame = parked;
+        info.minimized = true;
+        let platform = Arc::new(RecordingPlatform::new(info));
+        let hidden = Arc::new(Mutex::new(Hidden::default()));
+        let mut visuals = Visuals::new(Arc::clone(&platform) as Arc<dyn Platform>, hidden);
+        visuals.set_settings(&animated_config());
+
+        let tile = Rect::new(1000, 100, 1800, 700);
+        visuals.apply_layout(&[(target, tile)]);
+
+        assert_eq!(platform.first_move().rect, tile);
     }
 
     /// The first frame of an animated move is where the user already sees the
