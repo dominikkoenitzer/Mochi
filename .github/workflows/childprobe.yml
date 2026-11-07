@@ -132,6 +132,18 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
           git checkout -- .
           exit 0
+      - name: A border measured while minimized fails its test
+        working-directory: repo
+        run: |
+          python -I ../scratch/probe/putback.py parked_border
+          cargo build --locked -p mochi-testbed --bin mochi-testwin
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --test e2e_testbed --no-run
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --test e2e_testbed a_restore_a_move_and_the_keyboard_land_in_order -- --test-threads 1 --nocapture
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
 
   residual:
     runs-on: windows-latest
