@@ -41,10 +41,11 @@ def activating():
          "                tracing::debug!(%hwnd, error = %e, \"could not restore a redrawn window\");")
 
 
-def no_second_pass():
-    swap("crates/mochi/src/wm.rs",
-         "                self.minimized.remove(&hwnd);\n                self.window_appeared(hwnd);\n",
-         "                self.minimized.remove(&hwnd);\n")
+def move_overtakes():
+    """State changes stay posted, moves go straight to the window."""
+    swap("crates/mochi/src/platform/win32.rs",
+         ".partition(|p| holds_gpu_child(hwnd(p.hwnd)));",
+         ".partition(|_| false);")
 
 
 def parked_start():
@@ -52,5 +53,5 @@ def parked_start():
 
 
 {"everything": everything, "posted": posted, "activating": activating, "parked_start": parked_start,
- "no_second_pass": no_second_pass}[sys.argv[1]]()
+ "move_overtakes": move_overtakes}[sys.argv[1]]()
 print("put back:", sys.argv[1])
