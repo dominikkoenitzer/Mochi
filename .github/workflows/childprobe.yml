@@ -52,6 +52,17 @@ jobs:
         working-directory: repo
         run: |
           cargo test --locked -p mochi --test e2e_testbed engine:: -- --skip ${{ env.CASE }} --test-threads 1 --nocapture
+      - name: The keyboard test ten times
+        continue-on-error: true
+        working-directory: repo
+        run: |
+          $failed = 0
+          foreach ($round in 1..10) {
+            cargo test --locked -p mochi --test e2e_testbed a_redraw_leaves_the_keyboard_where_it_is -- --test-threads 1 --nocapture
+            if ($LASTEXITCODE -ne 0) { $failed += 1 }
+          }
+          "keyboard test: $failed of 10 rounds failed"
+          exit 0
       - name: Elevated windows
         continue-on-error: true
         working-directory: repo
