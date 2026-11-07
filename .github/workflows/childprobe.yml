@@ -2,8 +2,117 @@ name: child probe
 on:
   push:
     branches: [childprobe]
+env:
+  CASE: a_gpu_child_stays_on_its_window_under_animation_frames
+  SOFTWARE: "--disable-gpu|--disable-gpu-compositing"
 jobs:
-  run:
+  proof:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [before, after]
+    name: proof ${{ matrix.side }}
+    env:
+      MOCHI_E2E: "1"
+      MOCHI_E2E_CLOAK: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: scratch
+      - uses: actions/checkout@v7
+        with:
+          ref: childrect
+          path: repo
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: repo
+          key: proof-${{ matrix.side }}
+      - name: Put the old behaviour back
+        if: matrix.side == 'before'
+        working-directory: repo
+        run: python -I ../scratch/probe/putback.py everything
+      - name: Install the frameless host
+        working-directory: scratch
+        run: |
+          npm install --no-audit --no-fund --no-save electron
+          node node_modules/electron/install.js
+          Test-Path node_modules/electron/dist/electron.exe
+      - name: Build
+        working-directory: repo
+        run: |
+          cargo build --locked -p mochi-testbed --bin mochi-testwin
+          cargo test --locked -p mochi --test e2e_testbed --no-run
+      - name: Stand-in windows
+        continue-on-error: true
+        working-directory: repo
+        run: cargo test --locked -p mochi --test e2e_testbed engine:: -- --skip ${{ env.CASE }} --test-threads 1 --nocapture
+      - name: Elevated windows
+        continue-on-error: true
+        working-directory: repo
+        run: cargo test --locked -p mochi --test e2e_testbed left_alone_and_the_rest_tile -- --test-threads 1 --nocapture
+      - name: Browser
+        continue-on-error: true
+        working-directory: repo
+        run: cargo test --locked -p mochi --test e2e_testbed ${{ env.CASE }} -- --test-threads 1 --nocapture
+      - name: Browser in software
+        continue-on-error: true
+        working-directory: repo
+        env:
+          MOCHI_E2E_ENGINE_FLAGS: ${{ env.SOFTWARE }}
+        run: cargo test --locked -p mochi --test e2e_testbed ${{ env.CASE }} -- --test-threads 1 --nocapture
+      - name: Frameless host
+        continue-on-error: true
+        working-directory: repo
+        env:
+          MOCHI_E2E_ENGINE_HOST: ${{ github.workspace }}/scratch/node_modules/electron/dist/electron.exe|${{ github.workspace }}/scratch/probe/app
+        run: cargo test --locked -p mochi --test e2e_testbed ${{ env.CASE }} -- --test-threads 1 --nocapture
+      - name: Frameless host in software
+        continue-on-error: true
+        working-directory: repo
+        env:
+          MOCHI_E2E_ENGINE_HOST: ${{ github.workspace }}/scratch/node_modules/electron/dist/electron.exe|${{ github.workspace }}/scratch/probe/app
+          MOCHI_E2E_ENGINE_FLAGS: ${{ env.SOFTWARE }}
+        run: cargo test --locked -p mochi --test e2e_testbed ${{ env.CASE }} -- --test-threads 1 --nocapture
+
+  mutations:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    name: bug put back
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: scratch
+      - uses: actions/checkout@v7
+        with:
+          ref: childrect
+          path: repo
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: repo
+          key: proof-mutations
+      - name: Activating redraw fails its test
+        working-directory: repo
+        run: |
+          python -I ../scratch/probe/putback.py activating
+          cargo test --locked -p mochi --lib a_redraw_never_touches_the_keyboard
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
+      - name: Start from the parked spot fails its test
+        working-directory: repo
+        run: |
+          python -I ../scratch/probe/putback.py parked_start
+          cargo test --locked -p mochi --lib a_window_still_minimized_starts_at_its_target
+          if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
+          git checkout -- .
+          exit 0
+
+  residual:
     runs-on: windows-latest
     timeout-minutes: 45
     strategy:
@@ -22,7 +131,7 @@ jobs:
           - name: frameless-software
             browser: "--browser node_modules/electron/dist/electron.exe"
             flags: "--flag=--disable-gpu --flag=--disable-gpu-compositing"
-    name: ${{ matrix.name }}
+    name: residual ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v7
       - name: Install the frameless host
@@ -31,17 +140,15 @@ jobs:
           npm install --no-audit --no-fund --no-save electron
           node node_modules/electron/install.js
           Test-Path node_modules/electron/dist/electron.exe
-      - name: Taskbar route, frames as they are
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 200 --animate --route syscommand
-      - name: Taskbar route, posted frames
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 300 --animate --posted-frames --route syscommand
-      - name: Direct minimize, posted frames
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 200 --animate --posted-frames --route direct
-      - name: Posted minimize, posted frames
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 300 --animate --posted-frames --route posted
-      - name: Posted minimize without activation, posted frames
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 300 --animate --posted-frames --route posted --style noactivate
-      - name: Maximized, minimize and restore without activation
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 30 --route posted --style noactivate --maximized
-      - name: Maximized, plain minimize and restore
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 30 --route direct --maximized
+      - name: Shell minimize-all, no frames
+        continue-on-error: true
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 200 --route shell
+      - name: Shell minimize-all, frames as they are
+        continue-on-error: true
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 200 --animate --route shell
+      - name: Shell minimize-all, posted frames
+        continue-on-error: true
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 200 --animate --posted-frames --route shell
+      - name: Direct minimize, no frames
+        continue-on-error: true
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 200 --route direct
