@@ -83,8 +83,9 @@ middle of a minimize or a restore; the child then stays a whole screen away from
 its window, and the window shows the same picture until it is closed. So Mochi
 posts every move and every minimize or restore of these windows to the thread
 that owns them, where it runs after the transition instead of inside it. Such a
-window can land a frame behind the windows beside it, and a busy one holds up
-nothing.
+window can land a frame behind the windows beside it, and a busy one no longer
+holds up a move or a minimize. Raising it and changing its topmost state still
+wait for it, and so does hiding it with `window_hiding_behaviour: hide`.
 
 ## DPI
 

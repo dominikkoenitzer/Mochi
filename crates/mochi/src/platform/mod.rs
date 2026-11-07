@@ -92,7 +92,9 @@ pub enum ShowState {
     MinimizeNoActivate,
     /// Maximize the window.
     Maximize,
-    /// Show the window without activating it.
+    /// Bring a minimized window back and leave the activation where it is.
+    RestoreNoActivate,
+    /// Show a hidden window without activating it.
     ShowNoActivate,
     /// Hide the window outright. Prefer cloaking, which is far less invasive.
     Hide,
@@ -242,7 +244,8 @@ pub trait Platform: Send + Sync {
     /// WRITE. Hides or reveals a window with `DWMWA_CLOAK`.
     fn set_cloaked(&self, hwnd: Hwnd, cloaked: bool) -> Result<()>;
 
-    /// WRITE. Calls `ShowWindow`.
+    /// WRITE. Calls `ShowWindow`. In and out of minimized or maximized, a window
+    /// with a GPU child gets it posted, so the state can land after this returns.
     fn show(&self, hwnd: Hwnd, state: ShowState) -> Result<()>;
 
     /// WRITE. Brings a window to the foreground, thread-input dance included.

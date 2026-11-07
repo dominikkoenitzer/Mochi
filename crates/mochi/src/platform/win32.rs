@@ -13,7 +13,8 @@ use mochi_core::Rect;
 use mochi_core::layout::MinSize;
 
 use windows::Win32::Foundation::{
-    COLORREF, CloseHandle, E_ACCESSDENIED, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM,
+    COLORREF, CloseHandle, E_ACCESSDENIED, HANDLE, HWND, LPARAM, POINT, RECT, SetLastError,
+    WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAK, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
@@ -343,20 +344,31 @@ impl Win32Platform {
 /// after the other with that transition and never inside it.
 ///
 /// The price is that such a window can land a frame after the windows of the
-/// batch beside it. It also means a busy application no longer holds up the
-/// caller.
+/// batch beside it. It also means a busy application no longer holds up a move
+/// or a minimize. Raising it and changing its topmost state still wait for it.
 fn holds_gpu_child(h: HWND) -> bool {
     window_class(h).starts_with(mochi_core::layering::CHROMIUM_CLASS_PREFIX)
 }
 
 /// `ShowWindow`, posted to the window's own thread when [`holds_gpu_child`] says so.
-fn set_show_state(h: HWND, cmd: SHOW_WINDOW_CMD) {
-    // Both answer with the previous visibility, not with a success flag.
-    let _ = if holds_gpu_child(h) {
-        unsafe { ShowWindowAsync(h, cmd) }
+fn set_show_state(h: HWND, cmd: SHOW_WINDOW_CMD) -> Result<()> {
+    if !holds_gpu_child(h) {
+        // Answers with the previous visibility, not with a success flag.
+        let _ = unsafe { ShowWindow(h, cmd) };
+        return Ok(());
+    }
+    // Answers whether the call went into the queue, and only a set error says
+    // that it did not.
+    unsafe { SetLastError(WIN32_ERROR(0)) };
+    if unsafe { ShowWindowAsync(h, cmd) }.as_bool() {
+        return Ok(());
+    }
+    let e = windows::core::Error::from_thread();
+    if e.code().is_err() {
+        Err(anyhow!("ShowWindowAsync failed: {e}"))
     } else {
-        unsafe { ShowWindow(h, cmd) }
-    };
+        Ok(())
+    }
 }
 
 /// `GetWindowRect`, or an empty rectangle when the window is already gone.
@@ -757,17 +769,53 @@ fn restored_frame(window_rect: Rect, frame: Rect) -> Rect {
     )
 }
 
+/// One look at what [`outer_rect`] measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Look {
+    window: Rect,
+    frame: Rect,
+    iconic: bool,
+}
+
+/// How many more looks a window gets to hold still before it goes by its target
+/// alone, which is a border's width off until the next move.
+const LOOKS_TO_SETTLE: usize = 7;
+
 /// The rectangle `SetWindowPos` wants to show `h` at `target`. A posted move can
 /// be measured here while the window is minimized and land after its restore.
 fn outer_rect(h: HWND, target: Rect) -> Rect {
-    let window = window_rect(h);
-    let frame = dwm_frame(h);
-    let frame = if unsafe { IsIconic(h) }.as_bool() {
-        restored_frame(window, frame)
+    outer_rect_from(
+        || Look {
+            window: window_rect(h),
+            frame: dwm_frame(h),
+            iconic: unsafe { IsIconic(h) }.as_bool(),
+        },
+        target,
+    )
+}
+
+/// A restore posted to the window's own thread can land between two reads, and
+/// the parked rectangle read with a frame from its real place makes a border a
+/// whole screen wide. So two looks in a row have to agree.
+fn outer_rect_from(mut look: impl FnMut() -> Look, target: Rect) -> Rect {
+    let mut last = look();
+    for _ in 0..LOOKS_TO_SETTLE {
+        let now = look();
+        if now == last {
+            return outer_rect_at(now, target);
+        }
+        last = now;
+    }
+    target
+}
+
+fn outer_rect_at(look: Look, target: Rect) -> Rect {
+    let frame = if look.iconic {
+        restored_frame(look.window, look.frame)
     } else {
-        frame
+        look.frame
     };
-    compensate_invisible_border(window, frame, target)
+    compensate_invisible_border(look.window, frame, target)
 }
 
 fn z_order_args(z: ZOrder) -> (Option<HWND>, SET_WINDOW_POS_FLAGS) {
@@ -829,7 +877,7 @@ fn take_foreground(target: HWND, raise: Raise) -> bool {
         && unsafe { AttachThreadInput(current, target_thread, true) }.as_bool();
 
     if raise == Raise::Yes && unsafe { IsIconic(target) }.as_bool() {
-        set_show_state(target, SW_RESTORE);
+        let _ = set_show_state(target, SW_RESTORE);
     }
     let ok = unsafe { SetForegroundWindow(target) }.as_bool();
     if raise == Raise::Yes {
@@ -1076,10 +1124,17 @@ impl Platform for Win32Platform {
             ShowState::Minimize => SW_MINIMIZE,
             ShowState::MinimizeNoActivate => SW_SHOWMINNOACTIVE,
             ShowState::Maximize => SW_MAXIMIZE,
-            ShowState::ShowNoActivate => SW_SHOWNOACTIVATE,
+            ShowState::RestoreNoActivate | ShowState::ShowNoActivate => SW_SHOWNOACTIVATE,
             ShowState::Hide => SW_HIDE,
         };
-        set_show_state(hwnd(h), cmd);
+        // Windows carries a child along only in and out of minimized or
+        // maximized. Hiding and showing are not that, and whoever reads the
+        // window next has to find it as it was told to be.
+        let posted = !matches!(state, ShowState::ShowNoActivate | ShowState::Hide);
+        if posted {
+            return set_show_state(hwnd(h), cmd);
+        }
+        let _ = unsafe { ShowWindow(hwnd(h), cmd) };
         Ok(())
     }
 
@@ -1274,6 +1329,54 @@ mod tests {
             restored_frame(Rect::new(0, 0, 100, 100), Rect::default()),
             Rect::default()
         );
+    }
+
+    #[test]
+    fn a_restore_landing_between_two_reads_is_not_measured() {
+        let parked = Rect::new(-32000, -32000, -31840, -31972);
+        let window = Rect::new(133, 120, 767, 627);
+        let frame = Rect::new(140, 120, 760, 620);
+        let mut looks = [
+            Look {
+                window: parked,
+                frame,
+                iconic: false,
+            },
+            Look {
+                window,
+                frame,
+                iconic: false,
+            },
+            Look {
+                window,
+                frame,
+                iconic: false,
+            },
+        ]
+        .into_iter();
+        let outer = outer_rect_from(
+            || looks.next().expect("looked more often than it had to"),
+            frame,
+        );
+        assert_eq!(outer, window);
+    }
+
+    #[test]
+    fn a_window_that_never_holds_still_goes_by_its_target() {
+        let target = Rect::new(140, 120, 760, 620);
+        let mut step = 0;
+        let outer = outer_rect_from(
+            || {
+                step += 1;
+                Look {
+                    window: Rect::new(step, 0, step + 100, 100),
+                    frame: Rect::new(step + 7, 0, step + 93, 93),
+                    iconic: false,
+                }
+            },
+            target,
+        );
+        assert_eq!(outer, target);
     }
 
     #[test]
