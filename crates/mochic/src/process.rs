@@ -13,6 +13,26 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 /// How long `start` waits for the daemon to open its pipe.
 const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The file an installer holds in the folder it is replacing `mochi.exe` and
+/// `mochic.exe` in. `scripts\install.ps1` and Mochi-Setup hold it under this
+/// name, open, shared with nobody and deleted on close.
+pub const INSTALL_LOCK: &str = "install.lock";
+
+/// `ERROR_SHARING_VIOLATION`: the file is open and shared with nobody.
+const SHARING_VIOLATION: i32 = 32;
+
+/// True while an installer holds `lock` open.
+///
+/// Held, not merely there: a file is deleted with the last handle to it, so an
+/// installer that died leaves nothing behind, and a file somebody made by hand
+/// opens fine and keeps nothing from starting.
+pub fn install_holds(lock: &std::path::Path) -> bool {
+    matches!(
+        std::fs::File::open(lock),
+        Err(error) if error.raw_os_error() == Some(SHARING_VIOLATION)
+    )
+}
+
 /// Finds an executable next to `mochic` first, then on `PATH`.
 ///
 /// The sibling lookup matters during development: a freshly built `mochic`
@@ -71,6 +91,8 @@ pub trait Launch {
     /// Starts the daemon as administrator through the Windows prompt and waits
     /// until it answers on its pipe, or reports that the prompt was declined.
     fn daemon_as_administrator(&self, args: &[String]) -> Result<Administrator>;
+    /// True while an installer is replacing the files next to this `mochic`.
+    fn install_is_running(&self) -> bool;
 }
 
 /// How a start as administrator ended, short of an error.
@@ -100,6 +122,16 @@ impl Launch for System {
 
     fn daemon_as_administrator(&self, args: &[String]) -> Result<Administrator> {
         start_daemon_as_administrator(args)
+    }
+
+    fn install_is_running(&self) -> bool {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| {
+                exe.parent()
+                    .map(|dir| install_holds(&dir.join(INSTALL_LOCK)))
+            })
+            .unwrap_or(false)
     }
 
     fn attached(&self, args: &[String]) -> Result<ExitStatus> {
@@ -187,6 +219,14 @@ pub fn start(
             bail!("the dry run exited with {}", exit_code(status));
         }
         return Ok(());
+    }
+    // A watchdog restarts Mochi through this very call, and it fires on a
+    // clock of its own: between an installer's stop and its copy it brought
+    // back the Mochi being replaced, and the copy then failed on files in use.
+    if launch.install_is_running() {
+        bail!(
+            "Mochi is being installed right now, so it was not started. Start it again once the install has finished."
+        );
     }
     if launch.daemon_is_running() {
         println!("mochi is already running");
@@ -507,6 +547,7 @@ mod tests {
         exit: u32,
         elevated: bool,
         prompt: Administrator,
+        installing: bool,
         calls: std::cell::RefCell<Vec<String>>,
     }
 
@@ -517,8 +558,14 @@ mod tests {
                 exit,
                 elevated: false,
                 prompt: Administrator::Started,
+                installing: false,
                 calls: std::cell::RefCell::default(),
             }
+        }
+
+        fn installing(mut self) -> Self {
+            self.installing = true;
+            self
         }
 
         fn elevated(mut self) -> Self {
@@ -563,6 +610,10 @@ mod tests {
                 .borrow_mut()
                 .push(format!("administrator {}", args.join(" ")));
             Ok(self.prompt)
+        }
+
+        fn install_is_running(&self) -> bool {
+            self.installing
         }
 
         fn attached(&self, args: &[String]) -> Result<ExitStatus> {
@@ -754,6 +805,56 @@ mod tests {
 
     fn args() -> Vec<String> {
         vec!["--config".to_owned(), r"D:\mochi.json".to_owned()]
+    }
+
+    #[test]
+    fn a_start_while_an_install_holds_the_folder_starts_nothing() {
+        let fake = Fake::new(false, 0).installing();
+        let error = start(&fake, &args(), false, None)
+            .expect_err("a start in the middle of an install must say why nothing started");
+        assert!(
+            error.to_string().contains("being installed"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            fake.calls().is_empty(),
+            "a watchdog that starts Mochi between the installer's stop and its copy keeps the old files in use, and the copy fails: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn the_install_lock_counts_only_while_an_installer_holds_it() {
+        use std::os::windows::fs::OpenOptionsExt;
+        // `FILE_FLAG_DELETE_ON_CLOSE`, as the installers open it.
+        const DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        let dir = std::env::temp_dir().join(format!("mochic-install-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join(INSTALL_LOCK);
+
+        assert!(!install_holds(&lock), "no file, no install");
+
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .custom_flags(DELETE_ON_CLOSE)
+            .open(&lock)
+            .unwrap();
+        assert!(install_holds(&lock), "an installer holds it");
+        drop(held);
+        assert!(!lock.exists(), "the last handle takes the file with it");
+        assert!(!install_holds(&lock));
+
+        std::fs::write(&lock, b"").unwrap();
+        assert!(
+            !install_holds(&lock),
+            "a file nobody holds open is no install, or a stray file would keep Mochi down for good"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
