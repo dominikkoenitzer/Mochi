@@ -278,6 +278,43 @@ jobs:
       # The release profile is thin LTO with one codegen unit, so it breaks in
       # ways a debug build does not. Every push walks that path.
       - run: cargo build --locked --release --workspace
+      # File properties, Task Manager and antivirus models read these fields;
+      # an exe that leaves them empty looks like nobody stands behind it.
+      - name: Every shipped program says what it is
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $metadata = (cargo metadata --locked --no-deps --format-version 1) -join "`n" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed with exit code $LASTEXITCODE" }
+          $version = ($metadata.packages | Where-Object name -eq 'mochi' | Select-Object -First 1).version
+          # Built name, then the description and the name it is published under.
+          $wanted = @(
+            @('mochi.exe', 'Mochi', 'mochi.exe'),
+            @('mochic.exe', 'Mochi command line', 'mochic.exe'),
+            @('mochi-setup.exe', 'Mochi Setup', 'Mochi-Setup.exe')
+          )
+          $wrong = @()
+          foreach ($entry in $wanted) {
+            $name = $entry[0]
+            $info = (Get-Item "target/release/$name").VersionInfo
+            $fields = [ordered]@{
+              FileDescription = $entry[1]
+              ProductName = 'Mochi'
+              CompanyName = 'Mochi'
+              OriginalFilename = $entry[2]
+              InternalName = [IO.Path]::GetFileNameWithoutExtension($entry[2])
+              LegalCopyright = 'GPL-3.0-only'
+              FileVersion = $version
+              ProductVersion = $version
+            }
+            foreach ($field in $fields.Keys) {
+              $value = $info.$field
+              Write-Output "$name $field = $value"
+              if ($value -ne $fields[$field]) { $wrong += "$name $field is '$value', not '$($fields[$field])'" }
+            }
+          }
+          if ($wrong) { throw ($wrong -join "`n") }
 
   # Mochi-Setup.exe is the download for people who never open a terminal, and
   # nothing else here ever runs it. This job builds it the way the release
