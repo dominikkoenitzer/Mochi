@@ -48,10 +48,18 @@ def move_overtakes():
          ".partition(|_| false);")
 
 
+def parked_border():
+    """A move measured while minimized goes by the border it shows then."""
+    swap("crates/mochi/src/platform/win32.rs",
+         "let frame = if unsafe { IsIconic(h) }.as_bool() {",
+         "let frame = if false {")
+
+
 def parked_start():
     swap("crates/mochi/src/visuals.rs", "Ok(info) if info.minimized => {", "Ok(info) if false && info.minimized => {")
 
 
 {"everything": everything, "posted": posted, "activating": activating, "parked_start": parked_start,
- "move_overtakes": move_overtakes}[sys.argv[1]]()
+ "move_overtakes": move_overtakes,
+ "parked_border": parked_border}[sys.argv[1]]()
 print("put back:", sys.argv[1])
