@@ -1,0 +1,44 @@
+name: elevated rounds
+on:
+  push:
+    branches: [childprobe]
+    paths: [.github/workflows/flake.yml]
+jobs:
+  rounds:
+    runs-on: windows-latest
+    timeout-minutes: 57
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [childrect, main]
+    name: rounds ${{ matrix.side }}
+    env:
+      MOCHI_E2E: "1"
+      MOCHI_E2E_CLOAK: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.side }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: rounds-${{ matrix.side }}
+      - name: Build
+        run: |
+          git log -1 --format=%H
+          cargo build --locked -p mochi-testbed --bin mochi-testwin
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+          cargo test --locked -p mochi --test e2e_testbed --no-run
+          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
+      - name: The elevated module 21 times
+        run: |
+          $failed = 0
+          foreach ($round in 1..21) {
+            cargo test --locked -p mochi --test e2e_testbed elevated:: -- --test-threads 1 --nocapture
+            if ($LASTEXITCODE -ne 0) {
+              $failed += 1
+              "round $round failed"
+            }
+          }
+          "elevated module on ${{ matrix.side }}: $failed of 21 rounds failed"
+          exit 0

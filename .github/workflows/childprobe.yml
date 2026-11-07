@@ -2,6 +2,7 @@ name: child probe
 on:
   push:
     branches: [childprobe]
+    paths-ignore: [.github/workflows/flake.yml]
 env:
   CASE: a_gpu_child_stays_on_its_window_under_animation_frames
   SOFTWARE: "--disable-gpu|--disable-gpu-compositing"
