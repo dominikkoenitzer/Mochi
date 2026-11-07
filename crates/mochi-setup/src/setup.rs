@@ -99,13 +99,16 @@ fn install(options: Options, layout: &Layout) -> i32 {
     }
 
     // A running mochi.exe cannot be replaced, and asking it to stop puts
-    // every window it was hiding back first.
+    // every window it was hiding back first. The lock keeps a watchdog from
+    // starting it again between the stop and the copy.
+    let lock = hold_install_lock(&layout.bin);
     if let Err(message) = stop_mochi(layout, Some(&payload), "open Mochi-Setup.exe again") {
         return fail(options, "Mochi is still running", &message);
     }
     if let Err(message) = put_binaries(&layout.bin, &payload) {
         return fail(options, "Mochi could not be installed", &message);
     }
+    drop(lock);
 
     let mut problems = Vec::new();
     let mut note = |result: Result<(), String>| {
@@ -290,6 +293,24 @@ fn ask_to_stop(layout: &Layout, payload: Option<&Payload>) -> Option<PathBuf> {
     };
     let _ = win::run_hidden(&mochic, &["stop"]);
     temp
+}
+
+/// Opens the install lock in `bin`, shared with nobody and deleted with its
+/// last handle, so a setup that dies leaves nothing behind. None on a first
+/// install, where no mochic is there to start anything yet.
+fn hold_install_lock(bin: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // `FILE_FLAG_DELETE_ON_CLOSE`.
+    const DELETE_ON_CLOSE: u32 = 0x0400_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .custom_flags(DELETE_ON_CLOSE)
+        .open(bin.join(plan::INSTALL_LOCK))
+        .ok()
 }
 
 /// Both files are written next to their places first, then the old ones are
