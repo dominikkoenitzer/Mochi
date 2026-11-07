@@ -1,54 +1,136 @@
-name: elevated rounds
+name: release scan
 on:
   push:
     branches: [childprobe]
     paths: [.github/workflows/flake.yml]
 jobs:
-  rounds:
+  scan:
     runs-on: windows-latest
-    timeout-minutes: 57
+    timeout-minutes: 31
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - cell: childrect module
-            side: childrect
-            tests: "elevated::"
-          - cell: childrect alone
-            side: childrect
-            tests: "elevated::with_the_setting_on"
-          - cell: main module
-            side: main
-            tests: "elevated::"
-    name: rounds ${{ matrix.cell }}
+        tag: [v0.1.27]
+    name: scan ${{ matrix.tag }}
     env:
-      MOCHI_E2E: "1"
-      MOCHI_E2E_CLOAK: "1"
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ matrix.tag }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ matrix.side }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: rounds-${{ matrix.side }}
-      - name: Build
+      - name: Protection as a normal machine has it
+        shell: pwsh
         run: |
-          git log -1 --format=%H
-          cargo build --locked -p mochi-testbed --bin mochi-testwin
-          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
-          cargo test --locked -p mochi --test e2e_testbed --no-run
-          if ($LASTEXITCODE -ne 0) { throw "did not compile" }
-      - name: The rounds
+          $before = Get-MpPreference
+          "image exclusions: paths [$($before.ExclusionPath -join ', ')] processes [$($before.ExclusionProcess -join ', ')] extensions [$($before.ExclusionExtension -join ', ')]"
+          "image settings: realtime off $($before.DisableRealtimeMonitoring), cloud $($before.MAPSReporting), samples $($before.SubmitSamplesConsent), archives off $($before.DisableArchiveScanning)"
+          foreach ($path in @($before.ExclusionPath)) { if ($path) { Remove-MpPreference -ExclusionPath $path } }
+          foreach ($process in @($before.ExclusionProcess)) { if ($process) { Remove-MpPreference -ExclusionProcess $process } }
+          foreach ($extension in @($before.ExclusionExtension)) { if ($extension) { Remove-MpPreference -ExclusionExtension $extension } }
+          Set-MpPreference -DisableArchiveScanning $false -DisableIOAVProtection $false -DisableBehaviorMonitoring $false -DisableBlockAtFirstSeen $false -DisableScriptScanning $false -MAPSReporting Advanced -SubmitSamplesConsent SendSafeSamples
+          try { Update-MpSignature -UpdateSource MicrosoftUpdateServer } catch { "update from the update server failed: $($_.Exception.Message)" }
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          & $mp -SignatureUpdate
+          "signature update exit $LASTEXITCODE"
+          & $mp -ValidateMapsConnection
+          "cloud check exit $LASTEXITCODE"
+          "CLOUD_EXIT=$LASTEXITCODE" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $after = Get-MpPreference
+          "exclusions now: paths [$($after.ExclusionPath -join ', ')] processes [$($after.ExclusionProcess -join ', ')] extensions [$($after.ExclusionExtension -join ', ')]"
+          "settings now: cloud $($after.MAPSReporting), samples $($after.SubmitSamplesConsent), archives off $($after.DisableArchiveScanning), block level $($after.CloudBlockLevel)"
+          Get-MpComputerStatus | Format-List AMEngineVersion,AMProductVersion,AMServiceEnabled,AntivirusEnabled,AntivirusSignatureVersion,AntivirusSignatureLastUpdated,IsTamperProtected
+          exit 0
+
+      - name: Scan on demand
+        shell: pwsh
         run: |
-          $failed = 0
-          $tests = '${{ matrix.tests }}' -split ' '
-          foreach ($round in 1..200) {
-            cargo test --locked -p mochi --test e2e_testbed -- @tests --test-threads 1 --nocapture
-            if ($LASTEXITCODE -ne 0) {
-              $failed += 1
-              "round $round failed"
-            }
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          $root = Join-Path $env:RUNNER_TEMP 'scan'
+          $control = Join-Path $root 'control'
+          New-Item -ItemType Directory -Force -Path $control | Out-Null
+          $parts = 'WDVPIVAlQEFQWzRcUFpYNTQoUF4pN0NDKTd9JEVJ', 'Q0FSLVNUQU5EQVJELUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo='
+          $file = Join-Path $control 'control.txt'
+          [IO.File]::WriteAllBytes($file, [Convert]::FromBase64String($parts -join ''))
+          & $mp -Scan -ScanType 3 -File $file -DisableRemediation
+          "control exit $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 2) { "on-demand control missed, so a clean scan proves nothing"; exit 1 }
+          $assets = Join-Path $root 'assets'
+          gh release download $env:TAG -R $env:GITHUB_REPOSITORY -D $assets
+          if ($LASTEXITCODE -ne 0) { "download failed"; exit 1 }
+          foreach ($sum in Get-ChildItem $assets -Filter *.sha256) {
+              $want, $name = (Get-Content $sum.FullName -Raw).Trim() -split '\s+'
+              $have = (Get-FileHash -Algorithm SHA256 (Join-Path $assets $name)).Hash.ToLower()
+              "$name $have"
+              if ($have -ne $want) { "$name does not match its hash"; exit 1 }
           }
-          "cell ${{ matrix.cell }}: $failed of 200 rounds failed"
+          $zip = Get-ChildItem $assets -Filter *.zip | Select-Object -First 1
+          Expand-Archive $zip.FullName -DestinationPath (Join-Path $root 'inner')
+          $targets = @((Join-Path $assets 'Mochi-Setup.exe'), $zip.FullName) + @(Get-ChildItem (Join-Path $root 'inner') -Recurse -Filter *.exe | ForEach-Object FullName)
+          $hits = 0
+          foreach ($target in $targets) {
+              & $mp -Scan -ScanType 3 -File $target -DisableRemediation
+              "on demand: $(Split-Path $target -Leaf) exit $LASTEXITCODE"
+              if ($LASTEXITCODE -ne 0) { $hits += 1 }
+          }
+          "ON_DEMAND_HITS=$hits" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "on-demand: $hits of $($targets.Count) flagged"
+          exit 0
+
+      - name: Install and uninstall under real-time protection
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $false
+          $status = Get-MpComputerStatus
+          "real-time on: $($status.RealTimeProtectionEnabled), on access $($status.OnAccessProtectionEnabled), behaviour $($status.BehaviorMonitorEnabled), download check $($status.IoavProtectionEnabled)"
+          $root = Join-Path $env:RUNNER_TEMP 'scan'
+          $live = Join-Path $root 'live'
+          New-Item -ItemType Directory -Force -Path $live | Out-Null
+          $parts = 'WDVPIVAlQEFQWzRcUFpYNTQoUF4pN0NDKTd9JEVJ', 'Q0FSLVNUQU5EQVJELUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo='
+          $file = Join-Path $live 'control.txt'
+          try { [IO.File]::WriteAllBytes($file, [Convert]::FromBase64String($parts -join '')) } catch { "control write refused: $($_.Exception.Message)" }
+          Start-Sleep -Seconds 13
+          $caught = -not (Test-Path $file)
+          "real-time control caught: $caught"
+          if (-not $caught) { "real-time control missed, so a clean install proves nothing"; exit 1 }
+
+          $setup = Join-Path $live 'Mochi-Setup.exe'
+          Copy-Item (Join-Path $root 'assets\Mochi-Setup.exe') $setup
+          Start-Sleep -Seconds 13
+          "setup still there after the copy: $(Test-Path $setup)"
+          if (-not (Test-Path $setup)) { "REALTIME_LOST=setup" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8; exit 0 }
+          $info = [Diagnostics.ProcessStartInfo]::new($setup, '--quiet')
+          $info.UseShellExecute = $true
+          $process = [Diagnostics.Process]::Start($info)
+          if (-not $process.WaitForExit(180000)) { Stop-Process -Id $process.Id -Force; "setup still running after 3 minutes"; exit 1 }
+          "setup exit $($process.ExitCode)"
+          "mochi processes: $(@(Get-Process mochi -ErrorAction SilentlyContinue).Count)"
+          $bin = Join-Path $env:LOCALAPPDATA 'Programs\Mochi\bin'
+          Get-ChildItem $bin | ForEach-Object { "$($_.Name) $($_.Length) $((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())" }
+          & (Join-Path $bin 'mochic.exe') --version
+          "mochic version exit $LASTEXITCODE"
+          Start-Sleep -Seconds 57
+          $lost = @('mochi.exe', 'mochic.exe') | Where-Object { -not (Test-Path (Join-Path $bin $_)) }
+          "gone after a wait: [$($lost -join ', ')]"
+          $shortcuts = @(Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu", "$env:USERPROFILE\Desktop" -Recurse -Filter 'Mochi*.lnk' -ErrorAction SilentlyContinue)
+          "shortcuts: $($shortcuts.Count)"
+          "REALTIME_LOST=$($lost -join ',')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $command = (Get-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Mochi').GetValue('QuietUninstallString')
+          if ("$command" -match '^"([^"]+)"\s+(.+)$') {
+              $remove = [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]::new($Matches[1], $Matches[2]))
+              if ($remove.WaitForExit(180000)) { "uninstall exit $($remove.ExitCode)" } else { "uninstall still running after 3 minutes" }
+          } else { "no uninstall command: [$command]" }
+          Start-Sleep -Seconds 57
+          exit 0
+
+      - name: Verdict
+        if: always()
+        shell: pwsh
+        run: |
+          $ids = 1006, 1007, 1008, 1009, 1015, 1116, 1117, 1118, 1119
+          $events = @(Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -ErrorAction SilentlyContinue | Where-Object { $ids -contains $_.Id })
+          foreach ($entry in $events) { "--- $($entry.TimeCreated.ToString('HH:mm:ss')) event $($entry.Id)"; ($entry.Message -split "`n" | Where-Object { $_ -match 'Name:|Path:|Severity:|Detection Source:|Detection Origin:|Process Name:' }) -join "`n" }
+          $real = @($events | Where-Object { $_.Message -notmatch 'EICAR' })
+          "threat history:"
+          Get-MpThreatDetection -ErrorAction SilentlyContinue | Format-List ThreatID,Resources,ProcessName,InitialDetectionTime
+          $status = Get-MpComputerStatus
+          "verdict ${env:TAG}: on-demand flagged ${env:ON_DEMAND_HITS}, real-time lost [${env:REALTIME_LOST}], events other than the control $($real.Count), cloud check exit ${env:CLOUD_EXIT}, signatures $($status.AntivirusSignatureVersion), engine $($status.AMEngineVersion)"
+          if ($env:ON_DEMAND_HITS -ne '0' -or $env:REALTIME_LOST -or $real.Count -gt 0) { exit 1 }
           exit 0
