@@ -11,7 +11,11 @@ jobs:
       fail-fast: false
       matrix:
         tag: [v0.1.27, v0.1.28]
-    name: scan ${{ matrix.tag }}
+        round: [1, 2]
+        include:
+          - tag: v0.1.28
+            round: 3
+    name: scan ${{ matrix.tag }} round ${{ matrix.round }}
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ matrix.tag }}
@@ -75,6 +79,7 @@ jobs:
           exit 0
 
       - name: Install and uninstall under real-time protection
+        timeout-minutes: 13
         shell: pwsh
         run: |
           Set-MpPreference -DisableRealtimeMonitoring $false
