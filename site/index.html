@@ -444,9 +444,9 @@ footer p { margin: 0.3rem 0; }
 <h2 id="new-h" class="vh">Details</h2>
 <div class="grid2">
 <div class="card">
-<div class="num">Version 0.1.27</div>
+<div class="num">Version 0.1.28</div>
 <h3>What's new</h3>
-<ul><li>Set <code>"elevated": true</code> in <code>mochi.json</code> and <code>mochic start</code> starts Mochi as administrator after the Windows prompt, so windows of programs running as administrator are tiled too.</li><li>Holding a key repeats only the commands that take one step at a time, so a held <code>toggle-float</code> no longer flips the window back and forth.</li><li>A key that switches the mode stays swallowed while it is held, even when the new mode does not bind it.</li></ul>
+<ul><li>Moving a browser or web-based app while it is minimized or restored no longer leaves its window blank.</li><li>The redraw after a display change no longer takes the keyboard from the window you are in.</li><li><code>mochic state --exe</code> and <code>--title</code> pick out windows by program and title, and a window that carries the <code>NoTiling</code> property stays out of the layout.</li></ul>
 </div>
 <div class="card">
 <div class="num">Requirements</div>
