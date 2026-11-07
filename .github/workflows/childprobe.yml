@@ -49,7 +49,8 @@ jobs:
       - name: Stand-in windows
         continue-on-error: true
         working-directory: repo
-        run: cargo test --locked -p mochi --test e2e_testbed engine:: -- --skip ${{ env.CASE }} --test-threads 1 --nocapture
+        run: |
+          cargo test --locked -p mochi --test e2e_testbed engine:: -- --skip ${{ env.CASE }} --test-threads 1 --nocapture
       - name: Elevated windows
         continue-on-error: true
         working-directory: repo
