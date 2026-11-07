@@ -5,7 +5,7 @@ on:
 jobs:
   run:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -31,13 +31,17 @@ jobs:
           npm install --no-audit --no-fund --no-save electron
           node node_modules/electron/install.js
           Test-Path node_modules/electron/dist/electron.exe
-      - name: Frames in flight
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --cycles 150 --down -1 --settle 0.05 --animate
-      - name: Frames without frame recalculation
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --cycles 150 --down -1 --settle 0.05 --animate --no-framechanged
-      - name: Frames that leave out minimized windows
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --cycles 150 --down -1 --settle 0.05 --animate --skip-iconic
-      - name: Several moves while minimized, one after the other
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --cycles 150 --down 0.05 --settle 0.05 --iconic 5 --gap 0.016
-      - name: Frames in flight, without activation
-        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --cycles 150 --down -1 --settle 0.05 --animate --style noactivate
+      - name: Taskbar route, frames as they are
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 200 --animate --route syscommand
+      - name: Taskbar route, posted frames
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 300 --animate --posted-frames --route syscommand
+      - name: Direct minimize, posted frames
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 200 --animate --posted-frames --route direct
+      - name: Posted minimize, posted frames
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 300 --animate --posted-frames --route posted
+      - name: Posted minimize without activation, posted frames
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 300 --animate --posted-frames --route posted --style noactivate
+      - name: Maximized, minimize and restore without activation
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 30 --route posted --style noactivate --maximized
+      - name: Maximized, plain minimize and restore
+        run: python -I probe/probe.py ${{ matrix.browser }} ${{ matrix.flags }} --down -1 --settle 0.05 --cycles 30 --route direct --maximized
