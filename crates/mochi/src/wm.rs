@@ -2162,9 +2162,8 @@ impl WindowManager {
                 }
             }
             WindowEventKind::MinimizeEnd => {
-                self.minimized.remove(&hwnd);
                 self.minimize_unseen.remove(&hwnd);
-                self.window_appeared(hwnd);
+                self.window_restored(hwnd);
             }
             WindowEventKind::Foreground => self.window_focused(hwnd),
             WindowEventKind::MoveSizeStart => {}
@@ -2754,6 +2753,21 @@ impl WindowManager {
 
     /// A window was created, shown or uncloaked.
     fn window_appeared(&mut self, hwnd: Hwnd) {
+        self.take_in(hwnd, false);
+    }
+
+    /// A window came back from a minimize.
+    ///
+    /// This is the one way back into the layout for a window the user
+    /// minimized, so it does not ask whether the window still reads iconic:
+    /// it may, while it reports the restore.
+    fn window_restored(&mut self, hwnd: Hwnd) {
+        self.minimized.remove(&hwnd);
+        self.take_in(hwnd, true);
+    }
+
+    /// Manages `hwnd` if it is not managed yet and the rules take it.
+    fn take_in(&mut self, hwnd: Hwnd, restoring: bool) {
         if self.core.is_paused || self.core.is_managed(window_id(hwnd)) {
             return;
         }
@@ -2765,6 +2779,14 @@ impl WindowManager {
         let Ok(info) = self.platform.window_info(hwnd) else {
             return;
         };
+        // A minimized window stays down until it is restored. Many keep
+        // raising events while iconic, a title that changes every second, a
+        // show, a focus, and managing one lays it out, which restores it onto
+        // the screen. Its own reading decides rather than the minimized
+        // record, so a lost restore event cannot keep a window out for good.
+        if info.minimized && !restoring {
+            return;
+        }
         if !self.is_candidate(&info) {
             return;
         }
@@ -6240,6 +6262,45 @@ mod tests {
 
         wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(2));
         assert_eq!(wm.state().all_window_ids().count(), 2);
+    }
+
+    #[test]
+    fn a_minimized_window_stays_down_whatever_it_reports_until_it_is_restored() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        assert!(!wm.state().is_managed(WindowId(2)));
+        platform.history.lock().unwrap().clear();
+
+        // A page with a clock in its title renames its window every second,
+        // and a player renames its window on every song.
+        platform.windows.lock().unwrap()[1].title = "Two, renamed".into();
+        for kind in [
+            WindowEventKind::NameChange,
+            WindowEventKind::Shown,
+            WindowEventKind::Uncloaked,
+            WindowEventKind::Foreground,
+        ] {
+            wm.on_window_event(kind, Hwnd(2));
+            assert!(
+                !wm.state().is_managed(WindowId(2)),
+                "{} took a minimized window back into the layout",
+                kind.as_str()
+            );
+        }
+        assert!(
+            !platform
+                .history
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(hwnd, _)| *hwnd == Hwnd(2)),
+            "a minimized window was laid out, which restores it"
+        );
+
+        platform.windows.lock().unwrap()[1].minimized = false;
+        wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(2));
+        assert!(wm.state().is_managed(WindowId(2)));
     }
 
     #[test]
