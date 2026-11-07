@@ -10,8 +10,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [childrect, main]
-    name: timeline ${{ matrix.side }}
+        include:
+          - cell: childrect module
+            side: childrect
+            tests: "elevated::"
+          - cell: childrect alone
+            side: childrect
+            tests: "elevated::with_the_setting_on"
+          - cell: main module
+            side: main
+            tests: "elevated::"
+    name: rounds ${{ matrix.cell }}
     env:
       MOCHI_E2E: "1"
       MOCHI_E2E_CLOAK: "1"
@@ -23,104 +32,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rounds-${{ matrix.side }}
-      - name: Record the foreground
-        run: |
-          $note = @'
-          import pathlib
-
-          def edit(name, pairs):
-              path = pathlib.Path(name)
-              text = path.read_bytes().decode()
-              nl = "\r\n" if "\r\n" in text else "\n"
-              for old, new in pairs:
-                  old, new = old.replace("\n", nl), new.replace("\n", nl)
-                  assert old in text, old
-                  text = text.replace(old, new, 1)
-              path.write_bytes(text.encode())
-
-          edit("crates/mochi-testbed/src/win32.rs", [
-              ("    ask_until_in_front(hwnd, timeout, ASK_AGAIN, foreground_window, focus_window)\n}\n",
-               """    ask_until_in_front(hwnd, timeout, ASK_AGAIN, foreground_window, focus_window)
-                  .map_err(|e| Error::timeout(format!("{e} {}", front_report(hwnd))))
-          }
-
-          fn front_report(hwnd: i64) -> String {
-              use windows::Win32::UI::WindowsAndMessaging::{
-                  GUITHREADINFO, GetGUIThreadInfo, IsHungAppWindow, IsWindowVisible,
-                  SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_NULL,
-              };
-              let target = as_hwnd(hwnd);
-              let info = |thread: u32| {
-                  let mut read = GUITHREADINFO {
-                      cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-                      ..Default::default()
-                  };
-                  match unsafe { GetGUIThreadInfo(thread, &mut read) } {
-                      Ok(()) => format!(
-                          "flags {:x} active {:?} focus {:?}",
-                          read.flags.0, read.hwndActive.0, read.hwndFocus.0
-                      ),
-                      Err(e) => format!("unread {e}"),
-                  }
-              };
-              let thread = unsafe { GetWindowThreadProcessId(target, None) };
-              let mut answer = 0usize;
-              let pumps = unsafe {
-                  SendMessageTimeoutW(
-                      target,
-                      WM_NULL,
-                      WPARAM(0),
-                      LPARAM(0),
-                      SMTO_ABORTIFHUNG,
-                      197,
-                      Some(&mut answer),
-                  )
-              };
-              format!(
-                  "report: window thread {thread} [{}] foreground thread [{}] visible {} iconic {} hung {} pumps {} foreground after 0x{:x}",
-                  info(thread),
-                  info(0),
-                  unsafe { IsWindowVisible(target) }.as_bool(),
-                  unsafe { IsIconic(target) }.as_bool(),
-                  unsafe { IsHungAppWindow(target) }.as_bool(),
-                  pumps.0 != 0,
-                  foreground_window(),
-              )
-          }
-          """),
-              ("    let deadline = Deadline::new(timeout);\n    loop {\n        if front() == hwnd {",
-               "    let deadline = Deadline::new(timeout);\n    let (mut asks, mut granted) = (0u32, 0u32);\n    loop {\n        if front() == hwnd {"),
-              ("to come to the front after {:?}, the foreground is 0x{:x}\",",
-               "to come to the front after {:?}, the foreground is 0x{:x}, asked {asks} granted {granted}\","),
-              ("        ask(hwnd)?;\n",
-               "        asks += 1;\n        if ask(hwnd)? {\n            granted += 1;\n        }\n"),
-          ])
-
-          edit("crates/mochi/tests/e2e_testbed/elevated.rs", [
-              ('    let mut on = rice();\n    on["elevated"] = Value::Bool(true);\n',
-               """    std::thread::spawn(|| {
-                  let mut seen = -1;
-                  loop {
-                      let now = mochi_testbed::foreground_window();
-                      if now != seen {
-                          seen = now;
-                          let at = std::time::SystemTime::now()
-                              .duration_since(std::time::UNIX_EPOCH)
-                              .map(|d| d.as_micros())
-                              .unwrap_or(0);
-                          eprintln!("foreground at {at} is 0x{now:x}");
-                      }
-                      std::thread::sleep(Duration::from_millis(1));
-                  }
-              });
-              let mut on = rice();
-              on["elevated"] = Value::Bool(true);
-          """),
-          ])
-          '@
-          Set-Content -Path "$env:TEMP\note.py" -Value ($note -replace '(?m)^          ', '')
-          python -I "$env:TEMP\note.py"
-          if ($LASTEXITCODE -ne 0) { throw "could not patch" }
       - name: Build
         run: |
           git log -1 --format=%H
@@ -131,14 +42,13 @@ jobs:
       - name: The rounds
         run: |
           $failed = 0
+          $tests = '${{ matrix.tests }}' -split ' '
           foreach ($round in 1..200) {
-            cargo test --locked -p mochi --test e2e_testbed -- elevated::with_the_setting_on --test-threads 1 --nocapture
+            cargo test --locked -p mochi --test e2e_testbed -- @tests --test-threads 1 --nocapture
             if ($LASTEXITCODE -ne 0) {
               $failed += 1
               "round $round failed"
-              Get-Content "$env:TEMP\mochi-e2e\mochi-elevated-on.log"
-              "end of the log of round $round"
             }
           }
-          "timeline ${{ matrix.side }}: $failed of 200 rounds failed"
+          "cell ${{ matrix.cell }}: $failed of 200 rounds failed"
           exit 0
