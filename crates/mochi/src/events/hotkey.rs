@@ -12,6 +12,14 @@
 //! reload is *posted* to that thread as a message rather than shared with it,
 //! and the one thing that is shared, which of them are live, is a single atomic.
 //!
+//! **Notice when the hook is gone.** Fast is not always fast enough: a callback
+//! that overruns once, because the machine was paging or a game had every
+//! core, gets the hook removed without a word to the process, and every
+//! binding goes quiet until Mochi restarts. So the hook thread also reads the
+//! keyboard's raw input, which reaches it whether the hook is installed or
+//! not, and installs the hook again when keys arrive that the hook never saw.
+//! `HookWatch` decides when.
+//!
 //! **Swallow nothing that was not asked for.** A key press is only ever
 //! withheld from the desktop when it matches a binding exactly. Every other key,
 //! including every key that merely starts with the right modifiers, is passed
@@ -34,7 +42,7 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, anyhow};
 use mochi_hotkey::{Action, Bindings, Key, ModeState, Modifiers, Shell, Trigger};
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
@@ -43,12 +51,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LWIN, VK_MENU,
     VK_RCONTROL, VK_RMENU, VK_RWIN, VK_SHIFT,
 };
+use windows::Win32::UI::Input::{
+    RAWINPUTDEVICE, RIDEV_INPUTSINK, RIDEV_REMOVE, RegisterRawInputDevices,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, PostThreadMessageW,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+    HHOOK, HWND_MESSAGE, KBDLLHOOKSTRUCT, MSG, PostThreadMessageW, RegisterClassW,
     SPI_GETKEYBOARDDELAY, SPI_GETKEYBOARDSPEED, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
     SetWindowsHookExW, SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_QUIT,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
 };
+use windows::core::w;
 
 use super::{Event, EventSender, raw};
 
@@ -163,6 +177,83 @@ thread_local! {
     /// Each slot also keeps the time of its key's last down, which tells a
     /// repeat from a fresh press: see [`is_repeat`].
     static PRESSES: RefCell<[(u16, bool, u32); 16]> = const { RefCell::new([(0, false, 0); 16]) };
+    /// Whether the hook is still being called: see [`HookWatch`].
+    static WATCH: Cell<HookWatch> = const { Cell::new(HookWatch::new()) };
+    /// Whether raw input has arrived yet, so the log can say it does once.
+    static RAW_SEEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The longest a hook call and the raw input of the same key can sit apart, in
+/// milliseconds: the highest `LowLevelHooksTimeout` Windows honours. Windows
+/// waits at most that long for the callback before it hands the key on, so a
+/// live hook is always called within this much of the key's raw input.
+const HOOK_TIMEOUT_MS: u32 = 1000;
+
+/// Tells from the keyboard's raw input whether Windows still calls the hook.
+///
+/// Raw input and the hook both see every key, and nothing the process can do
+/// stops raw input from arriving. A raw key with no hook call within
+/// [`HOOK_TIMEOUT_MS`] on either side of it therefore means the hook is gone.
+/// Which of the two arrives first is not fixed, so a raw key the hook has not
+/// answered yet is only remembered, and judged by the next raw key that comes
+/// after the window has passed.
+///
+/// One reinstall is allowed per stretch without a hook call. Windows withholds
+/// keys from the hook on purpose when the window in front runs as
+/// administrator, and reinstalling on every key there would change nothing. A
+/// new window in front allows one more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HookWatch {
+    /// The time of the last key the hook was called for.
+    called: Option<u32>,
+    /// The first raw key since then that the hook has not answered.
+    unanswered: Option<u32>,
+    /// A reinstall was asked for and the hook has not been called since.
+    asked: bool,
+}
+
+impl HookWatch {
+    const fn new() -> Self {
+        Self {
+            called: None,
+            unanswered: None,
+            asked: false,
+        }
+    }
+
+    /// The hook was called for a key that happened at `time`.
+    const fn hook_called(&mut self, time: u32) {
+        self.called = Some(time);
+        self.unanswered = None;
+        self.asked = false;
+    }
+
+    /// Raw input for a key arrived at `time`. True when the hook is gone and
+    /// has to be installed again.
+    fn raw_key(&mut self, time: u32) -> bool {
+        // Signed, so a hook call stamped a moment after the raw message still
+        // counts as near it.
+        let near = |at: u32| time.wrapping_sub(at).cast_signed() <= HOOK_TIMEOUT_MS.cast_signed();
+        if self.called.is_some_and(near) {
+            self.unanswered = None;
+            return false;
+        }
+        let Some(first) = self.unanswered else {
+            self.unanswered = Some(time);
+            return false;
+        };
+        if near(first) || self.asked {
+            return false;
+        }
+        self.unanswered = None;
+        self.asked = true;
+        true
+    }
+
+    /// Another window came to the front.
+    const fn foreground_changed(&mut self) {
+        self.asked = false;
+    }
 }
 
 /// True while the key is physically down, according to the async key state.
@@ -300,6 +391,9 @@ const MASK_KEY: u16 = 0x11;
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION {
         let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+        let mut watch = WATCH.get();
+        watch.hook_called(event.time);
+        WATCH.set(watch);
         // Mochi's own mask, on its way out. Never looked at twice.
         if event.dwExtraInfo == MASK_TAG {
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -450,37 +544,137 @@ unsafe extern "system" fn desktop_switched(
     forget_presses();
 }
 
-/// The watch for desktop switches, removed again when dropped.
-struct SwitchWatch(HWINEVENTHOOK);
+unsafe extern "system" fn foreground_changed(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _window: windows::Win32::Foundation::HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    let mut watch = WATCH.get();
+    watch.foreground_changed();
+    WATCH.set(watch);
+}
 
-impl SwitchWatch {
-    /// Starts it on the hook thread, which gets the callback and owns PRESSES.
-    fn start() -> Self {
+/// A watch for one system event, removed again when dropped.
+struct EventWatch(HWINEVENTHOOK);
+
+/// The signature `SetWinEventHook` calls back with.
+type WinEventProc = unsafe extern "system" fn(HWINEVENTHOOK, u32, HWND, i32, i32, u32, u32);
+
+impl EventWatch {
+    /// Starts it on the hook thread, which gets the callback and owns the
+    /// state it changes. `lost` says what goes missing when it cannot start.
+    fn start(event: u32, callback: WinEventProc, lost: &str) -> Self {
         let hook = unsafe {
             SetWinEventHook(
-                raw::EVENT_SYSTEM_DESKTOPSWITCH,
-                raw::EVENT_SYSTEM_DESKTOPSWITCH,
+                event,
+                event,
                 None,
-                Some(desktop_switched),
+                Some(callback),
                 0,
                 0,
                 windows::Win32::UI::WindowsAndMessaging::WINEVENT_OUTOFCONTEXT,
             )
         };
         if hook.is_invalid() {
-            tracing::warn!(
-                "could not watch for desktop switches, so a lost key release can eat one press"
-            );
+            tracing::warn!("{lost}");
         }
         Self(hook)
     }
 }
 
-impl Drop for SwitchWatch {
+impl Drop for EventWatch {
     fn drop(&mut self) {
         if !self.0.is_invalid() {
             let _ = unsafe { UnhookWinEvent(self.0) };
         }
+    }
+}
+
+/// The window the keyboard's raw input is delivered to, on the hook thread.
+///
+/// Message only: it has no pixels, no taskbar button and takes no broadcasts.
+/// Raw input needs a window to land in, and nothing else here does.
+struct RawWatch(HWND);
+
+/// The HID usage page and usage of a keyboard.
+const KEYBOARD_USAGE: (u16, u16) = (0x01, 0x06);
+
+unsafe extern "system" fn raw_window(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // Windows frees the raw input buffer here, so every WM_INPUT has to pass.
+    unsafe { DefWindowProcW(window, message, wparam, lparam) }
+}
+
+impl RawWatch {
+    /// Starts it, or says why not. Without it a lost hook is found only by a
+    /// reload, which is how it was before.
+    fn start(instance: HINSTANCE) -> Option<Self> {
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(raw_window),
+            hInstance: instance,
+            lpszClassName: w!("MochiKeyWatch"),
+            ..Default::default()
+        };
+        // A zero atom usually means the class is already registered, which is fine.
+        let _ = unsafe { RegisterClassW(&raw const class) };
+        let window = match unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("MochiKeyWatch"),
+                w!("Mochi"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                Some(instance),
+                None,
+            )
+        } {
+            Ok(window) => window,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not watch the keyboard, so a lost hook stays lost until a reload");
+                return None;
+            }
+        };
+        let device = RAWINPUTDEVICE {
+            usUsagePage: KEYBOARD_USAGE.0,
+            usUsage: KEYBOARD_USAGE.1,
+            // Every key, not only the ones typed into this window.
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: window,
+        };
+        if let Err(e) =
+            unsafe { RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32) }
+        {
+            tracing::warn!(error = %e, "could not watch the keyboard, so a lost hook stays lost until a reload");
+            let _ = unsafe { DestroyWindow(window) };
+            return None;
+        }
+        Some(Self(window))
+    }
+}
+
+impl Drop for RawWatch {
+    fn drop(&mut self) {
+        let device = RAWINPUTDEVICE {
+            usUsagePage: KEYBOARD_USAGE.0,
+            usUsage: KEYBOARD_USAGE.1,
+            dwFlags: RIDEV_REMOVE,
+            hwndTarget: HWND::default(),
+        };
+        let _ = unsafe { RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32) };
+        let _ = unsafe { DestroyWindow(self.0) };
     }
 }
 
@@ -675,7 +869,17 @@ impl Drop for HotkeyDaemon {
 fn hotkey_thread(tx: EventSender, bindings: Bindings, ready: Sender<Result<u32, String>>) {
     BINDINGS.with(|cell| *cell.borrow_mut() = bindings);
     SENDER.with(|cell| *cell.borrow_mut() = Some(tx));
-    let _switch = SwitchWatch::start();
+    WATCH.set(HookWatch::new());
+    let _switch = EventWatch::start(
+        raw::EVENT_SYSTEM_DESKTOPSWITCH,
+        desktop_switched,
+        "could not watch for desktop switches, so a lost key release can eat one press",
+    );
+    let _front = EventWatch::start(
+        raw::EVENT_SYSTEM_FOREGROUND,
+        foreground_changed,
+        "could not watch the foreground, so a lost hook is reinstalled only once",
+    );
 
     let instance = match unsafe { GetModuleHandleW(None) } {
         Ok(h) => h,
@@ -684,6 +888,7 @@ fn hotkey_thread(tx: EventSender, bindings: Bindings, ready: Sender<Result<u32, 
             return;
         }
     };
+    let _keys = RawWatch::start(instance.into());
 
     // The hook has to be installed from the thread that pumps it: the callback
     // is delivered to this thread's message queue.
@@ -742,13 +947,22 @@ fn pump(mut hook: HHOOK, instance: HINSTANCE) -> HHOOK {
                 // happened. A reload is the user's way of saying a key stopped
                 // working, so it always ends with a hook that is certainly
                 // installed, and certainly at the front of the chain.
-                match install(instance) {
-                    Ok(fresh) => {
-                        let _ = unsafe { UnhookWindowsHookEx(hook) };
-                        hook = fresh;
-                    }
-                    Err(e) => tracing::error!(error = %e, "could not reinstall the keyboard hook"),
+                reinstall(&mut hook, instance);
+            }
+            WM_INPUT => {
+                if !RAW_SEEN.replace(true) {
+                    tracing::debug!("raw keyboard input reaches the hook thread");
                 }
+                let mut watch = WATCH.get();
+                let gone = watch.raw_key(message.time);
+                WATCH.set(watch);
+                if gone {
+                    tracing::warn!(
+                        "keys reached the keyboard but not the hook, so the hook is installed again"
+                    );
+                    reinstall(&mut hook, instance);
+                }
+                unsafe { DispatchMessageW(&raw const message) };
             }
             _ => unsafe {
                 let _ = TranslateMessage(&raw const message);
@@ -757,6 +971,17 @@ fn pump(mut hook: HHOOK, instance: HINSTANCE) -> HHOOK {
         }
     }
     hook
+}
+
+/// Swaps `hook` for a freshly installed one, at the front of the chain.
+fn reinstall(hook: &mut HHOOK, instance: HINSTANCE) {
+    match install(instance) {
+        Ok(fresh) => {
+            let _ = unsafe { UnhookWindowsHookEx(*hook) };
+            *hook = fresh;
+        }
+        Err(e) => tracing::error!(error = %e, "could not reinstall the keyboard hook"),
+    }
 }
 
 /// Starts a shell binding's command line, detached, with no console window.
@@ -1327,6 +1552,84 @@ mod tests {
         for gate in [Gate::All, Gate::GameMode, Gate::Off] {
             assert_eq!(Gate::from_usize(gate.as_usize()), gate);
         }
+    }
+
+    #[test]
+    fn keys_the_hook_never_heard_get_it_installed_again() {
+        let mut watch = HookWatch::new();
+        watch.hook_called(10_000);
+        assert!(!watch.raw_key(10_002), "the hook heard this one");
+
+        // Windows drops the hook. The keys keep coming in through raw input
+        // and nothing calls the hook any more.
+        assert!(
+            !watch.raw_key(40_000),
+            "one key alone could still be answered"
+        );
+        assert!(
+            !watch.raw_key(40_000 + HOOK_TIMEOUT_MS),
+            "still inside the window"
+        );
+        assert!(
+            watch.raw_key(40_001 + HOOK_TIMEOUT_MS),
+            "a key past the window with no hook call means the hook is gone"
+        );
+
+        // A press long after the last one, with the hook gone since then, is
+        // found on its very first key.
+        let mut watch = HookWatch::new();
+        watch.hook_called(10_000);
+        assert!(!watch.raw_key(10_001));
+        assert!(!watch.raw_key(20_000));
+        assert!(watch.raw_key(90_000), "the next press finds it at once");
+    }
+
+    #[test]
+    fn a_live_hook_is_never_installed_again_whichever_arrives_first() {
+        let mut watch = HookWatch::new();
+        // Long pauses between keys, and both orders of hook call and raw key,
+        // with the hook's time stamp a little before and a little after.
+        let mut time = 5_000u32;
+        for round in 0..50u32 {
+            time = time.wrapping_add(7_000 + round * 13);
+            if round % 2 == 0 {
+                watch.hook_called(time);
+                assert!(!watch.raw_key(time + 3));
+            } else {
+                assert!(!watch.raw_key(time));
+                watch.hook_called(time + 2);
+            }
+        }
+        // Across the wrap of the tick count.
+        watch.hook_called(u32::MAX - 1);
+        assert!(!watch.raw_key(4));
+        assert!(
+            !watch.raw_key(u32::MAX - 3),
+            "a raw key stamped before its hook call"
+        );
+    }
+
+    #[test]
+    fn a_hook_that_stays_deaf_is_installed_again_once_per_window_in_front() {
+        // Windows withholds keys from the hook while an elevated window is in
+        // front. Reinstalling on every key there would change nothing.
+        let mut watch = HookWatch::new();
+        assert!(!watch.raw_key(1_000));
+        assert!(watch.raw_key(3_000));
+        assert!(!watch.raw_key(9_000));
+        assert!(!watch.raw_key(20_000), "asked once already");
+
+        watch.foreground_changed();
+        assert!(
+            watch.raw_key(30_000),
+            "a new window in front allows one more"
+        );
+
+        // A hook call means the reinstall worked, and a later loss counts again.
+        watch.hook_called(31_000);
+        assert!(!watch.raw_key(31_001));
+        assert!(!watch.raw_key(50_000));
+        assert!(watch.raw_key(60_000));
     }
 
     #[test]
