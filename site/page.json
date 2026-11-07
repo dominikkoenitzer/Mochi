@@ -164,9 +164,9 @@
     "code": "{\n  \"mcpServers\": {\n    \"mochi\": {\n      \"command\": \"C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Programs\\\\Mochi\\\\bin\\\\mochic.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}"
   },
   "new": {
-    "version": "0.1.29",
+    "version": "0.1.30",
     "items": [
-      "A minimized window stays down until you restore it, even when its program keeps changing the title."
+      "When Windows quietly drops the keyboard hook, Mochi notices as you type and puts it back, so your shortcuts keep working."
     ]
   },
   "requirements": [
