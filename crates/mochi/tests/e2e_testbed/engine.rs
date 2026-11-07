@@ -20,8 +20,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetClassNameW, GetClientRect, GetWindowRect, GetWindowTextW, IsIconic,
-    PostMessageW, SC_MINIMIZE, SC_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
-    WM_SYSCOMMAND,
+    IsWindowVisible, IsZoomed, PostMessageW, SC_MINIMIZE, SC_RESTORE, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SetWindowPos, WM_SYSCOMMAND,
 };
 
 use super::borders::{rice, write_json};
@@ -103,7 +103,7 @@ fn a_state_change_does_not_wait_for_a_busy_engine_window() {
 
     for (state, iconic) in [
         (ShowState::MinimizeNoActivate, true),
-        (ShowState::ShowNoActivate, false),
+        (ShowState::RestoreNoActivate, false),
         (ShowState::Minimize, true),
         (ShowState::Restore, false),
     ] {
@@ -120,6 +120,55 @@ fn a_state_change_does_not_wait_for_a_busy_engine_window() {
         wait_for(STALL + STEP, || is_iconic(hwnd) == iconic)
             .unwrap_or_else(|_| panic!("{state:?} never landed"));
     }
+}
+
+/// Hiding and showing are no transition Windows carries a child through, and a
+/// window whose hide is still queued reads as there to whoever looks next, and
+/// the other way round as gone. So these two are done when the call returns.
+#[test]
+fn hiding_and_showing_an_engine_window_have_landed_when_the_call_returns() {
+    skip_unless_allowed!("hiding_and_showing_an_engine_window_have_landed_when_the_call_returns");
+    let windows = spawn_stand_in();
+    let hwnd = windows.handles()[0];
+    let platform = Win32Platform::new();
+
+    for (state, visible) in [(ShowState::Hide, false), (ShowState::ShowNoActivate, true)] {
+        stall(hwnd);
+        platform
+            .show(platform_handle(hwnd), state)
+            .expect("the state change was refused");
+        assert_eq!(
+            unsafe { IsWindowVisible(as_hwnd(hwnd)) }.as_bool(),
+            visible,
+            "{state:?} had not landed when the call returned"
+        );
+    }
+}
+
+/// The two calls of a redraw, on a maximized window.
+#[test]
+fn a_redraw_keeps_a_maximized_engine_window_maximized() {
+    skip_unless_allowed!("a_redraw_keeps_a_maximized_engine_window_maximized");
+    let windows = spawn_stand_in();
+    let hwnd = windows.handles()[0];
+    let platform = Win32Platform::new();
+    let zoomed = || unsafe { IsZoomed(as_hwnd(hwnd)) }.as_bool();
+
+    platform
+        .show(platform_handle(hwnd), ShowState::Maximize)
+        .expect("the maximize was refused");
+    wait_for(STEP, zoomed).expect("the window never maximized");
+    for (state, iconic) in [
+        (ShowState::MinimizeNoActivate, true),
+        (ShowState::RestoreNoActivate, false),
+    ] {
+        platform
+            .show(platform_handle(hwnd), state)
+            .expect("the state change was refused");
+        wait_for(STEP, || is_iconic(hwnd) == iconic)
+            .unwrap_or_else(|_| panic!("{state:?} never landed"));
+    }
+    assert!(zoomed(), "the redraw took the window out of maximized");
 }
 
 /// What a restored window goes through in one go when it comes back to its
@@ -204,8 +253,21 @@ fn an_ordinary_window_has_moved_when_the_call_returns() {
 #[test]
 fn a_redraw_leaves_the_keyboard_where_it_is() {
     skip_unless_allowed!("a_redraw_leaves_the_keyboard_where_it_is");
+    a_redraw_with_the_keyboard_on("a_redraw_leaves_the_keyboard_where_it_is", false);
+}
+
+/// The window being redrawn can be the one being typed in. It goes down and
+/// comes back without activating anything, and nothing else may pick up the
+/// keyboard along the way.
+#[test]
+fn a_redrawn_window_keeps_the_keyboard_it_holds() {
+    skip_unless_allowed!("a_redrawn_window_keeps_the_keyboard_it_holds");
+    a_redraw_with_the_keyboard_on("a_redrawn_window_keeps_the_keyboard_it_holds", true);
+}
+
+fn a_redraw_with_the_keyboard_on(name: &str, engine_holds_it: bool) {
     if !cloak_test_allowed() {
-        eprintln!("skipping a_redraw_leaves_the_keyboard_where_it_is: MOCHI_E2E_CLOAK is not 1.");
+        eprintln!("skipping {name}: MOCHI_E2E_CLOAK is not 1.");
         eprintln!("  It spawns a window without the tool window bit, which any other window");
         eprintln!("  manager on this desktop would take.");
         return;
@@ -232,6 +294,7 @@ fn a_redraw_leaves_the_keyboard_where_it_is() {
     .expect("could not spawn the stand-in");
     let keyboard = keyboard.handles()[0];
     let engine = engine.handles()[0];
+    let holder = if engine_holds_it { engine } else { keyboard };
 
     let mut steps = Steps::default();
 
@@ -240,12 +303,12 @@ fn a_redraw_leaves_the_keyboard_where_it_is() {
             .map_err(|_| format!("state shows {} managed windows", managed_count()))
     });
 
-    steps.step("the other window holds the keyboard", || {
+    steps.step("the window to hold the keyboard holds it", || {
         std::thread::sleep(Duration::from_millis(600));
-        mochi_testbed::bring_to_front(keyboard, STEP).map_err(|e| e.to_string())?;
+        mochi_testbed::bring_to_front(holder, STEP).map_err(|e| e.to_string())?;
         std::thread::sleep(Duration::from_millis(600));
         check(
-            mochi_testbed::foreground_window() == keyboard,
+            mochi_testbed::foreground_window() == holder,
             "something took the keyboard before the display change",
         )
     });
@@ -267,7 +330,7 @@ fn a_redraw_leaves_the_keyboard_where_it_is() {
         let end = Instant::now() + Duration::from_secs(15);
         while Instant::now() < end {
             let now = mochi_testbed::foreground_window();
-            if now != keyboard {
+            if now != holder {
                 holders.insert(now);
             }
             let iconic = is_iconic(engine);
@@ -278,7 +341,7 @@ fn a_redraw_leaves_the_keyboard_where_it_is() {
                 let tail = Instant::now() + Duration::from_millis(500);
                 while Instant::now() < tail {
                     let now = mochi_testbed::foreground_window();
-                    if now != keyboard {
+                    if now != holder {
                         holders.insert(now);
                     }
                     std::thread::yield_now();
@@ -290,10 +353,19 @@ fn a_redraw_leaves_the_keyboard_where_it_is() {
 
         check(went_down, "the redraw never minimized the window")?;
         check(came_back, "the redraw never restored the window")?;
+        if engine_holds_it {
+            // A window going down may read as holding nothing for that moment.
+            // Where the keyboard ends is what counts.
+            let now = mochi_testbed::foreground_window();
+            return check(
+                now == holder,
+                format!("the keyboard went from the redrawn window {holder} to {now}"),
+            );
+        }
         check(
             holders.is_empty(),
             format!(
-                "the keyboard left {keyboard} during the redraw, for {holders:?}; the redrawn \
+                "the keyboard left {holder} during the redraw, for {holders:?}; the redrawn \
                  window is {engine}"
             ),
         )

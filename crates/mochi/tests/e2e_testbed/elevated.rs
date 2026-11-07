@@ -16,8 +16,8 @@ fn an_elevated_window_is_left_alone_and_the_rest_tile_around_it() {
     an_elevated_window_is_left_alone(false);
 }
 
-/// A window of the browser engine is moved by a posted call, which Windows
-/// accepts without looking, so a refusal could never come back from one.
+/// A window of the browser engine is moved by a posted call, so what keeps it
+/// out is its rank, read before any move, and not a refusal coming back.
 #[test]
 fn an_elevated_engine_window_is_left_alone_and_the_rest_tile_around_it() {
     skip_unless_allowed!("an_elevated_engine_window_is_left_alone_and_the_rest_tile_around_it");
