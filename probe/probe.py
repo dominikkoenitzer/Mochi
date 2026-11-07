@@ -25,6 +25,9 @@ user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWMINNOACTIVE = 6, 9, 4, 7
 SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE = 0x1, 0x2, 0x4, 0x10
 SWP_FRAMECHANGED = 0x20
+SWP_ASYNCWINDOWPOS = 0x4000
+WM_SYSCOMMAND, SC_MINIMIZE, SC_RESTORE = 0x112, 0xF020, 0xF120
+SW_MAXIMIZE = 3
 MOVE_FLAGS = SWP_NOACTIVATE | SWP_FRAMECHANGED
 CHILD_CLASS = "Intermediate D3D Window"
 ENUM = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
@@ -34,6 +37,10 @@ for fn in ("GetWindowRect", "GetClientRect"):
 user32.ClientToScreen.argtypes = [w.HWND, ctypes.POINTER(w.POINT)]
 user32.ShowWindow.argtypes = [w.HWND, ctypes.c_int]
 user32.IsIconic.argtypes = [w.HWND]
+user32.IsZoomed.argtypes = [w.HWND]
+user32.ShowWindowAsync.argtypes = [w.HWND, ctypes.c_int]
+user32.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]
+user32.GetForegroundWindow.restype = w.HWND
 user32.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
 user32.SetWindowPos.argtypes = [w.HWND, w.HWND] + [ctypes.c_int] * 4 + [w.UINT]
@@ -149,6 +156,7 @@ PAGE = """<!doctype html><title>{marker}</title>
 <body style="margin:0;background:#121212;color:#eee;font:20px sans-serif">
 <canvas id=c width=900 height=700></canvas>
 <script>
+let shown=0;document.addEventListener('visibilitychange',()=>{{shown++;document.title='{marker} '+shown}});
 const g=document.getElementById('c').getContext('2d');let n=0;
 (function f(){{n++;for(let i=0;i<40;i++){{g.fillStyle=`hsl(${{(n+i*9)%360}},70%,50%)`;
 g.fillRect((n*3+i*23)%900,(i*17)%700,22,22)}}requestAnimationFrame(f)}})();
@@ -176,7 +184,7 @@ def animate(hwnd, stop_event, hold, flags, skip_iconic):
             tile(hwnd, i, flags)
             sent += 1
         time.sleep(0.016)
-    FRAME_COUNTS.update(sent=sent, skipped=skipped)
+    FRAME_COUNTS.update(sent=sent, skipped=skipped, last=i)
 
 
 FRAME_COUNTS = {}
@@ -280,7 +288,24 @@ def resize(hwnd, i):
                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE)
 
 
-def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0, gap=0.0):
+def transition(hwnd, route, command, system):
+    """One minimize or restore, by the route the window would get it."""
+    if route == "direct":
+        user32.ShowWindow(hwnd, command)
+    elif route == "posted":
+        user32.ShowWindowAsync(hwnd, command)
+    else:
+        user32.PostMessageW(hwnd, WM_SYSCOMMAND, system, 0)
+
+
+def wait_iconic(hwnd, wanted):
+    end = time.time() + 2
+    while bool(user32.IsIconic(hwnd)) != wanted and time.time() < end:
+        time.sleep(0.002)
+    return bool(user32.IsIconic(hwnd)) == wanted
+
+
+def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0, gap=0.0, route="direct"):
     if move:
         place(hwnd, *move[0])
     if jitter is not None:
@@ -289,16 +314,20 @@ def cycle(hwnd, style, down, settle, move=None, jitter=None, iconic=0, step=0, g
         resize(hwnd, jitter[0])
         time.sleep(jitter[1])
     if style == "noactivate":
-        user32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
+        transition(hwnd, route, SW_SHOWMINNOACTIVE, SC_MINIMIZE)
+        wait_iconic(hwnd, True)
         time.sleep(down)
-        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+        transition(hwnd, route, SW_SHOWNOACTIVATE, SC_RESTORE)
+        wait_iconic(hwnd, False)
     else:
-        user32.ShowWindow(hwnd, SW_MINIMIZE)
+        transition(hwnd, route, SW_MINIMIZE, SC_MINIMIZE)
+        wait_iconic(hwnd, True)
         for n in range(iconic):
             tile(hwnd, step + n)
             time.sleep(gap)
         time.sleep(down)
-        user32.ShowWindow(hwnd, SW_RESTORE)
+        transition(hwnd, route, SW_RESTORE, SC_RESTORE)
+        wait_iconic(hwnd, False)
     if move:
         place(hwnd, *move[1])
     if jitter is not None:
@@ -310,7 +339,8 @@ def run(args):
     args.browser = args.browser or installed_chromium()
     report = {"browser": os.path.basename(args.browser), "flags": args.flag, "style": args.style,
               "cycles": args.cycles, "iconic": args.iconic, "gap": args.gap, "animate": args.animate, "resize": args.resize,
-              "no_framechanged": args.no_framechanged, "skip_iconic": args.skip_iconic}
+              "no_framechanged": args.no_framechanged, "skip_iconic": args.skip_iconic,
+              "posted_frames": args.posted_frames, "route": args.route, "maximized": args.maximized}
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as workdir:
         marker = f"probe-{os.getpid()}"
         process = launch(args.browser, args.flag, marker, workdir)
@@ -333,6 +363,14 @@ def run(args):
             frames_stop = threading.Event()
             frames_hold = threading.Event()
             frame_flags = SWP_NOACTIVATE if args.no_framechanged else MOVE_FLAGS
+            if args.posted_frames:
+                frame_flags |= SWP_ASYNCWINDOWPOS
+            if args.maximized:
+                user32.ShowWindow(hwnd, SW_MAXIMIZE)
+                time.sleep(1)
+            keyboard = user32.GetForegroundWindow()
+            report["held_keyboard"] = keyboard == hwnd
+            keyboard_moved = zoom_lost = 0
             frames = None
             if args.animate:
                 frames = threading.Thread(
@@ -342,7 +380,11 @@ def run(args):
                 down = args.down if args.down >= 0 else rng.uniform(0.0, 0.7)
                 move = ((40 + 200 * (i % 2), 30), (240 - 200 * (i % 2), 90)) if args.move else None
                 jitter = (i, rng.uniform(0.0, 0.03)) if args.resize else None
-                cycle(hwnd, args.style, down, args.settle, move, jitter, args.iconic, i, args.gap)
+                cycle(hwnd, args.style, down, args.settle, move, jitter, args.iconic, i, args.gap, args.route)
+                if user32.GetForegroundWindow() != keyboard:
+                    keyboard_moved += 1
+                if args.maximized and not user32.IsZoomed(hwnd):
+                    zoom_lost += 1
                 now = compositor_children(hwnd)
                 rels = [relative(c, hwnd) for c in now]
                 if rels and all(outside(r, client_size(hwnd)) for r in rels):
@@ -358,9 +400,17 @@ def run(args):
                     print(json.dumps(entry), flush=True)
                     frames_hold.clear()
             frames_stop.set()
+            report["keyboard_moved"] = keyboard_moved
+            report["zoom_lost"] = zoom_lost
+            report["visibility_changes"] = title(hwnd)
             if frames:
                 frames.join(5)
                 report["frames"] = dict(FRAME_COUNTS)
+                time.sleep(0.5)
+                # Posted frames land later, so the last one has to be seen to land.
+                last = FRAME_COUNTS.get("last", 0)
+                report["landed"] = rect(hwnd) == (40 + 300 * (last % 2), 30 + 40 * (last % 2),
+                                                  1040 + 240 * (last % 2), 790 - 0 * (last % 2))
             report["displaced"] = len(displaced)
             report["end_colours"] = colours(hwnd)
             if args.displace:
@@ -406,6 +456,10 @@ def main():
     parser.add_argument("--gap", type=float, default=0.0, help="pause after each move while minimized")
     parser.add_argument("--no-framechanged", action="store_true", help="frames without the frame recalculation")
     parser.add_argument("--skip-iconic", action="store_true", help="frames leave out a minimized window")
+    parser.add_argument("--posted-frames", action="store_true", help="frames run on the thread that owns the window")
+    parser.add_argument("--route", choices=("direct", "posted", "syscommand"), default="direct",
+                        help="how the minimize and the restore reach the window")
+    parser.add_argument("--maximized", action="store_true", help="start from a maximized window")
     parser.add_argument("--load", type=int, default=0, help="busy processes to run alongside")
     parser.add_argument("--displace", action="store_true")
     parser.add_argument("--move", action="store_true", help="move the window around each cycle")
