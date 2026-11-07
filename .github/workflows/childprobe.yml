@@ -84,6 +84,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     name: bug put back
+    env:
+      MOCHI_E2E: "1"
+      MOCHI_E2E_CLOAK: "1"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -117,18 +120,15 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
           git checkout -- .
           exit 0
-      - name: No second layout pass fails its test
+      - name: A move ahead of the restore fails its test
         working-directory: repo
-        env:
-          MOCHI_E2E: "1"
-          MOCHI_E2E_CLOAK: "1"
         run: |
-          python -I ../scratch/probe/putback.py no_second_pass
+          python -I ../scratch/probe/putback.py move_overtakes
           cargo build --locked -p mochi-testbed --bin mochi-testwin
           if ($LASTEXITCODE -ne 0) { throw "did not compile" }
           cargo test --locked -p mochi --test e2e_testbed --no-run
           if ($LASTEXITCODE -ne 0) { throw "did not compile" }
-          cargo test --locked -p mochi --test e2e_testbed a_restored_engine_window_ends_exactly_on_its_tile -- --test-threads 1 --nocapture
+          cargo test --locked -p mochi --test e2e_testbed a_restore_a_move_and_the_keyboard_land_in_order -- --test-threads 1 --nocapture
           if ($LASTEXITCODE -eq 0) { throw "passed with the bug put back" }
           git checkout -- .
           exit 0
