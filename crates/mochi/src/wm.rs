@@ -552,12 +552,10 @@ impl Scratchpad {
     }
 }
 
-/// One redraw in flight: the windows it minimized, and the window that held
-/// the keyboard before it started.
+/// One redraw in flight: the windows it minimized.
 #[derive(Debug, Clone)]
 struct RedrawBatch {
     windows: Vec<Hwnd>,
-    keyboard: Option<Hwnd>,
 }
 
 /// What was focused, so a change can be announced to the subscribers.
@@ -588,6 +586,10 @@ pub struct WindowManager {
     routed: HashSet<Hwnd>,
     /// Windows Mochi dropped from the model because the user minimized them.
     minimized: HashSet<Hwnd>,
+    /// Windows Mochi told to minimize whose event has not come back yet. A busy
+    /// window can report in when the reason is long over: after the restore of
+    /// a redraw, or after the switch back to its workspace.
+    minimize_unseen: HashSet<Hwnd>,
     /// Windows taken out with `unmanage`, kept out until `manage` or until they close.
     unmanaged_by_user: HashSet<Hwnd>,
     /// Windows that have taken a whole monitor over, and the monitor each one
@@ -745,6 +747,7 @@ impl WindowManager {
             workspace_rules: Vec::new(),
             routed: HashSet::new(),
             minimized: HashSet::new(),
+            minimize_unseen: HashSet::new(),
             unmanaged_by_user: HashSet::new(),
             fullscreen: BTreeMap::new(),
             display_changes: 0,
@@ -1461,6 +1464,7 @@ impl WindowManager {
 
     /// Drops a window from the model, whatever the reason.
     fn unmanage(&mut self, hwnd: Hwnd, why: &str) {
+        self.minimize_unseen.remove(&hwnd);
         let id = window_id(hwnd);
         // Before the lookup, because the foreground is cached for every window
         // that takes it, managed or not. A window Mochi never managed can be
@@ -1632,6 +1636,9 @@ impl WindowManager {
             // The record is only written after the call succeeded, so the
             // restore path never promises a window it did not actually hide.
             Ok(()) => {
+                if matches!(behaviour, HidingBehaviour::Minimize) {
+                    self.minimize_unseen.insert(hwnd);
+                }
                 let mut hidden = record(&self.hidden);
                 if let Some(info) = identity {
                     hidden.identify(hwnd, info.pid, &info.class);
@@ -2137,6 +2144,7 @@ impl WindowManager {
                 // the workspace switch had just hidden, and `unmanage` clears
                 // the hidden record as it goes, so nothing would be left that
                 // knows those windows are off screen and owed back.
+                let expected = self.minimize_unseen.remove(&hwnd);
                 let ours = self.we_hid(hwnd);
                 tracing::debug!(
                     %hwnd,
@@ -2146,7 +2154,7 @@ impl WindowManager {
                     managed = self.core.is_managed(window_id(hwnd)),
                     "a window reported itself minimized"
                 );
-                if ours || self.minimized.contains(&hwnd) {
+                if ours || expected || self.minimized.contains(&hwnd) {
                     tracing::debug!(%hwnd, "our own minimize, leaving the window managed");
                 } else if self.core.is_managed(window_id(hwnd)) {
                     self.minimized.insert(hwnd);
@@ -2155,6 +2163,7 @@ impl WindowManager {
             }
             WindowEventKind::MinimizeEnd => {
                 self.minimized.remove(&hwnd);
+                self.minimize_unseen.remove(&hwnd);
                 self.window_appeared(hwnd);
             }
             WindowEventKind::Foreground => self.window_focused(hwnd),
@@ -2617,27 +2626,30 @@ impl WindowManager {
     /// minimized stays that way.
     ///
     /// A window holding a whole monitor is included on purpose. Frameless
-    /// applications maximized over a screen (Discord is one) are held as
+    /// applications maximized over a screen are held as
     /// fullscreen and lose their content like any other, and a video that
     /// drops out of fullscreen costs less than a screen showing nothing.
     fn wants_redraw(&self, info: &WindowInfo) -> bool {
         is_chromium(&info.class) && !info.minimized && info.is_manageable()
     }
 
-    /// Minimizes `windows` and has them restored a moment later.
+    /// Minimizes `windows` and has them restored a moment later, without
+    /// activating anything, so the keyboard stays where the user has it.
     fn start_redraw(&mut self, windows: Vec<Hwnd>) {
         if windows.is_empty() {
             return;
         }
-        let keyboard = self.platform.foreground_window();
         let mut minimized = Vec::new();
         for hwnd in windows {
             // Marked first. The minimize comes back as an event, and this is
             // what tells that handler the minimize was Mochi's own, so the
             // window keeps its place in the layout.
             self.minimized.insert(hwnd);
-            match self.platform.show(hwnd, ShowState::Minimize) {
-                Ok(()) => minimized.push(hwnd),
+            match self.platform.show(hwnd, ShowState::MinimizeNoActivate) {
+                Ok(()) => {
+                    self.minimize_unseen.insert(hwnd);
+                    minimized.push(hwnd);
+                }
                 Err(e) => {
                     self.minimized.remove(&hwnd);
                     tracing::debug!(%hwnd, error = %e, "could not minimize a window to redraw it");
@@ -2649,36 +2661,24 @@ impl WindowManager {
         }
         self.next_redraw += 1;
         let batch = self.next_redraw;
-        self.redraws.insert(
-            batch,
-            RedrawBatch {
-                windows: minimized,
-                keyboard,
-            },
-        );
+        self.redraws
+            .insert(batch, RedrawBatch { windows: minimized });
         self.send_later(REDRAW_MINIMIZED_FOR, Event::Redraw(Redraw::Restore(batch)));
     }
 
-    /// Restores the windows of one redraw and gives the keyboard back.
+    /// Restores the windows of one redraw.
     fn finish_redraw(&mut self, batch: u64) {
         let Some(redraw) = self.redraws.remove(&batch) else {
             return;
         };
         for &hwnd in &redraw.windows {
-            if let Err(e) = self.platform.show(hwnd, ShowState::Restore) {
+            if let Err(e) = self.platform.show(hwnd, ShowState::RestoreNoActivate) {
                 tracing::debug!(%hwnd, error = %e, "could not restore a redrawn window");
             }
             // The restore's own event clears this as well. Clearing it here
             // too means a window that refused leaves no claim behind that
             // would make the user's next minimize of it look like Mochi's.
             self.minimized.remove(&hwnd);
-        }
-        // A restore activates the window it restores, so the keyboard ends up
-        // on whichever came last. It goes back to where the user had it,
-        // which is often a window that was never part of the redraw at all.
-        if let Some(keyboard) = redraw.keyboard {
-            self.foreground = None;
-            self.focus_hwnd(keyboard);
         }
     }
 
@@ -5494,7 +5494,10 @@ mod tests {
         }
         fn show(&self, hwnd: Hwnd, state: ShowState) -> Result<()> {
             self.shows.lock().unwrap().push((hwnd, state));
-            if matches!(state, ShowState::Hide | ShowState::Minimize) {
+            if matches!(
+                state,
+                ShowState::Hide | ShowState::Minimize | ShowState::MinimizeNoActivate
+            ) {
                 self.went_off_screen(hwnd);
             }
             Ok(())
@@ -9860,7 +9863,7 @@ alt + j : focus down
                 .shows
                 .lock()
                 .unwrap()
-                .contains(&(Hwnd(1), ShowState::Minimize)),
+                .contains(&(Hwnd(1), ShowState::MinimizeNoActivate)),
             "the window holding the monitor was left without its content"
         );
     }
@@ -10443,7 +10446,7 @@ alt + j : focus down
         wm.on_event(Event::Redraw(Redraw::DisplaysSettled(2)));
         assert_eq!(
             *platform.shows.lock().unwrap(),
-            vec![(Hwnd(1), ShowState::Minimize)],
+            vec![(Hwnd(1), ShowState::MinimizeNoActivate)],
             "only the Chromium window is minimized"
         );
 
@@ -10458,14 +10461,80 @@ alt + j : focus down
         wm.on_event(Event::Redraw(restore));
         assert_eq!(
             platform.shows.lock().unwrap().last(),
-            Some(&(Hwnd(1), ShowState::Restore))
+            Some(&(Hwnd(1), ShowState::RestoreNoActivate))
         );
         wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(1));
         assert!(wm.state().is_managed(WindowId(1)));
+    }
+
+    /// A game holding a screen drops out of it when the keyboard leaves, which
+    /// is a display change, which would be the next redraw. So a redraw touches
+    /// the keyboard at no point: not by activating and not by handing it back.
+    #[test]
+    fn a_redraw_never_touches_the_keyboard() {
+        let (mut wm, platform) = manager(vec![notepad(2, "Game"), window(1, "Browser")]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        platform.shows.lock().unwrap().clear();
+        platform.focused.lock().unwrap().clear();
+
+        wm.on_event(Event::Redraw(Redraw::DisplaysSettled(1)));
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(1));
+        let restore = next_redraw_step(&wm, |step| matches!(step, Redraw::Restore(_)));
+        wm.on_event(Event::Redraw(restore));
+        wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(1));
+
         assert_eq!(
-            platform.focused.lock().unwrap().last(),
-            Some(&Hwnd(1)),
-            "the keyboard did not go back to the window that had it"
+            *platform.shows.lock().unwrap(),
+            vec![
+                (Hwnd(1), ShowState::MinimizeNoActivate),
+                (Hwnd(1), ShowState::RestoreNoActivate),
+            ],
+            "the redraw used a state that activates the window"
+        );
+        assert!(
+            platform.focused.lock().unwrap().is_empty(),
+            "the redraw moved the keyboard"
+        );
+    }
+
+    /// A busy window has both calls of the redraw still queued when the restore
+    /// goes out, so its minimize reports in after the redraw is over. That one
+    /// is still Mochi's own, and the next one is the user's.
+    #[test]
+    fn a_minimize_reporting_in_after_the_redraw_keeps_the_tile() {
+        let (mut wm, _platform) = manager(vec![window(1, "Browser")]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+        wm.on_event(Event::Redraw(Redraw::DisplaysSettled(1)));
+        let restore = next_redraw_step(&wm, |step| matches!(step, Redraw::Restore(_)));
+        wm.on_event(Event::Redraw(restore));
+
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(1));
+        assert!(
+            wm.state().is_managed(WindowId(1)),
+            "the late event cost the window its tile"
+        );
+        wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(1));
+
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(1));
+        assert!(
+            !wm.state().is_managed(WindowId(1)),
+            "the user's own minimize was taken for Mochi's"
+        );
+    }
+
+    /// The same with hiding by minimizing: there and back before a busy window
+    /// got to report that it went.
+    #[test]
+    fn a_minimize_reporting_in_after_the_switch_back_keeps_the_tile() {
+        let (mut wm, _platform) = manager(vec![window(1, "One")]);
+        wm.core.window_hiding_behaviour = HidingBehaviour::Minimize;
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(1));
+        assert!(
+            wm.state().is_managed(WindowId(1)),
+            "the late event cost the window its tile"
         );
     }
 
@@ -10488,7 +10557,7 @@ alt + j : focus down
         wm.on_event(Event::Redraw(shown));
         assert_eq!(
             *platform.shows.lock().unwrap(),
-            vec![(Hwnd(1), ShowState::Minimize)],
+            vec![(Hwnd(1), ShowState::MinimizeNoActivate)],
             "the window was not redrawn when it came back"
         );
     }

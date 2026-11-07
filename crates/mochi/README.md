@@ -58,21 +58,34 @@ creates a real top-level window that is zero sized, `WS_EX_TOOLWINDOW` and never
 given `WS_VISIBLE`. It has no pixels, no taskbar button, and Mochi's own
 `is_manageable` skips tool windows, so it cannot tile itself.
 
-## Redrawing Chromium windows after a display change
+## Redrawing browser engine windows after a display change
 
-Switching a screen on or off rebuilds the desktop, and Chromium and Electron
-windows (browsers, Spotify, Discord) do not reliably survive it: a few seconds
-later such a window shows a flat background where its content was, while the
-application keeps running. Ending its GPU process does not always bring it back;
+Switching a screen on or off rebuilds the desktop, and windows of the browser
+engine, browsers and the applications built on it, do not reliably survive it:
+a few seconds later such a window shows a flat background where its content
+was, while the application keeps running. Ending its GPU process does not always bring it back;
 minimizing and restoring the window does. So once the displays have been still
 for three seconds, Mochi minimizes and restores every visible window of the
-`Chrome_WidgetWin_` family, managed or not, and hands the keyboard back to the
-window that had it. Windows it holds off screen at that moment get the same
+browser engine's window class family, managed or not, without activating any of them, so
+the keyboard stays where it is. Windows it holds off screen at that moment get the same
 treatment the first time they are shown. A window that is minimized, and
 everything while Mochi is paused, is left alone. A window holding a whole
 screen is not: frameless applications maximized over a monitor count as
 fullscreen, and a video that drops out of fullscreen costs less than a screen
 showing nothing.
+
+## Moving browser engine windows
+
+The picture of such a window is drawn into a child window of the GPU process,
+and Windows alone carries that child along when the window is minimized and
+restored. A move from another thread runs on that thread and can land in the
+middle of a minimize or a restore; the child then stays a whole screen away from
+its window, and the window shows the same picture until it is closed. So Mochi
+posts every move and every minimize or restore of these windows to the thread
+that owns them, where it runs after the transition instead of inside it. Such a
+window can land a frame behind the windows beside it, and a busy one no longer
+holds up a move or a minimize. Raising it and changing its topmost state still
+wait for it, and so does hiding it with `window_hiding_behaviour: hide`.
 
 ## DPI
 

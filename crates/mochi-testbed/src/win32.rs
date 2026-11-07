@@ -548,7 +548,10 @@ pub fn focus_window(hwnd: i64) -> Result<bool> {
         }
 
         // The usual thread input dance: attach to whoever owns the foreground
-        // so that SetForegroundWindow is allowed to do its job.
+        // so that SetForegroundWindow is allowed to do its job, and to the
+        // window's own thread. With the first alone the activation is posted
+        // across queues, and ending the attachment can lose it, which leaves
+        // nothing in front and later requests answered true without effect.
         let me = GetCurrentThreadId();
         let foreground = GetForegroundWindow();
         let other = if foreground.is_invalid() {
@@ -556,11 +559,19 @@ pub fn focus_window(hwnd: i64) -> Result<bool> {
         } else {
             GetWindowThreadProcessId(foreground, None)
         };
+        let incoming = GetWindowThreadProcessId(target, None);
         let attached = other != 0 && other != me && AttachThreadInput(me, other, true).as_bool();
+        let attached_incoming = incoming != 0
+            && incoming != me
+            && incoming != other
+            && AttachThreadInput(me, incoming, true).as_bool();
 
         let _ = BringWindowToTop(target);
         let ok = SetForegroundWindow(target).as_bool();
 
+        if attached_incoming {
+            let _ = AttachThreadInput(me, incoming, false);
+        }
         if attached {
             let _ = AttachThreadInput(me, other, false);
         }

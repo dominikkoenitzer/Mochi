@@ -33,11 +33,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CreateMenu, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
     GetClientRect, GetMessageW, GetWindowLongPtrW, HICON, HMENU, IDC_ARROW, IsIconic, LoadCursorW,
-    MF_POPUP, MF_STRING, MINMAXINFO, MSG, PostQuitMessage, RegisterClassW, SW_SHOWNA, SWP_NOSIZE,
-    SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_LONG_PTR_INDEX,
-    WINDOWPOS, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE,
-    WM_NCDESTROY, WM_PAINT, WM_SETTEXT, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING, WNDCLASSW,
-    WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+    MF_POPUP, MF_STRING, MINMAXINFO, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOWNA,
+    SWP_NOSIZE, SetWindowLongPtrW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_LONG_PTR_INDEX, WINDOWPOS, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETTEXT, WM_WINDOWPOSCHANGED,
+    WM_WINDOWPOSCHANGING, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::PCWSTR;
 
@@ -47,7 +47,9 @@ use crate::geometry::Rect;
 use crate::info::{MonitorInfo, TestWindowInfo};
 use crate::wide::{to_wide, to_wide_unterminated};
 use crate::win32;
-use crate::{DEFAULT_TITLE_PREFIX, OWNER_WINDOW_CLASS, TEST_WINDOW_CLASS};
+use crate::{
+    DEFAULT_TITLE_PREFIX, OWNER_WINDOW_CLASS, TEST_ENGINE_WINDOW_CLASS, TEST_WINDOW_CLASS,
+};
 
 /// Where the pointer to the per-window state lives, in the class extra bytes.
 const STATE_SLOT: WINDOW_LONG_PTR_INDEX = WINDOW_LONG_PTR_INDEX(0);
@@ -135,6 +137,9 @@ pub struct SpawnOptions {
     /// application in menu mode needs a window that has a menu to enter.
     /// [`crate::in_menu_mode`] is how that is read back.
     pub menu_bar: bool,
+    /// Create the windows with [`TEST_ENGINE_WINDOW_CLASS`], so the window
+    /// manager handles them as it handles windows of the browser engine.
+    pub engine_class: bool,
     /// Create the windows without `WS_EX_TOOLWINDOW`, so they are ordinary
     /// taskbar windows.
     ///
@@ -164,6 +169,7 @@ impl Default for SpawnOptions {
             owned: false,
             no_title: false,
             menu_bar: false,
+            engine_class: false,
             taskbar: false,
         }
     }
@@ -256,6 +262,7 @@ impl TestWindows {
                 enforce_min: options.min_size.is_some(),
                 owned: options.owned,
                 menu_bar: options.menu_bar,
+                engine_class: options.engine_class,
                 taskbar: options.taskbar,
             };
 
@@ -483,6 +490,7 @@ struct WindowSpec {
     enforce_min: bool,
     owned: bool,
     menu_bar: bool,
+    engine_class: bool,
     taskbar: bool,
 }
 
@@ -508,6 +516,32 @@ fn class_name_wide() -> &'static [u16] {
     NAME.get_or_init(|| to_wide(TEST_WINDOW_CLASS))
 }
 
+/// Makes a window's thread sleep instead of pumping, the message its number of
+/// milliseconds in `wparam`.
+const WM_STALL: u32 = WM_APP + 0x53;
+
+/// Has the thread that owns `hwnd` stop pumping messages for `how_long`, the way
+/// an application does while it is busy with something else.
+///
+/// # Errors
+/// When the message cannot be posted, which means the window has gone.
+pub fn stall_window(hwnd: i64, how_long: Duration) -> Result<()> {
+    unsafe {
+        PostMessageW(
+            Some(win32::as_hwnd(hwnd)),
+            WM_STALL,
+            WPARAM(how_long.as_millis() as usize),
+            LPARAM(0),
+        )
+    }
+    .map_err(|e| Error::win32("PostMessageW", &e))
+}
+
+fn engine_class_name_wide() -> &'static [u16] {
+    static NAME: OnceLock<Vec<u16>> = OnceLock::new();
+    NAME.get_or_init(|| to_wide(TEST_ENGINE_WINDOW_CLASS))
+}
+
 fn owner_class_name_wide() -> &'static [u16] {
     static NAME: OnceLock<Vec<u16>> = OnceLock::new();
     NAME.get_or_init(|| to_wide(OWNER_WINDOW_CLASS))
@@ -523,6 +557,7 @@ fn ensure_class() -> Result<()> {
     REGISTERED
         .get_or_init(|| {
             register_class(class_name_wide())
+                .and_then(|()| register_class(engine_class_name_wide()))
                 .and_then(|()| register_class(owner_class_name_wide()))
                 .map_err(|e| e.to_string())
         })
@@ -659,7 +694,14 @@ unsafe fn create_window(spec: &WindowSpec) -> Result<HWND> {
             } else {
                 WS_EX_TOOLWINDOW
             },
-            PCWSTR(class_name_wide().as_ptr()),
+            PCWSTR(
+                if spec.engine_class {
+                    engine_class_name_wide()
+                } else {
+                    class_name_wide()
+                }
+                .as_ptr(),
+            ),
             PCWSTR(title_wide.as_ptr()),
             // A normal frame, so DWM draws the Windows 11 caption, the rounded
             // corners and the invisible resize border that tiling has to
@@ -763,6 +805,10 @@ unsafe extern "system" fn window_proc(
                     }
                 }
                 DefWindowProcW(hwnd, message, wparam, lparam)
+            }
+            WM_STALL => {
+                std::thread::sleep(Duration::from_millis(wparam.0 as u64));
+                LRESULT(0)
             }
             // The client area is painted in full, so never erase it first.
             WM_ERASEBKGND => LRESULT(1),

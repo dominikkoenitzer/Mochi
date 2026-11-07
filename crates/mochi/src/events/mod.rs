@@ -166,7 +166,9 @@ impl MonitorEventKind {
 /// window shows a flat background where its content was, while the
 /// application behind it keeps running. Ending its GPU process does not always
 /// bring it back. Minimizing and restoring the window does, so Mochi does that
-/// for every one of them once the displays have settled.
+/// for every one of them once the displays have settled. Neither half activates
+/// anything, because a game holding a screen drops out of it when the keyboard
+/// leaves, and that is another display change and so another redraw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Redraw {
     /// The displays have been still for a while. Carries which display change

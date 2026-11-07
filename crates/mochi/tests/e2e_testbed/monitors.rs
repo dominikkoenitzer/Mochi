@@ -18,7 +18,7 @@ use super::borders::{BORDER_SLACK, borders, rice, shown, wait_for_borders, write
 use super::*;
 
 /// The class of the daemon's hidden message window, which hears display changes.
-const EVENT_WINDOW_CLASS: &str = "MochiEventWindow";
+pub(super) const EVENT_WINDOW_CLASS: &str = "MochiEventWindow";
 
 /// The portrait screen of the desk, right of the landscape one, as Windows
 /// reports it there.
