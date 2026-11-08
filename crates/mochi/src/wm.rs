@@ -1243,6 +1243,8 @@ impl WindowManager {
         match self.core.add_window_to(monitor, workspace, window) {
             Ok(changes) => {
                 self.routed.insert(info.hwnd);
+                // Back in the layout, so a later minimize must read as the user's even without a restore event.
+                self.minimized.remove(&info.hwnd);
                 // Before the changes are applied: a window that appears
                 // fullscreen joins the model with its monitor held, rather than
                 // being pulled into a tile first and let go of after.
@@ -6301,6 +6303,29 @@ mod tests {
         platform.windows.lock().unwrap()[1].minimized = false;
         wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(2));
         assert!(wm.state().is_managed(WindowId(2)));
+    }
+
+    #[test]
+    fn a_window_back_without_its_restore_event_leaves_again_on_the_next_minimize() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        assert!(!wm.state().is_managed(WindowId(2)));
+
+        // The restore event never arrives; the window is only shown again.
+        platform.windows.lock().unwrap()[1].minimized = false;
+        wm.on_window_event(WindowEventKind::Shown, Hwnd(2));
+        assert!(
+            wm.state().is_managed(WindowId(2)),
+            "the shown window came back in"
+        );
+
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        assert!(
+            !wm.state().is_managed(WindowId(2)),
+            "the user's second minimize was taken for Mochi's own and the window kept its tile"
+        );
     }
 
     #[test]
