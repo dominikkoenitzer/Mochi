@@ -65,10 +65,10 @@ const PAUSED: &str = "mochi is paused, nothing was changed";
 /// before the layout is applied to it a second time.
 const SLOW_APPLICATION_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// How long the displays have to stay unchanged before the Chromium windows
-/// are redrawn. Switching a screen on or off arrives as a burst of display
-/// changes over a second or two, and a redraw in the middle of the burst is
-/// undone by the next change.
+/// How long the displays have to stay unchanged before the browser engine
+/// windows are redrawn. Switching a screen on or off arrives as a burst of
+/// display changes over a second or two, and a redraw in the middle of the
+/// burst is undone by the next change.
 const DISPLAY_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// How long a tiled window that came out bigger than its tile is left to
@@ -90,7 +90,7 @@ const MIN_SIZE_CHANGES: u32 = 3;
 /// The stretch of time [`MIN_SIZE_CHANGES`] counts over.
 const MIN_SIZE_CHANGE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// How long a window being redrawn stays minimized. Chromium has to see the
+/// How long a window being redrawn stays minimized. The engine has to see the
 /// minimize and let go of its broken surface before the restore asks it for a
 /// new one; a restore straight after the minimize can arrive before that.
 const REDRAW_MINIMIZED_FOR: std::time::Duration = std::time::Duration::from_millis(600);
@@ -600,10 +600,10 @@ pub struct WindowManager {
     /// only stops touching the monitor while the window is on screen there.
     fullscreen: BTreeMap<Hwnd, usize>,
     /// Bumped on every display change, so that only the last one of a burst
-    /// redraws the Chromium windows. See [`Redraw`].
+    /// redraws the browser engine windows. See [`Redraw`].
     display_changes: u64,
-    /// Chromium windows Mochi had off screen during a display change. Each is
-    /// owed the same redraw the moment it is shown again.
+    /// Browser engine windows Mochi had off screen during a display change.
+    /// Each is owed the same redraw the moment it is shown again.
     redraw_owed: HashSet<Hwnd>,
     /// Tiled windows that came out bigger than their tile and are waiting to
     /// be asked for their minimum size again, so a window that keeps moving
@@ -2554,7 +2554,7 @@ impl WindowManager {
         });
     }
 
-    /// Redraws the Chromium windows once the displays have stopped changing.
+    /// Redraws the browser engine windows once the displays stop changing.
     fn redraw_once_settled(&mut self) {
         self.display_changes += 1;
         let change = self.display_changes;
@@ -2581,8 +2581,8 @@ impl WindowManager {
         }
     }
 
-    /// Minimizes and restores every Chromium window a display change may have
-    /// left without its content. See [`Redraw`].
+    /// Minimizes and restores every browser engine window a display change may
+    /// have left without its content. See [`Redraw`].
     ///
     /// Every such window on the desktop, not only the managed ones: an
     /// application Mochi leaves alone loses its content all the same. Windows
@@ -2602,7 +2602,7 @@ impl WindowManager {
         };
         let mut now = Vec::new();
         for info in &windows {
-            if !is_chromium(&info.class) {
+            if !is_browser_engine(&info.class) {
                 continue;
             }
             if self.we_hid(info.hwnd) {
@@ -2614,7 +2614,7 @@ impl WindowManager {
         tracing::info!(
             now = now.len(),
             owed = self.redraw_owed.len(),
-            "redrawing Chromium windows after a display change"
+            "redrawing browser engine windows after a display change"
         );
         self.start_redraw(now);
     }
@@ -2629,7 +2629,7 @@ impl WindowManager {
     /// fullscreen and lose their content like any other, and a video that
     /// drops out of fullscreen costs less than a screen showing nothing.
     fn wants_redraw(&self, info: &WindowInfo) -> bool {
-        is_chromium(&info.class) && !info.minimized && info.is_manageable()
+        is_browser_engine(&info.class) && !info.minimized && info.is_manageable()
     }
 
     /// Minimizes `windows` and has them restored a moment later, without
@@ -4998,10 +4998,10 @@ const fn handle(id: WindowId) -> Hwnd {
     Hwnd(id.0)
 }
 
-/// Whether a window is one of the Chromium and Electron family, whose content
+/// Whether a window is one of the browser engine family, whose content
 /// does not reliably survive a display change. See [`Redraw`].
-fn is_chromium(class: &str) -> bool {
-    class.starts_with(mochi_core::layering::CHROMIUM_CLASS_PREFIX)
+fn is_browser_engine(class: &str) -> bool {
+    class.starts_with(mochi_core::layering::BROWSER_ENGINE_CLASS_PREFIX)
 }
 
 fn core_window(info: &WindowInfo) -> Window {
@@ -9020,7 +9020,7 @@ alt + j : focus down
 
     #[test]
     fn a_window_that_cannot_be_layered_is_never_faded() {
-        // Chromium and Electron windows, and anything else presenting through
+        // Browser engine windows, and anything else presenting through
         // DirectComposition, turn grey once layered. They keep their border
         // and full opacity with no rule naming them; an ordinary window beside
         // them still fades.
@@ -9036,7 +9036,7 @@ alt + j : focus down
             ..window(3, "Composited")
         };
         let (mut wm, _) = manager(vec![
-            window(1, "Electron"),
+            window(1, "Engine app"),
             plain,
             composited,
             window(4, "Focused"),
@@ -10465,7 +10465,7 @@ alt + j : focus down
         );
     }
 
-    /// A window that is not of the Chromium family.
+    /// A window that is not of the browser engine family.
     fn notepad(hwnd: isize, title: &str) -> WindowInfo {
         WindowInfo {
             class: "Notepad".into(),
@@ -10490,7 +10490,7 @@ alt + j : focus down
     }
 
     #[test]
-    fn a_display_change_redraws_the_chromium_windows_once_it_has_settled() {
+    fn a_display_change_redraws_the_browser_engine_windows_once_it_has_settled() {
         let (mut wm, platform) = manager(vec![window(1, "Browser"), notepad(2, "Notes")]);
         // Switching a screen on arrives as a burst, and only the last change
         // of it may act.
@@ -10508,7 +10508,7 @@ alt + j : focus down
         assert_eq!(
             *platform.shows.lock().unwrap(),
             vec![(Hwnd(1), ShowState::MinimizeNoActivate)],
-            "only the Chromium window is minimized"
+            "only the browser engine window is minimized"
         );
 
         // The minimize comes back as an event, and it is Mochi's own.
@@ -10600,7 +10600,7 @@ alt + j : focus down
     }
 
     #[test]
-    fn a_chromium_window_off_screen_during_a_display_change_is_redrawn_when_shown() {
+    fn an_engine_window_off_screen_during_a_display_change_is_redrawn_when_shown() {
         let (mut wm, platform) = manager(vec![window(1, "Browser")]);
         wm.handle_command(Command::FocusWorkspace { index: 1 });
         wm.on_monitor_event(MonitorEventKind::DisplayChange);

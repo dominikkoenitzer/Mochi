@@ -161,8 +161,8 @@ impl MonitorEventKind {
 
 /// The redraw that follows a display change.
 ///
-/// Switching a screen on or off rebuilds the whole desktop, and Chromium and
-/// Electron windows do not reliably survive it: a few seconds later such a
+/// Switching a screen on or off rebuilds the whole desktop, and browser engine
+/// windows do not reliably survive it: a few seconds later such a
 /// window shows a flat background where its content was, while the
 /// application behind it keeps running. Ending its GPU process does not always
 /// bring it back. Minimizing and restoring the window does, so Mochi does that
