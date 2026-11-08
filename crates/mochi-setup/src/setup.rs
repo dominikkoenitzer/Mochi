@@ -101,7 +101,7 @@ fn install(options: Options, layout: &Layout) -> i32 {
     // A running mochi.exe cannot be replaced, and asking it to stop puts
     // every window it was hiding back first. The lock keeps a watchdog from
     // starting it again between the stop and the copy.
-    let lock = hold_install_lock(&layout.bin);
+    let lock = hold_install_lock(&layout.bin).ok().flatten();
     if let Err(message) = stop_mochi(layout, Some(&payload), "open Mochi-Setup.exe again") {
         return fail(options, "Mochi is still running", &message);
     }
@@ -295,14 +295,17 @@ fn ask_to_stop(layout: &Layout, payload: Option<&Payload>) -> Option<PathBuf> {
     temp
 }
 
+/// Another install holds the lock in the bin folder.
+struct InstallBusy;
+
 /// Opens the install lock in `bin`, shared with nobody and deleted with its
 /// last handle, so a setup that dies leaves nothing behind. None on a first
 /// install, where no mochic is there to start anything yet.
-fn hold_install_lock(bin: &Path) -> Option<std::fs::File> {
+fn hold_install_lock(bin: &Path) -> Result<Option<std::fs::File>, InstallBusy> {
     use std::os::windows::fs::OpenOptionsExt;
     // `FILE_FLAG_DELETE_ON_CLOSE`.
     const DELETE_ON_CLOSE: u32 = 0x0400_0000;
-    std::fs::OpenOptions::new()
+    Ok(std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -310,7 +313,7 @@ fn hold_install_lock(bin: &Path) -> Option<std::fs::File> {
         .share_mode(0)
         .custom_flags(DELETE_ON_CLOSE)
         .open(bin.join(plan::INSTALL_LOCK))
-        .ok()
+        .ok())
 }
 
 /// Both files are written next to their places first, then the old ones are
@@ -650,6 +653,29 @@ mod tests {
         drop(held);
         std::fs::remove_file(dir.0.join("mochic.exe.old")).unwrap();
         assert_eq!(contents(&dir.0), pair("old mochi", "old mochic"));
+    }
+
+    #[test]
+    fn a_lock_another_install_holds_reads_as_busy() {
+        let dir = scratch("lock");
+        assert!(
+            matches!(hold_install_lock(&dir.0.join("bin")), Ok(None)),
+            "a first install has no bin folder to lock yet"
+        );
+
+        let lock = dir.0.join(plan::INSTALL_LOCK);
+        std::fs::write(&lock, b"").unwrap();
+        let held = hold(&lock);
+        assert!(
+            matches!(hold_install_lock(&dir.0), Err(InstallBusy)),
+            "a lock another install holds was taken for no lock at all"
+        );
+        drop(held);
+
+        let ours = hold_install_lock(&dir.0);
+        assert!(matches!(ours, Ok(Some(_))), "a free lock was not taken");
+        drop(ours);
+        assert!(!lock.exists(), "the last handle takes the file with it");
     }
 
     #[test]
