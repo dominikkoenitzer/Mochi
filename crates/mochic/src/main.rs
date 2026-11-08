@@ -1841,7 +1841,7 @@ mod tests {
     #[test]
     fn why_reports_a_managed_window_with_where_it_lives() {
         let why = serde_json::json!({
-            "hwnd": "0x1a2b", "title": "GitHub", "exe": "brave.exe",
+            "hwnd": "0x1a2b", "title": "Inbox", "exe": "mail.exe",
             "class": "Chrome_WidgetWin_1", "managed": true,
             "monitor": 1, "workspace": 3,
         });
