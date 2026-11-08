@@ -183,7 +183,7 @@ command line does.
 With `--exe <name>` or `--title <regex>`, `mochic state` prints an array of the
 managed windows that match instead of the whole document, so a script can find
 a window by name rather than by focus. `--exe` compares the whole file name in
-any case (`brave.exe`, not `brave`); `--title` is a regular expression searched
+any case (`mail.exe`, not `mail`); `--title` is a regular expression searched
 anywhere in the title, where case matters unless the pattern starts with
 `(?i)`. Given both, a window has to match both. An empty `--exe` or a pattern
 that does not compile fails with `usage` and exit code 2 before the daemon is
