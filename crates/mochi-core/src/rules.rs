@@ -117,8 +117,8 @@ impl IdWithIdentifier {
     /// entry in `ignore_rules` would switch the whole window manager off.
     ///
     /// `Exe` and `Path` are compared without regard to ASCII case, the way
-    /// Windows compares file names, so `discord.exe` in a hand written rule
-    /// finds the real `Discord.exe`. `Class` and `Title` stay byte exact.
+    /// Windows compares file names, so `chat.exe` in a hand written rule
+    /// finds the real `Chat.exe`. `Class` and `Title` stay byte exact.
     #[must_use]
     pub fn matches(&self, window: &WindowInfo<'_>) -> bool {
         if self.id.is_empty() {
@@ -879,7 +879,7 @@ fn regex_matches(pattern: &str, value: &str) -> bool {
 /// `true` for the identifiers Windows itself compares case insensitively.
 ///
 /// File names and paths are case insensitive on Windows, so a rule that writes
-/// `discord.exe` has to find `Discord.exe`. A window class and a window title
+/// `chat.exe` has to find `Chat.exe`. A window class and a window title
 /// are content rather than file names: a class is reported verbatim by the
 /// platform layer and community rule files spell it exactly, and a title is
 /// text the user matches deliberately, so both stay byte exact.
@@ -1180,13 +1180,13 @@ mod tests {
                 "ignore": [{ "kind": "Exe", "id": "Designer.exe", "matching_strategy": "Equals" }],
                 "manage": [{ "kind": "Title", "id": "Affinity Designer 2", "matching_strategy": "Equals" }]
             },
-            "Discord": {
-                "tray_and_multi_window": [{ "kind": "Exe", "id": "Discord.exe", "matching_strategy": "Equals" }],
-                "layered": [{ "kind": "Exe", "id": "Discord.exe", "matching_strategy": "Equals" }],
-                "slow_application": [{ "kind": "Exe", "id": "Discord.exe", "matching_strategy": "Equals" }],
-                "transparency_ignore": [{ "kind": "Exe", "id": "Discord.exe", "matching_strategy": "Equals" }],
-                "floating": [{ "kind": "Title", "id": "Discord Updater", "matching_strategy": "Equals" }],
-                "border_overflow": [{ "kind": "Exe", "id": "Discord.exe", "matching_strategy": "Equals" }]
+            "Chat": {
+                "tray_and_multi_window": [{ "kind": "Exe", "id": "Chat.exe", "matching_strategy": "Equals" }],
+                "layered": [{ "kind": "Exe", "id": "Chat.exe", "matching_strategy": "Equals" }],
+                "slow_application": [{ "kind": "Exe", "id": "Chat.exe", "matching_strategy": "Equals" }],
+                "transparency_ignore": [{ "kind": "Exe", "id": "Chat.exe", "matching_strategy": "Equals" }],
+                "floating": [{ "kind": "Title", "id": "Chat Updater", "matching_strategy": "Equals" }],
+                "border_overflow": [{ "kind": "Exe", "id": "Chat.exe", "matching_strategy": "Equals" }]
             }
         }"#;
         let sets = load_app_specific_configuration(json).unwrap();
