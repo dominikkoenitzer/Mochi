@@ -101,7 +101,16 @@ fn install(options: Options, layout: &Layout) -> i32 {
     // A running mochi.exe cannot be replaced, and asking it to stop puts
     // every window it was hiding back first. The lock keeps a watchdog from
     // starting it again between the stop and the copy.
-    let lock = hold_install_lock(&layout.bin).ok().flatten();
+    let Ok(lock) = hold_install_lock(&layout.bin) else {
+        return fail(
+            options,
+            "Another Mochi install is running",
+            &format!(
+                "Let the install in {} finish, then open Mochi-Setup.exe again.",
+                layout.bin.display()
+            ),
+        );
+    };
     if let Err(message) = stop_mochi(layout, Some(&payload), "open Mochi-Setup.exe again") {
         return fail(options, "Mochi is still running", &message);
     }
@@ -305,7 +314,9 @@ fn hold_install_lock(bin: &Path) -> Result<Option<std::fs::File>, InstallBusy> {
     use std::os::windows::fs::OpenOptionsExt;
     // `FILE_FLAG_DELETE_ON_CLOSE`.
     const DELETE_ON_CLOSE: u32 = 0x0400_0000;
-    Ok(std::fs::OpenOptions::new()
+    // `ERROR_SHARING_VIOLATION`: install.ps1 or another setup has it open.
+    const SHARING_VIOLATION: i32 = 32;
+    match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -313,7 +324,11 @@ fn hold_install_lock(bin: &Path) -> Result<Option<std::fs::File>, InstallBusy> {
         .share_mode(0)
         .custom_flags(DELETE_ON_CLOSE)
         .open(bin.join(plan::INSTALL_LOCK))
-        .ok())
+    {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.raw_os_error() == Some(SHARING_VIOLATION) => Err(InstallBusy),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Both files are written next to their places first, then the old ones are
