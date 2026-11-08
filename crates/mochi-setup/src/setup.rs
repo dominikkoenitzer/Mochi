@@ -309,7 +309,8 @@ struct InstallBusy;
 
 /// Opens the install lock in `bin`, shared with nobody and deleted with its
 /// last handle, so a setup that dies leaves nothing behind. None on a first
-/// install, where no mochic is there to start anything yet.
+/// install, where no mochic is there to start anything yet, and
+/// [`InstallBusy`] while install.ps1 or another setup holds it.
 fn hold_install_lock(bin: &Path) -> Result<Option<std::fs::File>, InstallBusy> {
     use std::os::windows::fs::OpenOptionsExt;
     // `FILE_FLAG_DELETE_ON_CLOSE`.
