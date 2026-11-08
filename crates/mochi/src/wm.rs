@@ -6304,6 +6304,29 @@ mod tests {
     }
 
     #[test]
+    fn a_window_back_without_its_restore_event_leaves_again_on_the_next_minimize() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        assert!(!wm.state().is_managed(WindowId(2)));
+
+        // The restore event never arrives; the window is only shown again.
+        platform.windows.lock().unwrap()[1].minimized = false;
+        wm.on_window_event(WindowEventKind::Shown, Hwnd(2));
+        assert!(
+            wm.state().is_managed(WindowId(2)),
+            "the shown window came back in"
+        );
+
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        assert!(
+            !wm.state().is_managed(WindowId(2)),
+            "the user's second minimize was taken for Mochi's own and the window kept its tile"
+        );
+    }
+
+    #[test]
     fn a_window_that_only_gets_its_title_later_is_managed_on_the_name_change() {
         let mut late = window(3, "");
         late.title = String::new();
