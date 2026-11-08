@@ -1243,6 +1243,8 @@ impl WindowManager {
         match self.core.add_window_to(monitor, workspace, window) {
             Ok(changes) => {
                 self.routed.insert(info.hwnd);
+                // Back in the layout, so a later minimize must read as the user's even without a restore event.
+                self.minimized.remove(&info.hwnd);
                 // Before the changes are applied: a window that appears
                 // fullscreen joins the model with its monitor held, rather than
                 // being pulled into a tile first and let go of after.
