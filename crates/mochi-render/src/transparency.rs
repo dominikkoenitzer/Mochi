@@ -11,9 +11,10 @@
 //! `WS_EX_LAYERED` changes how a window is composited, and not every toolkit
 //! copes:
 //!
-//! - **Electron** apps (Discord, VS Code, Spotify) often go black, keep a stale
-//!   frame or stop repainting until they are resized. Chromium draws through its
-//!   own compositor and does not always notice that the layered style arrived.
+//! - **Browser engine** apps (chat, music, code editors) often go black, keep a
+//!   stale frame or stop repainting until they are resized. The engine draws
+//!   through its own compositor and does not always notice that the layered
+//!   style arrived.
 //! - **UWP and WinUI** windows (Settings, Terminal, Photos) are hosted in
 //!   `ApplicationFrameWindow` and the alpha lands on the frame rather than the
 //!   content, or is ignored outright.
