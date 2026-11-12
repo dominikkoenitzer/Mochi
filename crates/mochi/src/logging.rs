@@ -62,6 +62,18 @@ impl<W: std::io::Write> std::io::Write for AsUser<W> {
     }
 }
 
+/// The layer that writes the log file.
+fn file_layer<S, W>(writer: W) -> impl Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    W: for<'w> fmt::MakeWriter<'w> + Send + Sync + 'static,
+{
+    fmt::layer()
+        .with_writer(writer)
+        .with_ansi(false)
+        .with_target(true)
+}
+
 /// Installs the global subscriber.
 ///
 /// Returns a guard that must stay alive for as long as anything logs.
@@ -95,13 +107,7 @@ pub fn init() -> Result<LogGuard> {
                 .with_target(false)
                 .with_filter(console_filter),
         )
-        .with(
-            fmt::layer()
-                .with_writer(writer)
-                .with_ansi(false)
-                .with_target(true)
-                .with_filter(file_filter),
-        )
+        .with(file_layer(writer).with_filter(file_filter))
         .try_init()
         .map_err(|e| anyhow::anyhow!("could not install the tracing subscriber: {e}"))?;
 
@@ -114,6 +120,42 @@ pub fn init() -> Result<LogGuard> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_log_line_carries_no_clock_time() {
+        let lines = Lines::default();
+        let sink = lines.clone();
+        let subscriber = tracing_subscriber::registry().with(file_layer(move || sink.clone()));
+        tracing::subscriber::with_default(subscriber, || tracing::info!("a window was tiled"));
+
+        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("a window was tiled"),
+            "nothing was logged: {text:?}"
+        );
+        let clock = text.as_bytes().windows(5).any(|w| {
+            w[0].is_ascii_digit()
+                && w[1].is_ascii_digit()
+                && w[2] == b':'
+                && w[3].is_ascii_digit()
+                && w[4].is_ascii_digit()
+        });
+        assert!(!clock, "the log line holds a clock time: {text:?}");
+    }
 
     #[test]
     fn the_log_directory_is_under_local_appdata() {

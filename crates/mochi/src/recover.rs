@@ -527,6 +527,38 @@ mod tests {
     }
 
     #[test]
+    fn damaged_records_are_numbered_and_none_is_lost() {
+        // Two damaged records found within one second used to get the same
+        // name, and the second rename replaced the first. A number keeps both
+        // and says which came first without saying when.
+        let dir = std::env::temp_dir().join(format!("mochi-numbered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create_dir_all");
+        let path = dir.join("off-screen.json");
+        for body in [&b"first"[..], &b"second"[..]] {
+            std::fs::write(&path, body).expect("write");
+            assert!(load(&path).is_none(), "damaged json must not parse");
+        }
+
+        let mut kept: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            ["off-screen.damaged-1.json", "off-screen.damaged-2.json"],
+            "a damaged record was lost or named by the clock"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("off-screen.damaged-1.json")).expect("read"),
+            b"first"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_record_is_replaced_whole_and_never_left_half_written() {
         // The temporary the write goes through must not survive, and the file
         // that is there has to be a complete record at every moment.
