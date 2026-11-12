@@ -63,12 +63,16 @@ impl<W: std::io::Write> std::io::Write for AsUser<W> {
 }
 
 /// The layer that writes the log file.
+///
+/// Lines carry no time: the file's name already holds the day, and the order
+/// of the lines is what explains a bad tile.
 fn file_layer<S, W>(writer: W) -> impl Layer<S>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     W: for<'w> fmt::MakeWriter<'w> + Send + Sync + 'static,
 {
     fmt::layer()
+        .without_time()
         .with_writer(writer)
         .with_ansi(false)
         .with_target(true)

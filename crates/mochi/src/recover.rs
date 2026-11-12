@@ -185,10 +185,10 @@ pub fn load(path: &Path) -> Option<Vec<Entry>> {
 /// Returns where it went, or `None` when it could not be moved, in which case
 /// the caller has said what it knows and there is nothing further to do.
 fn quarantine(path: &Path) -> Option<std::path::PathBuf> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let aside = path.with_extension(format!("damaged-{stamp}.json"));
+    // Numbered, so none replaces another and the name says nothing of when.
+    let aside = (1u32..)
+        .map(|n| path.with_extension(format!("damaged-{n}.json")))
+        .find(|p| !p.exists())?;
     std::fs::rename(path, &aside).ok().map(|()| aside)
 }
 
