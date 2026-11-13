@@ -347,7 +347,7 @@ impl Win32Platform {
 /// batch beside it. It also means a busy application no longer holds up a move
 /// or a minimize. Raising it and changing its topmost state still wait for it.
 fn holds_gpu_child(h: HWND) -> bool {
-    window_class(h).starts_with(mochi_core::layering::CHROMIUM_CLASS_PREFIX)
+    window_class(h).starts_with(mochi_core::layering::BROWSER_ENGINE_CLASS_PREFIX)
 }
 
 /// `ShowWindow`, posted to the window's own thread when [`holds_gpu_child`] says so.
@@ -840,9 +840,9 @@ fn z_order_args(z: ZOrder) -> (Option<HWND>, SET_WINDOW_POS_FLAGS) {
 /// flight is an obvious saving - it makes the window recalculate its whole
 /// non-client area and repaint it, and `SetWindowPos` blocks on the
 /// application while that happens - but tried against the real desktop on
-/// 2026-09-21 it left Chromium windows sitting in the right tile having never
-/// painted anything. Do not take it out again without a way to prove, on a
-/// real browser window, that the window still draws.
+/// 2026-09-21 it left browser engine windows sitting in the right tile having
+/// never painted anything. Do not take it out again without a way to prove,
+/// on a real browser window, that the window still draws.
 const MOVE_FLAGS: SET_WINDOW_POS_FLAGS =
     SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0 | SWP_FRAMECHANGED.0);
 
@@ -1293,7 +1293,8 @@ mod tests {
 
     #[test]
     fn border_compensation_grows_the_target_by_the_invisible_frame() {
-        // A typical Chromium window: 7px of invisible border left, right, bottom.
+        // A typical browser window: 7px of invisible border left, right and
+        // bottom.
         let window_rect = Rect::new(-7, 0, 1287, 807);
         let frame = Rect::new(0, 0, 1280, 800);
         let target = Rect::new(100, 100, 1100, 900);

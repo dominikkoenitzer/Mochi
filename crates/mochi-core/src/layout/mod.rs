@@ -1254,10 +1254,10 @@ mod tests {
     #[test]
     fn four_demanding_windows_on_the_4k_panel_no_longer_overlap() {
         // His desktop: the 4K panel at 150 percent, workspace padding 14,
-        // container padding 10, BSP with WhatsApp, Brave, Spotify and Discord.
-        // The bottom right quarter used to be cut into two tiles of about 920
-        // pixels, narrower than both Spotify and Discord accept, so the two
-        // windows spilled over each other.
+        // container padding 10, BSP with four windows that each ask for a wide
+        // minimum. The bottom right quarter used to be cut into two tiles of
+        // about 920 pixels, narrower than both windows there accept, so the
+        // two spilled over each other.
         use crate::model::{Window, WindowId, Workspace};
 
         let work_area = Rect::new(0, 0, 3840, 2088);

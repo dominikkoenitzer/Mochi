@@ -20,7 +20,7 @@ impl Filter {
         }
         // An empty name would pick every window whose program is unknown.
         if exe.is_some_and(str::is_empty) {
-            return Err("--exe needs a file name, brave.exe for example".to_owned());
+            return Err("--exe needs a file name, mail.exe for example".to_owned());
         }
         let title = title
             .map(|pattern| {
@@ -119,13 +119,13 @@ mod tests {
                         "containers": [
                             { "index": 0, "windows": [window(1, "WindowsTerminal.exe", "agents 1")] },
                             { "index": 1, "windows": [
-                                window(2, "brave.exe", "Inbox"),
+                                window(2, "mail.exe", "Inbox"),
                                 window(3, "WindowsTerminal.exe", "PowerShell"),
                             ] },
                         ],
                         "monocle_container": null,
                         "maximized_window": null,
-                        "floating_windows": [window(4, "Spotify.exe", "Spotify Premium")],
+                        "floating_windows": [window(4, "player.exe", "Player")],
                     }],
                 },
                 {
@@ -190,8 +190,8 @@ mod tests {
     fn a_title_is_matched_as_a_regular_expression() {
         let found = pick(None, Some("^agents \\d$"));
         assert_eq!(hwnds(&found), [1, 6]);
-        assert_eq!(hwnds(&pick(None, Some("Spotify"))), [4]);
-        assert_eq!(pick(None, Some("Spotify"))[0]["placement"], "floating");
+        assert_eq!(hwnds(&pick(None, Some("Player"))), [4]);
+        assert_eq!(pick(None, Some("Player"))[0]["placement"], "floating");
         assert_eq!(pick(None, Some("main\\.rs"))[0]["placement"], "monocle");
     }
 
@@ -201,7 +201,7 @@ mod tests {
             hwnds(&pick(Some("WindowsTerminal.exe"), Some("^agents"))),
             [1, 6]
         );
-        assert!(pick(Some("brave.exe"), Some("^agents")).is_empty());
+        assert!(pick(Some("mail.exe"), Some("^agents")).is_empty());
     }
 
     #[test]
