@@ -463,9 +463,10 @@ impl EngineHost {
         };
         host.hwnd = wait_some(Duration::from_secs(40), || window_titled(&marker))
             .expect("the engine host never showed its window");
-        // A window showing does not mean the GPU process is up; on a slow runner it can take longer than any fixed pause.
+        // A window showing does not mean the GPU child is up and sized; on a slow runner that can outlast any fixed pause.
         let _ = wait_some(Duration::from_secs(40), || {
-            (!host.gpu_children().is_empty()).then_some(())
+            let reading = host.reading();
+            (!reading.children.is_empty() && !reading.is_displaced()).then_some(())
         });
         host
     }
