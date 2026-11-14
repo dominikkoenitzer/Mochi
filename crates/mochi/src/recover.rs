@@ -185,10 +185,10 @@ pub fn load(path: &Path) -> Option<Vec<Entry>> {
 /// Returns where it went, or `None` when it could not be moved, in which case
 /// the caller has said what it knows and there is nothing further to do.
 fn quarantine(path: &Path) -> Option<std::path::PathBuf> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let aside = path.with_extension(format!("damaged-{stamp}.json"));
+    // Numbered, so none replaces another and the name says nothing of when.
+    let aside = (1u32..)
+        .map(|n| path.with_extension(format!("damaged-{n}.json")))
+        .find(|p| !p.exists())?;
     std::fs::rename(path, &aside).ok().map(|()| aside)
 }
 
@@ -523,6 +523,38 @@ mod tests {
         // And a fresh save beside it cannot touch what was kept.
         save(&path, &[entry(1, HidingBehaviour::Cloak)]);
         assert!(kept[0].path().exists(), "the kept copy was overwritten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn damaged_records_are_numbered_and_none_is_lost() {
+        // Two damaged records found within one second used to get the same
+        // name, and the second rename replaced the first. A number keeps both
+        // and says which came first without saying when.
+        let dir = std::env::temp_dir().join(format!("mochi-numbered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create_dir_all");
+        let path = dir.join("off-screen.json");
+        for body in [&b"first"[..], &b"second"[..]] {
+            std::fs::write(&path, body).expect("write");
+            assert!(load(&path).is_none(), "damaged json must not parse");
+        }
+
+        let mut kept: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            ["off-screen.damaged-1.json", "off-screen.damaged-2.json"],
+            "a damaged record was lost or named by the clock"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("off-screen.damaged-1.json")).expect("read"),
+            b"first"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
