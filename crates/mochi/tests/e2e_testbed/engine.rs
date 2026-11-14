@@ -463,8 +463,11 @@ impl EngineHost {
         };
         host.hwnd = wait_some(Duration::from_secs(40), || window_titled(&marker))
             .expect("the engine host never showed its window");
-        // Lets the GPU process come up, which a window showing does not mean.
-        std::thread::sleep(Duration::from_secs(4));
+        // A window showing does not mean the GPU child is up and sized; on a slow runner that can outlast any fixed pause.
+        let _ = wait_some(Duration::from_secs(40), || {
+            let reading = host.reading();
+            (!reading.children.is_empty() && !reading.is_displaced()).then_some(())
+        });
         host
     }
 
