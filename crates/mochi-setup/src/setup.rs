@@ -448,8 +448,10 @@ fn quickstart(layout: &Layout) -> Result<(), String> {
     }
     match win::run_hidden(&layout.mochic(), &["quickstart"]) {
         Ok((0, _)) => Ok(()),
-        Ok((code, said)) => Err(format!(
-            "writing the default settings failed ({code}): {said}"
+        Ok((_, said)) => Err(plan::mochic_failed(
+            plan::MochicStep::Quickstart,
+            &said,
+            &layout.log_dir,
         )),
         Err(e) => Err(plan::could_not(
             "write the default settings",
@@ -541,7 +543,11 @@ fn start_mochi(layout: &Layout) -> Result<(), String> {
     }
     match win::run_hidden(&layout.mochic(), &["start"]) {
         Ok((0, _)) => Ok(()),
-        Ok((_, said)) => Err(said),
+        Ok((_, said)) => Err(plan::mochic_failed(
+            plan::MochicStep::Start,
+            &said,
+            &layout.log_dir,
+        )),
         Err(e) => Err(plan::could_not("start Mochi", &plan::io_reason(&e))),
     }
 }
