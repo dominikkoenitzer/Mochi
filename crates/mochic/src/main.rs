@@ -1500,11 +1500,22 @@ fn expand_env(raw: &str) -> String {
             (&tail[..len], marker + len)
         };
 
-        match std::env::var_os(name).filter(|v| !v.is_empty()) {
-            Some(value) if !name.is_empty() => out.push_str(&value.to_string_lossy()),
-            _ => out.push_str(&rest[..consumed]),
-        }
-        rest = &rest[consumed..];
+        let used = match std::env::var_os(name).filter(|v| !v.is_empty()) {
+            Some(value) if !name.is_empty() => {
+                out.push_str(&value.to_string_lossy());
+                consumed
+            }
+            // An unset `%NAME%` keeps only its first `%`, so what follows it is still expanded.
+            _ if rest.starts_with('%') => {
+                out.push('%');
+                1
+            }
+            _ => {
+                out.push_str(&rest[..consumed]);
+                consumed
+            }
+        };
+        rest = &rest[used..];
     }
 
     out.push_str(rest);
@@ -2063,7 +2074,7 @@ mod tests {
         assert_eq!(
             committed.trim(),
             mochi_core::config::json_schema().trim(),
-            "schema.json is out of date, regenerate it with `mochic schema > schema.json`"
+            "schema.json is out of date, regenerate it with `mochic schema --output schema.json`"
         );
     }
 
@@ -2511,6 +2522,22 @@ mod tests {
         assert_eq!(
             expand_env(r"C:\Users\x\applications.json"),
             r"C:\Users\x\applications.json"
+        );
+    }
+
+    #[test]
+    fn a_percent_sign_that_names_no_variable_keeps_what_follows() {
+        let profile = std::env::var("USERPROFILE").unwrap_or_default();
+        if profile.is_empty() {
+            return;
+        }
+        assert_eq!(
+            expand_env("5%/$USERPROFILE/a%b"),
+            format!("5%/{profile}/a%b")
+        );
+        assert_eq!(
+            expand_env("%MOCHI_NOT_SET_ANYWHERE%USERPROFILE%/x"),
+            format!("%MOCHI_NOT_SET_ANYWHERE{profile}/x")
         );
     }
 
