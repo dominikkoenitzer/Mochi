@@ -118,6 +118,9 @@ impl Serialize for Colour {
     }
 }
 
+/// White, the largest `COLORREF` that is a colour; a higher byte is a flag.
+const LAST_COLORREF: u32 = 0x00FF_FFFF;
+
 #[derive(Deserialize)]
 #[serde(
     untagged,
@@ -134,6 +137,9 @@ impl<'de> Deserialize<'de> for Colour {
         match ColourRepr::deserialize(deserializer)? {
             ColourRepr::Hex(text) => Colour::parse(&text).map_err(D::Error::custom),
             ColourRepr::Channels { r, g, b } => Ok(Colour::new(r, g, b)),
+            ColourRepr::ColorRef(raw) if raw > LAST_COLORREF => Err(D::Error::custom(format!(
+                "{raw} is not a valid colour, a colour number goes up to {LAST_COLORREF}"
+            ))),
             ColourRepr::ColorRef(raw) => Ok(Colour::from_colorref(raw)),
         }
     }
@@ -158,7 +164,7 @@ impl schemars::JsonSchema for Colour {
                     },
                     "required": ["r", "g", "b"]
                 },
-                { "type": "integer", "minimum": 0 }
+                { "type": "integer", "minimum": 0, "maximum": LAST_COLORREF }
             ]
         })
     }
@@ -1438,6 +1444,23 @@ mod tests {
         // gives back for that pink, and it has to survive the round trip.
         assert_eq!(Colour::from_colorref(0x00df_bbff), pink);
         assert_eq!(Colour::default(), Colour::new(0, 0, 0));
+    }
+
+    #[test]
+    fn a_colour_number_past_white_is_refused() {
+        for number in ["16777216", "4294901760"] {
+            let json = format!(r#"{{"border_colours": {{"single": {number}}}}}"#);
+            let error = Config::from_json(&json).unwrap_err().to_string();
+            assert!(error.contains("goes up to 16777215"), "{number}: {error}");
+            assert!(!error.contains("ColourRepr"), "{error}");
+        }
+        for (number, colour) in [
+            ("0", Colour::new(0, 0, 0)),
+            ("16711680", Colour::new(0, 0, 255)),
+            ("16777215", Colour::new(255, 255, 255)),
+        ] {
+            assert_eq!(serde_json::from_str::<Colour>(number).unwrap(), colour);
+        }
     }
 
     #[test]
