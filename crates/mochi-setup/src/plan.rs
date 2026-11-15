@@ -86,30 +86,45 @@ pub fn mochic_failed(step: MochicStep, said: &str, log_dir: &Path) -> String {
 }
 
 /// mochic's error line as sentences: the first line it starts with "mochic: ",
-/// without the os error number, one sentence per link of the cause chain.
+/// without error codes, one sentence per link of the cause chain.
 fn mochic_reason(said: &str) -> String {
     let Some(line) = said.lines().find_map(|l| l.trim().strip_prefix("mochic: ")) else {
         return String::new();
     };
-    without_os_error(line)
+    without_error_codes(line)
         .split(": ")
         .filter_map(sentence)
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-fn without_os_error(line: &str) -> String {
+/// The line without the codes Rust and Windows put after a reason: " (os error 5)", " (0x80070005)".
+fn without_error_codes(line: &str) -> String {
     let mut rest = line;
     let mut out = String::new();
-    while let Some(start) = rest.find(" (os error ") {
-        out.push_str(&rest[..start]);
-        rest = match rest[start..].find(')') {
-            Some(end) => &rest[start + end + 1..],
-            None => "",
-        };
+    while let Some(start) = rest.find(" (") {
+        let inside = &rest[start + 2..];
+        match inside.find(')') {
+            Some(end) if is_error_code(&inside[..end]) => {
+                out.push_str(&rest[..start]);
+                rest = &inside[end + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..start + 2]);
+                rest = inside;
+            }
+        }
     }
     out.push_str(rest);
     out
+}
+
+fn is_error_code(code: &str) -> bool {
+    if let Some(number) = code.strip_prefix("os error ") {
+        return number.trim_start_matches('-').parse::<u32>().is_ok();
+    }
+    code.strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == 8 && hex.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn sentence(part: &str) -> Option<String> {
@@ -141,10 +156,13 @@ mod mochic_words {
 
     const DENIED: &str = "wrote C:\\Users\\a\\mochi.json\nmochic: could not write C:\\Users\\a\\.config\\mochi\\hotkeys: Access is denied. (os error 5)";
 
+    // The administrator start fails through Windows' own error, which ends in its code.
+    const NOT_ELEVATED: &str = "mochic: could not start C:\\Users\\a\\Programs\\Mochi\\bin\\mochi.exe as administrator: Access is denied. (0x80070005)";
+
     fn assert_plain(message: &str) {
         assert!(!message.is_empty());
         assert!(!message.contains('\n'), "{message}");
-        for term in ["mochic", "%", "os error", "pipe", "(1)", "`"] {
+        for term in ["mochic", "%", "os error", "0x", "pipe", "(1)", "`"] {
             assert!(!message.contains(term), "{term} in {message}");
         }
         assert!(message.starts_with("Could not "), "{message}");
@@ -170,6 +188,27 @@ mod mochic_words {
         assert_eq!(
             message,
             "Could not write the default settings. Could not write C:\\Users\\a\\.config\\mochi\\hotkeys. Access is denied."
+        );
+    }
+
+    #[test]
+    fn an_administrator_start_that_fails_keeps_its_reason_without_the_windows_code() {
+        let message = mochic_failed(MochicStep::Start, NOT_ELEVATED, Path::new(LOG));
+        assert_plain(&message);
+        assert_eq!(
+            message,
+            "Could not start Mochi. Could not start C:\\Users\\a\\Programs\\Mochi\\bin\\mochi.exe as administrator. Access is denied."
+        );
+    }
+
+    #[test]
+    fn brackets_that_are_not_codes_stay_in_the_reason() {
+        let said = "mochic: could not write C:\\Program Files (x86)\\m\\hotkeys: Access is denied. (os error 5)";
+        let message = mochic_failed(MochicStep::Quickstart, said, Path::new(LOG));
+        assert_plain(&message);
+        assert_eq!(
+            message,
+            "Could not write the default settings. Could not write C:\\Program Files (x86)\\m\\hotkeys. Access is denied."
         );
     }
 
