@@ -849,6 +849,12 @@ fn check_hotkey_file(found: &mut Findings, path: &Path) {
             ));
             return;
         }
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            found.warnings.push(format!(
+                "{label} is not UTF-8 text, so Mochi binds no keys from it: save it as UTF-8."
+            ));
+            return;
+        }
         Err(e) => {
             found
                 .warnings
@@ -1040,8 +1046,16 @@ fn read_config(path: &Path) -> std::result::Result<String, String> {
             path.display()
         ));
     }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            format!(
+                "{} is not UTF-8 text, so Mochi cannot read it: save it as UTF-8.",
+                path.display()
+            )
+        } else {
+            format!("could not read {}: {e}", path.display())
+        }
+    })?;
     // The checks below parse the text themselves, so a byte order mark goes
     // here, once, and the columns on line 1 match what the editor shows.
     Ok(match text.strip_prefix('\u{feff}') {
@@ -3095,6 +3109,65 @@ mod tests {
             "{:?}",
             found.warnings[0]
         );
+    }
+
+    /// A UTF-16 file with its byte order mark, as Windows PowerShell 5.1 saves it.
+    fn utf16(text: &str) -> Vec<u8> {
+        [0xFF, 0xFE]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect()
+    }
+
+    #[test]
+    fn a_hotkey_file_that_is_not_utf8_says_to_save_it_as_utf8() {
+        let dir = std::env::temp_dir().join(format!("mochic-utfkeys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = [
+            ("utf16", utf16("alt + h : focus left\n")),
+            ("cp1252", b"# caf\xe9\nalt + h : focus left\n".to_vec()),
+        ];
+        for (name, bytes) in files {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let mut found = super::Findings::default();
+            super::check_hotkey_file(&mut found, &path);
+            assert!(found.errors.is_empty(), "{:?}", found.errors);
+            assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+            let warning = &found.warnings[0];
+            assert!(
+                warning.starts_with(&path.display().to_string()),
+                "{warning}"
+            );
+            assert!(warning.ends_with("save it as UTF-8."), "{warning}");
+            assert!(!warning.contains("stream did not contain"), "{warning}");
+            assert!(!warning.contains(". "), "not one sentence: {warning}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_config_file_that_is_not_utf8_says_to_save_it_as_utf8() {
+        let dir = std::env::temp_dir().join(format!("mochic-utfconfig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = [
+            ("utf16.json", utf16("{ \"border\": true }\n")),
+            (
+                "cp1252.json",
+                b"{ \"app_specific_configuration_path\": \"C:/Users/Andr\xe9/apps.json\" }\n"
+                    .to_vec(),
+            ),
+        ];
+        for (name, bytes) in files {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let error = read_config(&path).unwrap_err();
+            assert!(error.starts_with(&path.display().to_string()), "{error}");
+            assert!(error.ends_with("save it as UTF-8."), "{error}");
+            assert!(!error.contains("stream did not contain"), "{error}");
+            assert!(!error.contains(". "), "not one sentence: {error}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

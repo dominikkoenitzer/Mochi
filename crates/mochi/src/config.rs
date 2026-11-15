@@ -123,7 +123,14 @@ pub fn load_hotkeys(path: &Path) -> (mochi_hotkey::Bindings, Vec<String>) {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) => {
-            let message = format!("could not read {}: {e}", path.display());
+            let message = if e.kind() == std::io::ErrorKind::InvalidData {
+                format!(
+                    "{} is not UTF-8 text, so Mochi binds no keys from it: save it as UTF-8.",
+                    path.display()
+                )
+            } else {
+                format!("could not read {}: {e}", path.display())
+            };
             tracing::error!(message);
             return (mochi_hotkey::Bindings::default(), vec![message]);
         }
@@ -221,8 +228,16 @@ pub fn load(path: &Path) -> Result<Loaded> {
         return Ok(Loaded::default());
     }
 
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("could not read {}", path.display()))?;
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            anyhow::anyhow!(
+                "{} is not UTF-8 text, so Mochi cannot read it: save it as UTF-8.",
+                path.display()
+            )
+        } else {
+            anyhow::Error::new(e).context(format!("could not read {}", path.display()))
+        }
+    })?;
     let config =
         Config::from_json(&text).with_context(|| format!("could not parse {}", path.display()))?;
 
@@ -770,6 +785,60 @@ mod tests {
             "unhelpful error: {errors:?}"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A UTF-16 file with its byte order mark, then one with a Windows-1252 byte.
+    fn not_utf8(utf16_text: &str, cp1252: &[u8]) -> [(&'static str, Vec<u8>); 2] {
+        let utf16 = [0xFF, 0xFE]
+            .into_iter()
+            .chain(utf16_text.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        [("utf16", utf16), ("cp1252", cp1252.to_vec())]
+    }
+
+    fn says_to_save_as_utf8(path: &Path, message: &str) {
+        assert!(
+            message.starts_with(&path.display().to_string()),
+            "{message}"
+        );
+        assert!(message.ends_with("save it as UTF-8."), "{message}");
+        assert!(!message.contains("stream did not contain"), "{message}");
+        assert!(!message.contains(". "), "not one sentence: {message}");
+    }
+
+    #[test]
+    fn a_hotkey_file_that_is_not_utf8_says_to_save_it_as_utf8() {
+        let dir = std::env::temp_dir().join(format!("mochi-utfkeys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, bytes) in not_utf8(
+            "alt + h : focus left\n",
+            b"# caf\xe9\nalt + h : focus left\n",
+        ) {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let (bindings, errors) = load_hotkeys(&path);
+            assert!(bindings.is_empty());
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            says_to_save_as_utf8(&path, &errors[0]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_config_file_that_is_not_utf8_says_to_save_it_as_utf8() {
+        let dir = std::env::temp_dir().join(format!("mochi-utfconfig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, bytes) in not_utf8(
+            "{ \"border\": true }\n",
+            b"{ \"app_specific_configuration_path\": \"C:/Users/Andr\xe9/apps.json\" }\n",
+        ) {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            // Formatted as `reload-configuration` answers it.
+            let error = format!("{:#}", load(&path).unwrap_err());
+            says_to_save_as_utf8(&path, &error);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
