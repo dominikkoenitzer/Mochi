@@ -4011,6 +4011,10 @@ impl WindowManager {
         if self.core.is_managed(window_id(hwnd)) {
             return Response::Ok;
         }
+        // Paused, the window would only be queued and land on the focused workspace at unpause.
+        if self.core.is_paused {
+            return Response::error(PAUSED);
+        }
         // Tiled, it would leave a hole in the layout each time the scratchpad hides it.
         if let Some(index) = self.scratchpad_holding(hwnd) {
             return Response::error(format!(
@@ -4079,6 +4083,10 @@ impl WindowManager {
         workspace_padding: Option<i32>,
         container_padding: Option<i32>,
     ) -> Response {
+        // Refused before the write, or the new padding would show at unpause.
+        if self.core.is_paused {
+            return Response::error(PAUSED);
+        }
         match self.core.workspace_mut(monitor, workspace) {
             Ok(target) => {
                 if workspace_padding.is_some() {
@@ -8092,6 +8100,51 @@ alt + j : focus down
             .0
             .is_ok()
         );
+    }
+
+    #[test]
+    fn padding_while_paused_is_refused_and_left_as_it_was() {
+        let (mut wm, platform) = manager(vec![window(1, "One")]);
+        let before = wm.state().workspace(0, 0).unwrap().workspace_padding;
+        wm.handle_command(Command::TogglePause);
+
+        let (response, _) = wm.handle_command(Command::WorkspacePadding {
+            monitor: 0,
+            workspace: 0,
+            size: 100,
+        });
+        assert_eq!(response, Response::error(PAUSED));
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().workspace_padding,
+            before
+        );
+
+        let placed = platform.last_placements()[0].1;
+        wm.handle_command(Command::TogglePause);
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().workspace_padding,
+            before,
+            "the padding came back at unpause"
+        );
+        assert_eq!(platform.last_placements()[0].1, placed);
+    }
+
+    #[test]
+    fn manage_while_paused_is_refused_and_queues_nothing() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+        wm.handle_command(Command::TogglePause);
+        wm.foreground = Some(Hwnd(2));
+        let announced = manage_events(&wm);
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert_eq!(response, Response::error(PAUSED));
+        assert_eq!(manage_events(&wm), announced);
+        assert!(wm.state().pending_windows.is_empty());
+
+        wm.handle_command(Command::TogglePause);
+        assert!(!wm.state().is_managed(WindowId(2)));
     }
 
     #[test]
