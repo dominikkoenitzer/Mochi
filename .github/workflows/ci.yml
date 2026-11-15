@@ -666,7 +666,7 @@ jobs:
           $generated = (Get-Content -Raw schema.generated.json) -replace "`r`n", "`n"
           if ($committed -ne $generated) {
               Write-Output 'schema.json is out of date. Regenerate it with:'
-              Write-Output '  cargo run -p mochic -- schema > schema.json'
+              Write-Output '  cargo run -p mochic -- schema --output schema.json'
               git --no-pager diff --no-index -- schema.json schema.generated.json
               exit 1
           }

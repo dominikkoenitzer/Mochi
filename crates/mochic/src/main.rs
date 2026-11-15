@@ -1918,7 +1918,7 @@ mod tests {
         assert_eq!(
             committed.trim(),
             mochi_core::config::json_schema().trim(),
-            "schema.json is out of date, regenerate it with `mochic schema > schema.json`"
+            "schema.json is out of date, regenerate it with `mochic schema --output schema.json`"
         );
     }
 
