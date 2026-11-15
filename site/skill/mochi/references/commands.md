@@ -109,7 +109,7 @@ Notes on these commands:
 `check` details:
 
 - No `PATH` means the file the daemon would load: `MOCHI_CONFIG`, then `%USERPROFILE%\mochi.json`.
-- Reports parse errors with line and column, rules that cannot work, top-level keys that are ignored, and the file named by `app_specific_configuration_path` (problems there are warnings).
+- Reports parse errors with line and column, rules that cannot work, keys that are ignored at any depth, and the file named by `app_specific_configuration_path` (problems there are warnings).
 - Also reads the hotkey file and reports the number of bindings and every line that did not parse.
 - Given an application rules file instead of a `mochi.json`, it checks that file as one.
 - The last line is `ok: <path> is usable` (optionally `, with N warning(s)`) or `not usable: <reason>`. Exit 0 when usable, 1 when not. Warnings never change the exit code.
