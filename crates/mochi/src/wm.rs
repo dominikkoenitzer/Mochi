@@ -3074,10 +3074,9 @@ impl WindowManager {
             return;
         }
 
-        // Which screen had the focus, remembered the same way a monitor is
-        // carried across: by where it is, not by what Windows is calling it
-        // this time round.
-        let focused_area = self.core.focused_monitor().ok().map(|monitor| monitor.size);
+        // The focused screen's place in `previous`, followed through the carry below.
+        let mut focused_before = self.core.focused_indices().ok().map(|(monitor, _)| monitor);
+        let mut focused_after = None;
 
         let mut previous = Vec::new();
         while let Some(monitor) = self.core.remove_monitor(0) {
@@ -3097,7 +3096,17 @@ impl WindowManager {
         for info in infos {
             let carried = same_panel(&previous, info);
             let mut monitor = match carried {
-                Some(idx) => previous.remove(idx),
+                Some(idx) => {
+                    match focused_before {
+                        Some(focused) if focused == idx => {
+                            focused_after = Some(self.core.monitors().len());
+                            focused_before = None;
+                        }
+                        Some(focused) if focused > idx => focused_before = Some(focused - 1),
+                        _ => {}
+                    }
+                    previous.remove(idx)
+                }
                 None => {
                     fresh.push(self.core.monitors().len());
                     Monitor::new(info.id.0, info.size, info.work_area)
@@ -3178,11 +3187,7 @@ impl WindowManager {
             self.apply_changes(settling);
         }
 
-        if let Some(idx) = focused_area.and_then(|area| {
-            self.core
-                .monitors()
-                .position(|monitor| monitor.size == area)
-        }) {
+        if let Some(idx) = focused_after {
             self.core.monitors_mut().focus(idx);
         }
 
@@ -8519,6 +8524,67 @@ alt + j : focus down
             wm.state().focused_monitor_idx(),
             panel,
             "the focus followed the name rather than the screen it was on"
+        );
+    }
+
+    #[test]
+    fn a_focused_screen_that_is_rotated_keeps_the_focus() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        assert_eq!(wm.state().focused_monitor_idx(), 1);
+
+        // Same device name and handle, width and height swapped.
+        let mut rotated = portrait_screen();
+        rotated.size = Rect::new(3840, 0, 5760, 1080);
+        rotated.work_area = Rect::new(3840, 0, 5760, 1080);
+        platform.set_monitors(vec![main_screen(), rotated.clone()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+
+        let panel = wm
+            .state()
+            .monitors()
+            .position(|m| m.size == rotated.size)
+            .expect("the rotated screen is gone");
+        assert_eq!(
+            wm.state().focused_monitor_idx(),
+            panel,
+            "the focus moved off the screen that was only rotated"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_pair_of_screens_keeps_the_focus() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+
+        platform.set_monitors(vec![main_screen(), portrait_screen()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+
+        assert_eq!(wm.state().focused_monitor_idx(), 1);
+    }
+
+    #[test]
+    fn an_unplugged_focused_screen_hands_the_focus_to_the_one_left() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+
+        platform.set_monitors(vec![main_screen()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+
+        assert_eq!(wm.state().monitors().len(), 1);
+        assert_eq!(wm.state().focused_monitor_idx(), 0);
+        assert_eq!(
+            wm.state().focused_monitor().map(|m| m.size).ok(),
+            Some(main_screen().size)
         );
     }
 
