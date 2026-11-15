@@ -103,11 +103,22 @@ function Write-Detail {
     Write-Output "    $Message"
 }
 
+# Values go through the key by exact name: the registry provider reads -Name as a wildcard.
+function Open-RegistryKey {
+    param(
+        [Parameter(Mandatory)][string] $Path,
+        [switch] $Write
+    )
+    $subKey = $Path -replace '^HKCU:\\', ''
+    if ($Write) { return [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($subKey) }
+    return [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($subKey)
+}
+
 function Get-RunValue {
     param([Parameter(Mandatory)][string] $Name)
-    $item = Get-ItemProperty -Path $script:RunKey -Name $Name -ErrorAction SilentlyContinue
-    if ($null -eq $item) { return $null }
-    return $item.$Name
+    $key = Open-RegistryKey -Path $script:RunKey
+    if ($null -eq $key) { return $null }
+    try { return $key.GetValue($Name) } finally { $key.Close() }
 }
 
 # The raw value and its registry kind.
@@ -120,8 +131,10 @@ function Get-RunValue {
 # already takes this care with PATH; this is the same care for Run values.
 function Get-RunValueRaw {
     param([Parameter(Mandatory)][string] $Name)
+    $key = $null
     try {
-        $key = Get-Item -LiteralPath $script:RunKey -ErrorAction Stop
+        $key = Open-RegistryKey -Path $script:RunKey
+        if ($null -eq $key) { return $null }
         $raw = $key.GetValue($Name, $null, 'DoNotExpandEnvironmentNames')
         if ($null -eq $raw) { return $null }
         return [PSCustomObject]@{
@@ -130,15 +143,16 @@ function Get-RunValueRaw {
         }
     } catch {
         return $null
+    } finally {
+        if ($null -ne $key) { $key.Close() }
     }
 }
 
 function Get-BackupValue {
     param([Parameter(Mandatory)][string] $Name)
-    $value = "$script:BackupPrefix$Name"
-    $item = Get-ItemProperty -Path $script:BackupKey -Name $value -ErrorAction SilentlyContinue
-    if ($null -eq $item) { return $null }
-    return $item.$value
+    $key = Open-RegistryKey -Path $script:BackupKey
+    if ($null -eq $key) { return $null }
+    try { return $key.GetValue("$script:BackupPrefix$Name") } finally { $key.Close() }
 }
 
 function Get-StartupLink {
@@ -184,15 +198,19 @@ function Backup-RunValue {
         [Parameter(Mandatory)][AllowEmptyString()][string] $Value
     )
     $backupValue = "$script:BackupPrefix$Name"
-    if (-not (Test-Path $script:BackupKey)) { New-Item -Path $script:BackupKey -Force | Out-Null }
 
     # The raw text and the kind, so the value goes back exactly as it was.
     $raw = Get-RunValueRaw -Name $Name
     $text = if ($null -ne $raw) { $raw.Value } else { $Value }
     $kind = if ($null -ne $raw) { $raw.Kind } else { 'String' }
 
-    New-ItemProperty -Path $script:BackupKey -Name $backupValue -Value $text -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $script:BackupKey -Name "${backupValue}_Kind" -Value $kind -PropertyType String -Force | Out-Null
+    $key = Open-RegistryKey -Path $script:BackupKey -Write
+    try {
+        $key.SetValue($backupValue, $text, [Microsoft.Win32.RegistryValueKind]::String)
+        $key.SetValue("${backupValue}_Kind", $kind, [Microsoft.Win32.RegistryValueKind]::String)
+    } finally {
+        $key.Close()
+    }
     Write-Detail "Run value backed up to $script:BackupKey\$backupValue ($kind)"
 }
 
@@ -202,20 +220,23 @@ function Restore-RunValue {
     if ($null -eq $backup) { return $false }
     $backupValue = "$script:BackupPrefix$Name"
 
-    # Back under its own kind. An ExpandString written as String keeps its
-    # %VARIABLES% as dead literal text.
-    $kind = 'String'
+    $backups = Open-RegistryKey -Path $script:BackupKey -Write
     try {
-        $recorded = (Get-ItemProperty -Path $script:BackupKey -Name "${backupValue}_Kind" -ErrorAction Stop)."${backupValue}_Kind"
-        if ($recorded -eq 'ExpandString') { $kind = 'ExpandString' }
-    } catch {
-        # Backed up by an older version of this script, which only ever wrote
-        # plain strings. String is what it was.
-    }
+        # Back under its own kind. An ExpandString written as String keeps its
+        # %VARIABLES% as dead literal text. No recorded kind means a backup by
+        # an older version of this script, which only ever wrote plain strings.
+        $kind = [Microsoft.Win32.RegistryValueKind]::String
+        if ($backups.GetValue("${backupValue}_Kind") -eq 'ExpandString') {
+            $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        }
 
-    New-ItemProperty -Path $script:RunKey -Name $Name -Value $backup -PropertyType $kind -Force | Out-Null
-    Remove-ItemProperty -Path $script:BackupKey -Name $backupValue
-    Remove-ItemProperty -Path $script:BackupKey -Name "${backupValue}_Kind" -ErrorAction SilentlyContinue
+        $run = Open-RegistryKey -Path $script:RunKey -Write
+        try { $run.SetValue($Name, $backup, $kind) } finally { $run.Close() }
+        $backups.DeleteValue($backupValue)
+        $backups.DeleteValue("${backupValue}_Kind", $false)
+    } finally {
+        $backups.Close()
+    }
     return $true
 }
 
@@ -315,7 +336,8 @@ function Disable-OtherAutostart {
         $found = $true
         if ($PSCmdlet.ShouldProcess("$script:RunKey\$Name", 'back up and remove')) {
             Backup-RunValue -Name $Name -Value "$run"
-            Remove-ItemProperty -Path $script:RunKey -Name $Name
+            $key = Open-RegistryKey -Path $script:RunKey -Write
+            try { $key.DeleteValue($Name) } finally { $key.Close() }
             Write-Detail 'Run value removed'
         }
     }
