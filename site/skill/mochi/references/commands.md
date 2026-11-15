@@ -135,7 +135,7 @@ Top-level keys of `state`: `version`, `dry_run`, `paused`, `config_path`, `app_c
 
 `why --json` has `hwnd` (hex, for example `0x1a2b`), `title`, `exe`, `class` and `managed`. A managed window adds `monitor` and `workspace`; one that is not managed adds `reason`. `fullscreen_monitor`, `scratchpad`, `overridable` and `hotkeys_blocked` are there only when they apply. `reason` is one of `scratchpad`, `paused`, `manage-class`, `rule`, `unknown`, or a trait of the window itself: `not visible`, `cloaked`, `child window`, `tool window`, `no-activate window`, `owned window`, `no title`, `too small`, `shell class`, `shell process`, `elevated, out of reach` (the window runs as administrator and Mochi does not; the `elevated` setting in `mochi.json` lifts this), `always on top`, `click-through overlay`, `no-tiling marker` (the window carries the `NoTiling` property).
 
-`hotkeys --json` has `path`, `gate` (`all`, `off` or `game-mode`), `bindings` (each `keys`, `command`, optional `mode`) and `errors`.
+`hotkeys --json` has `path`, `gate` (`all`, `off` or `game-mode`), `hook` (`installed`, `no-hotkeys`, `dry-run` or `failed`; without a hook `set-hotkeys enable` cannot turn keys on), `bindings` (each `keys`, `command`, optional `mode`) and `errors`.
 
 ## Notifications
 

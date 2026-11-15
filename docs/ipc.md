@@ -303,6 +303,7 @@ also what `mochic hotkeys` renders as a table:
 {
   "path": "C:\\Users\\you\\.config\\mochi\\hotkeys",
   "gate": "all",
+  "hook": "installed",
   "bindings": [
     {"keys":"alt + h","command":"focus left"},
     {"keys":"alt + shift + g","command":"toggle-game-mode"}
@@ -313,9 +314,9 @@ also what `mochic hotkeys` renders as a table:
 
 `path` is the file that was loaded, picked the way
 [hotkeys.md](hotkeys.md) describes, and null when the daemon was started with
-`--no-hotkeys` and so never looked for one. `gate` is `off` then as well, and
-`bindings` and `errors` are empty. A daemon whose hotkey file simply does not
-exist still reports the path it would have read. `keys` is the chord as Mochi
+`--no-hotkeys` or as a dry run and so never looked for one. `gate` is `off`
+then as well, and `bindings` and `errors` are empty. A daemon whose hotkey file
+simply does not exist still reports the path it would have read. `keys` is the chord as Mochi
 normalised it,
 so a binding written `Shift+ALT+H` comes back as `alt + shift + h` and a typo in
 a modifier is visible. `command` is the right hand side of the line, a Mochi
@@ -324,9 +325,17 @@ block's name: `{"mode":"resize","keys":"h","command":"resize-axis horizontal dec
 
 `gate` says which bindings fire: `all` normally, `game-mode` while
 `{"cmd":"toggle-game-mode"}` is holding everything but its own key for a game,
-and `off` after `{"cmd":"set-hotkeys","state":"disable"}`. Only `all` means the
-document and the keyboard agree.
+and `off` after `{"cmd":"set-hotkeys","state":"disable"}` or when there is no
+keyboard hook. Only `all` means the document and the keyboard agree.
+
+`hook` says whether the keyboard hook is there: `installed`, or why it is not.
+`no-hotkeys` is a daemon started with `--no-hotkeys`, `dry-run` a dry run, and
+`failed` a hook Windows did not install. Without a hook, `set-hotkeys` and
+`toggle-game-mode` fail with that reason, and `set-hotkeys enable` cannot turn
+the keys on.
 
 `errors` holds one string per line that did not parse, each one starting with
 its line number. Those lines are the only ones lost: the rest of the file is
-bound, so a broken line never costs the whole keyboard.
+bound, so a broken line never costs the whole keyboard. When `hook` is
+`failed`, the first entry is `this daemon binds no keys, its keyboard hook
+could not be installed`, and a reload keeps it.

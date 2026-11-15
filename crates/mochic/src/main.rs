@@ -302,6 +302,17 @@ fn hotkey_table(hotkeys: &serde_json::Value) -> String {
         table
     };
 
+    let text_of = |error: &serde_json::Value| {
+        error
+            .as_str()
+            .map_or_else(|| error.to_string(), str::to_owned)
+    };
+    let mut errors = hotkeys
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
     // A suspended set of bindings looks exactly like a working one in a table,
     // so the state that explains it has to be on the screen as well.
     match hotkeys.get("gate").and_then(serde_json::Value::as_str) {
@@ -310,27 +321,33 @@ fn hotkey_table(hotkeys: &serde_json::Value) -> String {
                 "\ngame mode: every binding above is suspended except toggle-game-mode\n",
             );
         }
-        Some("off") => {
-            table.push_str(
+        // `set-hotkeys enable` only lifts a gate it set; a daemon with no hook says why instead.
+        Some("off") => match hotkeys.get("hook").and_then(serde_json::Value::as_str) {
+            Some("no-hotkeys") => {
+                table.push_str("\nthis daemon binds no keys, it was started with --no-hotkeys\n");
+            }
+            Some("dry-run") => table.push_str("\nthis daemon binds no keys, it is a dry run\n"),
+            // The daemon puts this reason first among the errors; it is not a line of the file.
+            Some("failed") => {
+                if let Some((reason, rest)) = errors.split_first() {
+                    table.push('\n');
+                    table.push_str(&text_of(reason));
+                    table.push('\n');
+                    errors = rest;
+                }
+            }
+            _ => table.push_str(
                 "\nhotkeys are off, turn them back on with `mochic set-hotkeys enable`\n",
-            );
-        }
+            ),
+        },
         _ => {}
     }
 
-    let errors = hotkeys
-        .get("errors")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
     if !errors.is_empty() {
         table.push_str("\nlines that did not parse:\n");
         for error in errors {
-            let text = error
-                .as_str()
-                .map_or_else(|| error.to_string(), str::to_owned);
             table.push_str("  ");
-            table.push_str(&text);
+            table.push_str(&text_of(error));
             table.push('\n');
         }
     }
@@ -2390,6 +2407,82 @@ mod tests {
         let off = hotkey_table(&serde_json::json!({"gate": "off", "bindings": []}));
         assert!(off.contains("no hotkeys are bound"), "{off}");
         assert!(off.contains("set-hotkeys enable"), "{off}");
+    }
+
+    #[test]
+    fn a_daemon_with_no_hook_does_not_offer_set_hotkeys_enable() {
+        for (hook, path, bindings, errors) in [
+            (
+                "no-hotkeys",
+                None,
+                serde_json::json!([]),
+                serde_json::json!([]),
+            ),
+            (
+                "dry-run",
+                None,
+                serde_json::json!([]),
+                serde_json::json!([]),
+            ),
+            (
+                "failed",
+                Some("C:\\keys"),
+                serde_json::json!([{"keys": "alt + h", "command": "focus left"}]),
+                serde_json::json!([
+                    "this daemon binds no keys, its keyboard hook could not be installed"
+                ]),
+            ),
+        ] {
+            let table = hotkey_table(&serde_json::json!({
+                "path": path,
+                "gate": "off",
+                "hook": hook,
+                "bindings": bindings,
+                "errors": errors,
+            }));
+            assert!(!table.contains("set-hotkeys enable"), "{hook}: {table}");
+            assert!(table.contains("binds no keys"), "{hook}: {table}");
+        }
+    }
+
+    #[test]
+    fn a_hook_that_failed_is_not_listed_as_a_line_that_did_not_parse() {
+        let hook = "this daemon binds no keys, its keyboard hook could not be installed";
+        let table = hotkey_table(&serde_json::json!({
+            "path": "C:\\keys",
+            "gate": "off",
+            "hook": "failed",
+            "bindings": [{"keys": "alt + h", "command": "focus left"}],
+            "errors": [hook, "line 4: `wiggle` is not a key name"],
+        }));
+        let (above, below) = table
+            .split_once("lines that did not parse:")
+            .unwrap_or((&table, ""));
+        assert!(above.contains(hook), "{table}");
+        assert!(!below.contains(hook), "{table}");
+        assert!(below.contains("line 4: `wiggle`"), "{table}");
+
+        let alone = hotkey_table(&serde_json::json!({
+            "path": "C:\\keys",
+            "gate": "off",
+            "hook": "failed",
+            "bindings": [],
+            "errors": [hook],
+        }));
+        assert!(alone.contains(hook), "{alone}");
+        assert!(!alone.contains("did not parse"), "{alone}");
+    }
+
+    #[test]
+    fn a_gate_turned_off_by_the_command_still_offers_set_hotkeys_enable() {
+        let table = hotkey_table(&serde_json::json!({
+            "path": "C:\\keys",
+            "gate": "off",
+            "hook": "installed",
+            "bindings": [{"keys": "alt + h", "command": "focus left"}],
+            "errors": [],
+        }));
+        assert!(table.contains("set-hotkeys enable"), "{table}");
     }
 
     /// The schema committed at the repository root is what the CLI prints.
