@@ -262,43 +262,55 @@ fn list_hotkeys(daemon: &dyn Daemon) -> Outcome {
     }
 }
 
+/// The monitor in focus and the workspace shown that `focus` switched away from, if it did.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Switched {
+    monitor: Option<usize>,
+    workspace: Option<usize>,
+}
+
 /// Brings a managed window into focus with the commands the daemon has:
 /// its monitor, its workspace, then along the ring to its container and to
 /// its place in a stack. Checks the result, because a mode in front of the
 /// ring (monocle, maximize, a floating focus) leaves the ring commands with
 /// nothing to do.
-fn focus(daemon: &dyn Daemon, hwnd: u64, sent: &mut Sent) -> std::result::Result<Place, String> {
+fn focus(
+    daemon: &dyn Daemon,
+    hwnd: u64,
+    sent: &mut Sent,
+) -> std::result::Result<(Place, Switched), String> {
     let mut state = read_state(daemon)?;
     let (place, _) = locate(&state, hwnd).ok_or_else(|| not_managed(hwnd))?;
+    let mut switched = Switched::default();
     if state["focused_window"].as_u64() == Some(hwnd) {
-        return Ok(place);
+        return Ok((place, switched));
     }
 
-    let mut switched = false;
-    if state["focused_monitor"].as_u64() != Some(place.monitor as u64) {
+    let as_index = |v: &Value| v.as_u64().map(|i| i as usize);
+    let focused_monitor = as_index(&state["focused_monitor"]);
+    if focused_monitor != Some(place.monitor) {
         sent.act(
             daemon,
             Command::FocusMonitor {
                 index: place.monitor,
             },
         )?;
-        switched = true;
+        switched.monitor = focused_monitor;
     }
     // Each monitor keeps the workspace it shows, so after a monitor switch
     // the workspace may already be the right one. Asking for it again would
     // only overwrite the workspace `focus-last-workspace` goes back to.
-    if state["monitors"][place.monitor]["focused_workspace"].as_u64()
-        != Some(place.workspace as u64)
-    {
+    let shown = as_index(&state["monitors"][place.monitor]["focused_workspace"]);
+    if shown != Some(place.workspace) {
         sent.act(
             daemon,
             Command::FocusWorkspace {
                 index: place.workspace,
             },
         )?;
-        switched = true;
+        switched.workspace = shown;
     }
-    if switched {
+    if focused_monitor != Some(place.monitor) || shown != Some(place.workspace) {
         state = read_state(daemon).map_err(|e| sent.after(e))?;
     }
 
@@ -334,7 +346,7 @@ fn focus(daemon: &dyn Daemon, hwnd: u64, sent: &mut Sent) -> std::result::Result
 
     let after = read_state(daemon).map_err(|e| sent.after(e))?;
     if after["focused_window"].as_u64() == Some(hwnd) {
-        return Ok(place);
+        return Ok((place, switched));
     }
     let shown = format!("monitor {}, workspace {}", place.monitor, place.workspace);
     Err(sent.after(if place.spot == Spot::Floating {
@@ -352,7 +364,7 @@ fn focus(daemon: &dyn Daemon, hwnd: u64, sent: &mut Sent) -> std::result::Result
 
 fn focus_window(daemon: &dyn Daemon, p: &FocusParams) -> Outcome {
     let mut sent = Sent::default();
-    let place = focus(daemon, p.window, &mut sent)?;
+    let (place, _) = focus(daemon, p.window, &mut sent)?;
     Ok(json!({
         "ok": true,
         "window": p.window,
@@ -386,8 +398,20 @@ fn move_window_to_workspace(daemon: &dyn Daemon, p: &MoveParams) -> Outcome {
         (None, Some(name), false) => Command::SendToNamedWorkspace { name: name.clone() },
     };
     let mut sent = Sent::default();
-    focus_if_given(daemon, p.window, &mut sent)?;
+    let switched = match p.window {
+        Some(hwnd) => focus(daemon, hwnd, &mut sent)?.1,
+        None => Switched::default(),
+    };
     sent.act(daemon, command)?;
+    if !p.follow {
+        // Put back what focusing the window switched: its monitor's workspace, then the monitor.
+        if let Some(index) = switched.workspace {
+            sent.act(daemon, Command::FocusWorkspace { index })?;
+        }
+        if let Some(index) = switched.monitor {
+            sent.act(daemon, Command::FocusMonitor { index })?;
+        }
+    }
     Ok(json!({
         "ok": true,
         "window": p.window,
@@ -1216,6 +1240,104 @@ mod tests {
         assert_eq!(answer["sent"], json!(["cycle-focus", "send-to-workspace"]));
         assert_eq!(answer["window"], 0x20);
         assert_eq!(answer["workspace"], 1);
+    }
+
+    #[test]
+    fn moving_a_window_from_a_hidden_workspace_shows_the_old_workspace_again() {
+        // Monitor 0 shows workspace 1; 0x20 sits on its workspace 0.
+        let fake = Fake::with_states([
+            desktop(0, 1, 0, 0x40),
+            desktop(0, 0, 0, 0x10),
+            desktop(0, 0, 1, 0x20),
+        ]);
+        let p = MoveParams {
+            window: Some(0x20),
+            workspace: Some(1),
+            workspace_name: None,
+            follow: false,
+        };
+        let answer = move_window_to_workspace(&fake, &p).unwrap();
+        assert_eq!(
+            fake.sent(),
+            [
+                Command::State,
+                Command::FocusWorkspace { index: 0 },
+                Command::State,
+                next(),
+                Command::State,
+                Command::SendToWorkspace { index: 1 },
+                Command::FocusWorkspace { index: 1 },
+            ]
+        );
+        assert_eq!(
+            answer["sent"],
+            json!([
+                "focus-workspace",
+                "cycle-focus",
+                "send-to-workspace",
+                "focus-workspace"
+            ])
+        );
+    }
+
+    #[test]
+    fn moving_a_window_from_the_other_monitor_gives_the_focus_back() {
+        // The focus is on monitor 1, and monitor 0 shows workspace 1.
+        let fake = Fake::with_states([
+            desktop(1, 1, 2, 0x50),
+            desktop(0, 0, 2, 0x30),
+            desktop(0, 0, 0, 0x10),
+        ]);
+        let p = MoveParams {
+            window: Some(0x10),
+            workspace: Some(1),
+            workspace_name: None,
+            follow: false,
+        };
+        let answer = move_window_to_workspace(&fake, &p).unwrap();
+        assert_eq!(
+            fake.sent(),
+            [
+                Command::State,
+                Command::FocusMonitor { index: 0 },
+                Command::FocusWorkspace { index: 0 },
+                Command::State,
+                next(),
+                Command::State,
+                Command::SendToWorkspace { index: 1 },
+                Command::FocusWorkspace { index: 1 },
+                Command::FocusMonitor { index: 1 },
+            ]
+        );
+        assert_eq!(answer["followed"], false);
+    }
+
+    #[test]
+    fn moving_with_follow_leaves_the_view_with_the_window() {
+        let fake = Fake::with_states([
+            desktop(1, 1, 2, 0x50),
+            desktop(0, 0, 2, 0x30),
+            desktop(0, 0, 0, 0x10),
+        ]);
+        let p = MoveParams {
+            window: Some(0x10),
+            workspace: Some(1),
+            workspace_name: None,
+            follow: true,
+        };
+        move_window_to_workspace(&fake, &p).unwrap();
+        assert_eq!(
+            fake.sent(),
+            [
+                Command::State,
+                Command::FocusMonitor { index: 0 },
+                Command::FocusWorkspace { index: 0 },
+                Command::State,
+                next(),
+                Command::State,
+                Command::MoveToWorkspace { index: 1 },
+            ]
+        );
     }
 
     #[test]
