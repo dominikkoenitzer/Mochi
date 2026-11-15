@@ -367,6 +367,7 @@ and when one does, `why` goes on to `rule` or `unknown`.
 |---|---|---|
 | `path` | string or null | The hotkey file in use. |
 | `gate` | string | `all`, `game-mode` or `off`. |
+| `hook` | string | `installed`, or why there is no keyboard hook: `no-hotkeys`, `dry-run` or `failed`. |
 | `bindings` | array | One object per binding: `keys` (string), `command` (string), and `mode` (string) for a binding inside a `mode` block. |
 | `errors` | array of strings | The lines of the file that did not parse. |
 

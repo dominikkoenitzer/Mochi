@@ -55,8 +55,36 @@ use crate::platform::{
 };
 use crate::state::{State, snapshot};
 
-/// What a command that needs the keyboard hook answers without one.
-const NO_HOTKEYS: &str = "this daemon binds no keys, it was started with --no-hotkeys";
+/// Why a daemon holds no keyboard hook, so a command that needs one can say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoHook {
+    /// Started with `--no-hotkeys`.
+    Flag,
+    /// A dry run never installs the hook.
+    DryRun,
+    /// The hook was asked for and Windows did not install it.
+    Failed,
+}
+
+impl NoHook {
+    /// What a command that needs the keyboard hook answers without one.
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Flag => "this daemon binds no keys, it was started with --no-hotkeys",
+            Self::DryRun => "this daemon binds no keys, it is a dry run",
+            Self::Failed => "this daemon binds no keys, its keyboard hook could not be installed",
+        }
+    }
+
+    /// The `hook` field of `mochic hotkeys`.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "no-hotkeys",
+            Self::DryRun => "dry-run",
+            Self::Failed => "failed",
+        }
+    }
+}
 
 /// What a command that would change the desktop answers while paused.
 const PAUSED: &str = "mochi is paused, nothing was changed";
@@ -646,6 +674,8 @@ pub struct WindowManager {
     visuals: crate::visuals::Visuals,
     /// The keyboard hook, when this daemon binds keys at all.
     hotkeys: Option<HotkeyDaemon>,
+    /// Why `hotkeys` is empty, read only while it is.
+    no_hook: NoHook,
     /// The hotkey file, for a reload and for `mochic hotkeys`.
     hotkey_path: Option<PathBuf>,
     /// The gate and the pause to put back when game mode ends.
@@ -733,6 +763,11 @@ impl WindowManager {
         }
         let hidden = Arc::new(Mutex::new(carried));
         let visuals = crate::visuals::Visuals::new(Arc::clone(&platform), Arc::clone(&hidden));
+        let no_hook = if session.dry_run {
+            NoHook::DryRun
+        } else {
+            NoHook::Flag
+        };
 
         let mut wm = Self {
             platform,
@@ -763,6 +798,7 @@ impl WindowManager {
             visual_config: Config::default(),
             visuals,
             hotkeys: None,
+            no_hook,
             hotkey_path: None,
             before_game_mode: None,
             hotkey_candidates: Vec::new(),
@@ -830,7 +866,10 @@ impl WindowManager {
     fn take_hook(&mut self, started: Result<HotkeyDaemon>) {
         match started {
             Ok(daemon) => self.hotkeys = Some(daemon),
-            Err(e) => tracing::error!(error = %e, "no keyboard hook, Mochi binds no keys"),
+            Err(e) => {
+                tracing::error!(error = %e, "no keyboard hook, Mochi binds no keys");
+                self.no_hook = NoHook::Failed;
+            }
         }
     }
 
@@ -3660,11 +3699,18 @@ impl WindowManager {
                 None => serde_json::json!({ "keys": row.keys, "command": row.command }),
             })
             .collect();
+        // Composed here rather than stored, so a reload that rewrites the parse errors keeps it.
+        let mut errors = Vec::with_capacity(self.hotkey_errors.len() + 1);
+        if self.hotkeys.is_none() && self.no_hook == NoHook::Failed {
+            errors.push(NoHook::Failed.reason().to_owned());
+        }
+        errors.extend(self.hotkey_errors.iter().cloned());
         serde_json::json!({
             "path": self.hotkey_path.as_ref().map(|p| p.display().to_string()),
             "gate": self.hotkeys.as_ref().map_or("off", |h| h.gate().as_str()),
+            "hook": self.hotkeys.as_ref().map_or(self.no_hook.as_str(), |_| "installed"),
             "bindings": bindings,
-            "errors": self.hotkey_errors,
+            "errors": errors,
         })
     }
 
@@ -3692,7 +3738,7 @@ impl WindowManager {
     /// `set-hotkeys`: bind keys, or stop binding them without stopping tiling.
     fn set_hotkeys(&mut self, enable: bool) -> Response {
         let Some(gate) = self.hotkeys.as_ref().map(HotkeyDaemon::gate) else {
-            return Response::error(NO_HOTKEYS);
+            return Response::error(self.no_hook.reason());
         };
 
         // Asking for the keyboard while game mode holds it is a request to
@@ -3726,7 +3772,7 @@ impl WindowManager {
     /// rather than in a half-suspended state nobody can leave.
     fn toggle_game_mode(&mut self) -> Response {
         let Some(hotkeys) = self.hotkeys.as_ref() else {
-            return Response::error(NO_HOTKEYS);
+            return Response::error(self.no_hook.reason());
         };
         let entering = hotkeys.gate() != Gate::GameMode;
 
@@ -6742,6 +6788,79 @@ alt + j : focus down
             wm.state().is_paused,
             "game mode resumed a pause the user set themselves"
         );
+    }
+
+    #[test]
+    fn a_dry_run_says_it_is_a_dry_run_when_asked_for_hotkeys() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        for command in [
+            Command::SetHotkeys {
+                state: mochi_client::BooleanState::Enable,
+            },
+            Command::ToggleGameMode,
+        ] {
+            let (response, _) = wm.handle_command(command);
+            let message = response.error_message().unwrap_or_default().to_owned();
+            assert!(message.contains("dry run"), "{message}");
+            assert!(!message.contains("--no-hotkeys"), "{message}");
+        }
+
+        let (response, _) = wm.handle_command(Command::Hotkeys);
+        let Response::Hotkeys { hotkeys } = response else {
+            panic!("{response:?}");
+        };
+        assert_eq!(hotkeys["gate"], "off");
+        assert_eq!(hotkeys["hook"], "dry-run");
+        assert_eq!(hotkeys["errors"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_hook_that_failed_to_start_says_so_and_keeps_saying_so() {
+        let dir = std::env::temp_dir().join(format!("mochi-hookless-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let keys = dir.join("hotkeys");
+        std::fs::write(&keys, "alt + h : focus left\n").expect("write");
+
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        let _ = wm.load_hotkey_file(keys, Vec::new());
+        wm.take_hook(Err(anyhow::anyhow!("hook refused: access is denied (5)")));
+
+        for command in [
+            Command::SetHotkeys {
+                state: mochi_client::BooleanState::Enable,
+            },
+            Command::ToggleGameMode,
+        ] {
+            let (response, _) = wm.handle_command(command);
+            let message = response.error_message().unwrap_or_default().to_owned();
+            assert!(message.contains("could not be installed"), "{message}");
+            assert!(!message.contains("--no-hotkeys"), "{message}");
+            assert!(!message.contains("dry run"), "{message}");
+        }
+
+        for when in ["after the failed start", "after a reload"] {
+            let (response, _) = wm.handle_command(Command::Hotkeys);
+            let Response::Hotkeys { hotkeys } = response else {
+                panic!("{response:?}");
+            };
+            assert_eq!(hotkeys["gate"], "off", "{when}");
+            assert_eq!(hotkeys["hook"], "failed", "{when}");
+            assert_eq!(
+                hotkeys["bindings"].as_array().map(Vec::len),
+                Some(1),
+                "{when}"
+            );
+            let errors = hotkeys["errors"].as_array().cloned().unwrap_or_default();
+            assert_eq!(errors.len(), 1, "{when}: {errors:?}");
+            let sentence = errors[0].as_str().unwrap_or_default();
+            assert!(
+                sentence.contains("could not be installed"),
+                "{when}: {sentence}"
+            );
+            assert!(!sentence.contains("access is denied"), "{when}: {sentence}");
+            wm.reload_hotkeys();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
