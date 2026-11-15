@@ -807,13 +807,28 @@ impl WindowManager {
     /// to start because a key could not be bound would leave the user with an
     /// untiled desktop over something `mochic` can still do by hand.
     pub fn start_hotkeys(&mut self, path: PathBuf, candidates: Vec<PathBuf>) {
+        let bindings = self.load_hotkey_file(path, candidates);
+        let started = HotkeyDaemon::start(self.tx.clone(), bindings);
+        self.take_hook(started);
+    }
+
+    /// Reads the hotkey file for `mochic hotkeys` and hands back what to bind.
+    fn load_hotkey_file(
+        &mut self,
+        path: PathBuf,
+        candidates: Vec<PathBuf>,
+    ) -> mochi_hotkey::Bindings {
         let (bindings, errors) = config::load_hotkeys(&path);
         self.hotkey_rows = rows_of(&bindings);
         self.hotkey_errors = errors;
         self.hotkey_path = Some(path);
         self.hotkey_candidates = candidates;
+        bindings
+    }
 
-        match HotkeyDaemon::start(self.tx.clone(), bindings) {
+    /// Keeps the hook that came up, or logs that it did not.
+    fn take_hook(&mut self, started: Result<HotkeyDaemon>) {
+        match started {
             Ok(daemon) => self.hotkeys = Some(daemon),
             Err(e) => tracing::error!(error = %e, "no keyboard hook, Mochi binds no keys"),
         }
