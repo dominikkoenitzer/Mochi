@@ -4256,7 +4256,7 @@ impl WindowManager {
             return Response::Ok;
         }
 
-        let mut given_back = 0;
+        let (mut given_back, mut left_off) = (0, 0);
         for hwnd in stranded {
             let behaviour = record(&self.hidden).show(hwnd);
             let result = match behaviour {
@@ -4267,6 +4267,10 @@ impl WindowManager {
             match result {
                 Ok(()) => given_back += 1,
                 Err(e) => {
+                    // A window that was closed is not left off screen, it is gone.
+                    if self.platform.window_info(hwnd).is_ok() {
+                        left_off += 1;
+                    }
                     // Written back down, the same way `show_window` does. This
                     // is the last-resort escape hatch: clearing the record and
                     // then failing left the window cloaked and invisible to the
@@ -4279,7 +4283,12 @@ impl WindowManager {
             }
         }
         tracing::warn!(count = given_back, "gave stranded windows back");
-        Response::Ok
+        // The escape hatch must not claim a rescue that did not happen.
+        match left_off {
+            0 => Response::Ok,
+            1 => Response::error("1 window could not be brought back"),
+            n => Response::error(format!("{n} windows could not be brought back")),
+        }
     }
 
     /// Re-asks the rules about every window that is already managed.
@@ -8027,6 +8036,66 @@ alt + j : focus down
             "the stranded window was left off screen"
         );
         assert!(!wm.hidden.lock().unwrap().contains(Hwnd(99)));
+    }
+
+    #[test]
+    fn restore_windows_says_so_when_a_window_stays_off_screen() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        wm.hidden
+            .lock()
+            .unwrap()
+            .hide(Hwnd(99), HidingBehaviour::Cloak);
+        platform.windows.lock().unwrap().push(WindowInfo {
+            cloaked: true,
+            ..window(99, "Lost")
+        });
+        platform.cannot_be_restored(Hwnd(99));
+
+        let (response, _) = wm.handle_command(Command::RestoreWindows);
+        assert_eq!(
+            response,
+            Response::error("1 window could not be brought back")
+        );
+        assert!(wm.hidden.lock().unwrap().contains(Hwnd(99)));
+    }
+
+    #[test]
+    fn restore_windows_gives_back_what_it_can_and_counts_the_rest() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        for hwnd in [Hwnd(97), Hwnd(98), Hwnd(99)] {
+            wm.hidden.lock().unwrap().hide(hwnd, HidingBehaviour::Cloak);
+        }
+        for (hwnd, title) in [(98, "Lost"), (99, "Also lost")] {
+            platform.windows.lock().unwrap().push(WindowInfo {
+                cloaked: true,
+                ..window(hwnd, title)
+            });
+            platform.cannot_be_restored(Hwnd(hwnd));
+        }
+
+        let (response, _) = wm.handle_command(Command::RestoreWindows);
+        assert_eq!(
+            response,
+            Response::error("2 windows could not be brought back")
+        );
+        assert!(platform.cloaks.lock().unwrap().contains(&(Hwnd(97), false)));
+        assert!(!wm.hidden.lock().unwrap().contains(Hwnd(97)));
+        assert!(wm.hidden.lock().unwrap().contains(Hwnd(98)));
+        assert!(wm.hidden.lock().unwrap().contains(Hwnd(99)));
+    }
+
+    #[test]
+    fn restore_windows_does_not_count_a_window_that_was_closed() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        // Still written down as hidden, but the window is gone, so its handle refuses the uncloak.
+        wm.hidden
+            .lock()
+            .unwrap()
+            .hide(Hwnd(99), HidingBehaviour::Cloak);
+        platform.cannot_be_restored(Hwnd(99));
+
+        let (response, _) = wm.handle_command(Command::RestoreWindows);
+        assert_eq!(response, Response::Ok);
     }
 
     #[test]
