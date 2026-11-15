@@ -350,6 +350,20 @@ fn holds_gpu_child(h: HWND) -> bool {
     window_class(h).starts_with(mochi_core::layering::CHROMIUM_CLASS_PREFIX)
 }
 
+/// The error for a cloak the shell and DWM both refused; only a window with no view can never be cloaked.
+fn cloak_refused(
+    view: ViewCloakError,
+    dwm: &dyn std::fmt::Display,
+    h: Hwnd,
+    cloaked: bool,
+) -> anyhow::Error {
+    let dwm = format!("DWMWA_CLOAK={cloaked} failed for {h}: {dwm}");
+    match view {
+        ViewCloakError::NoView => anyhow::Error::new(CloakUnsupported).context(dwm),
+        ViewCloakError::Shell(e) => e.context(dwm),
+    }
+}
+
 /// `ShowWindow`, posted to the window's own thread when [`holds_gpu_child`] says so.
 fn set_show_state(h: HWND, cmd: SHOW_WINDOW_CMD) -> Result<()> {
     if !holds_gpu_child(h) {
@@ -1094,13 +1108,17 @@ impl Platform for Win32Platform {
 
     fn set_cloaked(&self, h: Hwnd, cloaked: bool) -> Result<()> {
         // The shell cloaks any window it tracks, whichever process owns it.
-        match appview::set_cloak(hwnd(h), cloaked) {
+        let view = match appview::set_cloak(hwnd(h), cloaked) {
             Ok(()) => return Ok(()),
             Err(e @ ViewCloakError::NoView) => {
                 tracing::debug!(hwnd = %h, error = %e, "falling back to DWM cloaking");
+                e
             }
-            Err(e) => tracing::warn!(hwnd = %h, error = %e, "falling back to DWM cloaking"),
-        }
+            Err(e) => {
+                tracing::warn!(hwnd = %h, error = %e, "falling back to DWM cloaking");
+                e
+            }
+        };
         // DWM only cloaks windows of the calling process, so this covers
         // Mochi's own windows and nothing else.
         let value: i32 = i32::from(cloaked);
@@ -1112,10 +1130,7 @@ impl Platform for Win32Platform {
                 size_of::<i32>() as u32,
             )
         };
-        dwm.map_err(|e| {
-            anyhow::Error::new(CloakUnsupported)
-                .context(format!("DWMWA_CLOAK={cloaked} failed for {h}: {e}"))
-        })
+        dwm.map_err(|e| cloak_refused(view, &e, h, cloaked))
     }
 
     fn show(&self, h: Hwnd, state: ShowState) -> Result<()> {
@@ -1247,6 +1262,23 @@ impl Platform for Win32Platform {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn a_window_the_shell_has_no_view_for_cannot_be_cloaked() {
+        let e = cloak_refused(ViewCloakError::NoView, &"access denied", Hwnd(7), true);
+        assert!(e.downcast_ref::<CloakUnsupported>().is_some());
+    }
+
+    #[test]
+    fn a_shell_that_failed_leaves_the_window_cloakable_later() {
+        let shell = ViewCloakError::Shell(anyhow!("SetCloak(false) failed: 0x800706BA"));
+        let e = cloak_refused(shell, &"access denied", Hwnd(7), false);
+        assert!(
+            e.downcast_ref::<CloakUnsupported>().is_none(),
+            "a passing shell failure was taken for a window nothing can cloak"
+        );
+        assert!(format!("{e:#}").contains("SetCloak(false) failed"), "{e:#}");
+    }
 
     #[test]
     fn an_ordinary_window_is_its_own_process() {

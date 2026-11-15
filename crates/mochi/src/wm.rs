@@ -1623,13 +1623,10 @@ impl WindowManager {
             HidingBehaviour::Hide => self.platform.show(hwnd, ShowState::Hide),
         };
         // A few windows cannot be cloaked by anyone, tool windows and splash
-        // screens among them. Hiding is the closest thing, and the record
+        // screens among them, and any window goes uncloakable for a moment
+        // while explorer restarts. Hiding is the closest thing, and the record
         // keeps the method actually used so the restore path undoes it.
-        if matches!(behaviour, HidingBehaviour::Cloak)
-            && result
-                .as_ref()
-                .is_err_and(|e| e.downcast_ref::<CloakUnsupported>().is_some())
-        {
+        if matches!(behaviour, HidingBehaviour::Cloak) && result.is_err() {
             tracing::debug!(%hwnd, "window cannot be cloaked, hiding it instead");
             behaviour = HidingBehaviour::Hide;
             result = self.platform.show(hwnd, ShowState::Hide);
@@ -5248,6 +5245,10 @@ mod tests {
         record_seen: Mutex<Vec<usize>>,
         /// Windows that cannot be uncloaked, the way an elevated one cannot.
         unrestorable: Mutex<Vec<Hwnd>>,
+        /// Windows the shell has no view for, so no cloak can ever reach them.
+        no_view: Mutex<Vec<Hwnd>>,
+        /// Windows whose cloak calls fail for now, the way they do while explorer restarts.
+        shell_away: Mutex<Vec<Hwnd>>,
         /// Windows Windows reports as maximized, which a test drives directly
         /// to stand in for the user pressing the maximize button.
         zoomed: Mutex<Vec<Hwnd>>,
@@ -5282,6 +5283,8 @@ mod tests {
                 record_watch: Mutex::new(None),
                 record_seen: Mutex::new(Vec::new()),
                 unrestorable: Mutex::new(Vec::new()),
+                no_view: Mutex::new(Vec::new()),
+                shell_away: Mutex::new(Vec::new()),
                 zoomed: Mutex::new(Vec::new()),
                 minimums: Mutex::new(Vec::new()),
                 min_size_asks: AtomicUsize::new(0),
@@ -5509,6 +5512,12 @@ mod tests {
             }
             if !cloaked && self.unrestorable.lock().unwrap().contains(&hwnd) {
                 return Err(anyhow::anyhow!("this window cannot be uncloaked"));
+            }
+            if self.no_view.lock().unwrap().contains(&hwnd) {
+                return Err(anyhow::Error::new(CloakUnsupported));
+            }
+            if self.shell_away.lock().unwrap().contains(&hwnd) {
+                return Err(anyhow::anyhow!("the shell could not cloak the window"));
             }
             self.cloaks.lock().unwrap().push((hwnd, cloaked));
             if cloaked {
@@ -8208,6 +8217,64 @@ alt + j : focus down
         assert!(
             wm.hidden().lock().unwrap().is_empty(),
             "a window that can never be restored was written down again"
+        );
+    }
+
+    #[test]
+    fn a_window_no_cloak_can_reach_is_hidden_instead() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        platform.no_view.lock().unwrap().push(Hwnd(2));
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+
+        assert!(
+            platform
+                .shows
+                .lock()
+                .unwrap()
+                .contains(&(Hwnd(2), ShowState::Hide))
+        );
+        assert_eq!(
+            wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
+            Some(HidingBehaviour::Hide)
+        );
+    }
+
+    #[test]
+    fn a_window_whose_shell_is_away_is_hidden_instead() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        platform.shell_away.lock().unwrap().push(Hwnd(2));
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+
+        assert!(
+            platform
+                .shows
+                .lock()
+                .unwrap()
+                .contains(&(Hwnd(2), ShowState::Hide)),
+            "a cloak the shell could not make left the window on screen"
+        );
+        assert_eq!(
+            wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
+            Some(HidingBehaviour::Hide)
+        );
+    }
+
+    #[test]
+    fn restore_keeps_a_window_the_shell_could_not_uncloak_yet() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert_eq!(
+            wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
+            Some(HidingBehaviour::Cloak)
+        );
+        platform.shell_away.lock().unwrap().push(Hwnd(2));
+
+        restore(platform.as_ref(), &wm.hidden());
+
+        assert_eq!(
+            wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
+            Some(HidingBehaviour::Cloak),
+            "a window still cloaked was let go after the shell failed once"
         );
     }
 
