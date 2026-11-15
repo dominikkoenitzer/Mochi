@@ -984,7 +984,8 @@ fn reinstall(hook: &mut HHOOK, instance: HINSTANCE) {
     }
 }
 
-/// Starts a shell binding's command line, detached, with no console window.
+/// Starts a shell binding's command line, detached, with no console window,
+/// and says whether it was started.
 ///
 /// Nothing is waited for and nothing is read back: a hotkey that starts a
 /// program has done its job the moment the program is running. The child is
@@ -994,7 +995,7 @@ fn reinstall(hook: &mut HHOOK, instance: HINSTANCE) {
 /// shell's rights, not its own: the hotkey file is the user's to change, and
 /// a binding must not become a way to run a program elevated. With no shell
 /// to take those rights from, it starts nothing.
-pub fn run_shell(shell: Shell, line: &str) {
+pub fn run_shell(shell: Shell, line: &str) -> bool {
     use std::os::windows::process::CommandExt;
 
     use crate::platform::user::{self, Rights};
@@ -1005,18 +1006,21 @@ pub fn run_shell(shell: Shell, line: &str) {
     match user::launch_rights() {
         Rights::Own => {}
         Rights::Shell(parent) => {
-            match user::spawn_as_shell(parent, &command_line(shell, line)) {
-                Ok(pid) => tracing::info!(
-                    pid,
-                    shell = %shell,
-                    line,
-                    "hotkey ran a command with the desktop user's rights"
-                ),
-                Err(e) => {
-                    tracing::error!(error = %e, shell = %shell, line, "hotkey command did not start")
+            return match user::spawn_as_shell(parent, &command_line(shell, line)) {
+                Ok(pid) => {
+                    tracing::info!(
+                        pid,
+                        shell = %shell,
+                        line,
+                        "hotkey ran a command with the desktop user's rights"
+                    );
+                    true
                 }
-            }
-            return;
+                Err(e) => {
+                    tracing::error!(error = %e, shell = %shell, line, "hotkey command did not start");
+                    false
+                }
+            };
         }
         Rights::None => {
             tracing::error!(
@@ -1024,7 +1028,7 @@ pub fn run_shell(shell: Shell, line: &str) {
                 line,
                 "hotkey command not started: mochi runs as administrator and there is no desktop shell to start it with the user's own rights"
             );
-            return;
+            return false;
         }
     }
 
@@ -1036,8 +1040,14 @@ pub fn run_shell(shell: Shell, line: &str) {
     command.creation_flags(CREATE_NO_WINDOW);
 
     match command.spawn() {
-        Ok(child) => tracing::info!(pid = child.id(), shell = %shell, line, "hotkey ran a command"),
-        Err(e) => tracing::error!(error = %e, shell = %shell, line, "hotkey command did not start"),
+        Ok(child) => {
+            tracing::info!(pid = child.id(), shell = %shell, line, "hotkey ran a command");
+            true
+        }
+        Err(e) => {
+            tracing::error!(error = %e, shell = %shell, line, "hotkey command did not start");
+            false
+        }
     }
 }
 

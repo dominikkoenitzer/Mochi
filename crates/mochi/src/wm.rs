@@ -675,6 +675,9 @@ pub struct WindowManager {
     /// in tests instead of starting anything.
     #[cfg(test)]
     launched: Mutex<Vec<String>>,
+    /// Makes every scratchpad command in a test fail to start.
+    #[cfg(test)]
+    launch_fails: std::sync::atomic::AtomicBool,
 }
 
 impl WindowManager {
@@ -776,6 +779,8 @@ impl WindowManager {
             sent: Mutex::new(Vec::new()),
             #[cfg(test)]
             launched: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            launch_fails: std::sync::atomic::AtomicBool::new(false),
         };
 
         wm.refresh_monitors();
@@ -4669,17 +4674,22 @@ impl WindowManager {
         }
     }
 
-    /// Starts a scratchpad's command, or in tests writes down that it would.
-    fn launch_scratchpad(&self, line: &str) {
+    /// Starts a scratchpad's command, or in tests writes down that it would,
+    /// and says whether it was started.
+    fn launch_scratchpad(&self, line: &str) -> bool {
         #[cfg(test)]
-        if let Ok(mut launched) = self.launched.lock() {
-            launched.push(line.to_owned());
+        {
+            if let Ok(mut launched) = self.launched.lock() {
+                launched.push(line.to_owned());
+            }
+            !self.launch_fails.load(std::sync::atomic::Ordering::Relaxed)
         }
         #[cfg(not(test))]
         if self.session.dry_run {
             tracing::info!(line, "dry run: the scratchpad command was not started");
+            true
         } else {
-            crate::events::hotkey::run_shell(mochi_hotkey::Shell::Cmd, line);
+            crate::events::hotkey::run_shell(mochi_hotkey::Shell::Cmd, line)
         }
     }
 
@@ -4757,8 +4767,10 @@ impl WindowManager {
             ));
         };
         tracing::info!(name = %pad.config.name, line, "starting the scratchpad command");
+        if !self.launch_scratchpad(&line) {
+            return Response::error("the scratchpad command could not be started");
+        }
         self.scratchpads[index].launched = Some(std::time::Instant::now());
-        self.launch_scratchpad(&line);
         Response::Ok
     }
 
@@ -9880,6 +9892,31 @@ alt + j : focus down
             .push(process_window(6, "scratch", 60));
         wm.on_window_event(WindowEventKind::Created, Hwnd(6));
         assert!(wm.state().is_managed(window_id(Hwnd(6))));
+    }
+
+    #[test]
+    fn a_scratchpad_command_that_did_not_start_is_an_error_and_is_tried_again() {
+        let (mut wm, _platform) = scratch_manager(vec![process_window(1, "Editor", 10)]);
+        wm.launch_fails
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            toggle(&mut wm).error_message(),
+            Some("the scratchpad command could not be started")
+        );
+        assert!(wm.scratchpads[0].launched.is_none());
+        assert_eq!(
+            toggle(&mut wm).error_message(),
+            Some("the scratchpad command could not be started"),
+            "a second press answered as if the first start were still under way"
+        );
+        assert_eq!(wm.launched.lock().unwrap().len(), 2);
+
+        wm.launch_fails
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert!(wm.scratchpads[0].launched.is_some());
+        assert_eq!(wm.launched.lock().unwrap().len(), 3);
     }
 
     #[test]
