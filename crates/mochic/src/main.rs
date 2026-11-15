@@ -552,24 +552,42 @@ fn subscribe(name: &str) -> Result<()> {
         &notifications,
         SUBSCRIBE_POLL,
         mochi_client::is_running,
-        |n| {
-            println!("{}", serde_json::to_string(n)?);
-            Ok(())
-        },
+        |n| emit(&mut std::io::stdout().lock(), n),
     )
 }
 
-/// Hands every notification to `emit` until the daemon has gone.
+/// Writes one notification as a JSON line and flushes it, in place of
+/// `println!`, which panics when the reader has gone. `Break` once what read
+/// the lines stopped reading, as `head -n 1` does after its line.
+fn emit(
+    out: &mut impl std::io::Write,
+    n: &mochi_client::Notification,
+) -> Result<std::ops::ControlFlow<()>> {
+    let line = serde_json::to_string(n)?;
+    match writeln!(out, "{line}").and_then(|()| out.flush()) {
+        Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
+        // Windows says 232 while the pipe closes and 109 once it is broken.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+            Ok(std::ops::ControlFlow::Break(()))
+        }
+        Err(_) => bail!("could not write the notification"),
+    }
+}
+
+/// Hands every notification to `emit` until the daemon has gone or `emit`
+/// says to stop.
 fn follow(
     notifications: &std::sync::mpsc::Receiver<std::io::Result<mochi_client::Notification>>,
     poll: std::time::Duration,
     is_running: impl Fn() -> bool,
-    mut emit: impl FnMut(&mochi_client::Notification) -> Result<()>,
+    mut emit: impl FnMut(&mochi_client::Notification) -> Result<std::ops::ControlFlow<()>>,
 ) -> Result<()> {
     loop {
         match notifications.recv_timeout(poll) {
             Ok(Ok(n)) => {
-                emit(&n)?;
+                if emit(&n)?.is_break() {
+                    return Ok(());
+                }
                 // `stop` is the last line; a daemon started within one poll
                 // would otherwise leave this waiting on a pipe nobody writes to.
                 if n.event == mochi_client::NotificationEvent::Stop {
@@ -1793,7 +1811,7 @@ mod tests {
                 || true,
                 |n| {
                     seen.push(n.event.clone());
-                    Ok(())
+                    Ok(std::ops::ControlFlow::Continue(()))
                 },
             );
             let _ = done_tx.send((result.is_ok(), seen));
@@ -1805,6 +1823,87 @@ mod tests {
         assert!(ok);
         assert_eq!(seen, [NotificationEvent::Stop]);
         drop(lines);
+    }
+
+    /// A stdout whose reader went, or that fails another way.
+    struct Refusing(fn() -> std::io::Error);
+
+    impl std::io::Write for Refusing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err((self.0)())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err((self.0)())
+        }
+    }
+
+    fn focus() -> mochi_client::Notification {
+        mochi_client::Notification::new(mochi_client::NotificationEvent::FocusChange {
+            window: None,
+        })
+    }
+
+    #[test]
+    fn a_subscription_ends_quietly_once_its_reader_has_gone() {
+        let closing = || std::io::Error::from_raw_os_error(232);
+        let broken = || std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        for gone in [closing, broken] {
+            assert!(
+                super::emit(&mut Refusing(gone), &focus())
+                    .unwrap()
+                    .is_break()
+            );
+            // Held back by a buffer, the closed pipe shows only on flush.
+            let mut held = std::io::BufWriter::new(Refusing(gone));
+            assert!(super::emit(&mut held, &focus()).unwrap().is_break());
+        }
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        drop(reader);
+        assert!(super::emit(&mut writer, &focus()).unwrap().is_break());
+
+        // The follow ends there, though the daemon runs and more would come.
+        let (lines, notifications) = std::sync::mpsc::channel();
+        lines.send(Ok(focus())).unwrap();
+        lines.send(Ok(focus())).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut tries = 0;
+            let result = super::follow(
+                &notifications,
+                std::time::Duration::from_millis(20),
+                || true,
+                |n| {
+                    tries += 1;
+                    super::emit(&mut Refusing(closing), n)
+                },
+            );
+            let _ = done_tx.send((result.is_ok(), tries));
+        });
+        let (ok, tries) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the subscription carried on after its reader went");
+        assert!(ok);
+        assert_eq!(tries, 1);
+        drop(lines);
+    }
+
+    #[test]
+    fn a_subscription_that_cannot_write_for_another_reason_fails_plainly() {
+        let full = || std::io::Error::from_raw_os_error(112);
+        let e = super::emit(&mut Refusing(full), &focus()).unwrap_err();
+        let message = format!("{e:#}");
+        assert!(!message.contains("os error"), "{message}");
+        assert!(message.starts_with("could not write"), "{message}");
+    }
+
+    #[test]
+    fn a_subscription_writes_each_notification_on_a_line_and_goes_on() {
+        let mut out = Vec::new();
+        assert!(super::emit(&mut out, &focus()).unwrap().is_continue());
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["event"], "focus-change", "{text}");
     }
 
     #[test]
