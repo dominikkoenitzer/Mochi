@@ -459,27 +459,28 @@ fn administrator_args(
 }
 
 fn quickstart() -> Result<()> {
-    let profile = std::env::var_os("USERPROFILE")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .context("USERPROFILE is not set")?;
+    quickstart_with(&|name| std::env::var_os(name))
+}
 
-    write_unless_present(&profile.join("mochi.json"), default_config())?;
-
+/// `quickstart`, reading the environment through `var`.
+///
+/// The files go where the daemon will look for them, by the same rules: a
+/// starting file anywhere else is one it never reads, and `check` would go on
+/// saying there is no file.
+fn quickstart_with(var: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Result<()> {
+    let (config, _) = config_path_from(None, var("MOCHI_CONFIG"), var("USERPROFILE"))?;
     // The hotkey directory may already hold a file under the name a standalone
     // hotkey daemon uses, which is one of the names Mochi reads. Writing the
     // other one next to it would shadow a working set of bindings with the
-    // defaults, so either name counts as "there is already a file here".
-    let keys = profile.join(".config").join("mochi");
-    if keys.join("whkdrc").exists() {
-        println!(
-            "{} already exists, leaving it alone",
-            keys.join("whkdrc").display()
-        );
-    } else {
-        write_unless_present(&keys.join("hotkeys"), mochi_hotkey::DEFAULT)?;
-    }
-    Ok(())
+    // defaults, so the rule hands back that file and it is left alone.
+    let profile = var("USERPROFILE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let hotkeys = hotkey_path_from(var("MOCHI_HOTKEYS"), profile)
+        .context("USERPROFILE is not set, so the hotkey file path cannot be resolved")?;
+
+    write_unless_present(&config, default_config())?;
+    write_unless_present(&hotkeys, mochi_hotkey::DEFAULT)
 }
 
 /// Writes a starting file, and says either way which one it meant.
@@ -972,16 +973,30 @@ fn looks_like_app_rules(text: &str) -> bool {
 /// different file than the daemon would is worse than no `check` at all: it
 /// would report a desktop fixed that is still broken.
 fn resolve_config_path(explicit: Option<&Path>) -> Result<(PathBuf, String)> {
+    config_path_from(
+        explicit,
+        std::env::var_os("MOCHI_CONFIG"),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+/// The rule behind [`resolve_config_path`], given the values of `MOCHI_CONFIG`
+/// and `USERPROFILE`.
+fn config_path_from(
+    explicit: Option<&Path>,
+    from_env: Option<std::ffi::OsString>,
+    profile: Option<std::ffi::OsString>,
+) -> Result<(PathBuf, String)> {
     if let Some(path) = explicit {
         return Ok((path.to_path_buf(), "given on the command line".to_owned()));
     }
-    if let Some(from_env) = std::env::var_os("MOCHI_CONFIG").filter(|v| !v.is_empty()) {
+    if let Some(from_env) = from_env.filter(|v| !v.is_empty()) {
         return Ok((
             PathBuf::from(from_env),
             "the file the daemon would load, named by MOCHI_CONFIG".to_owned(),
         ));
     }
-    let profile = std::env::var_os("USERPROFILE")
+    let profile = profile
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .context("USERPROFILE is not set, so the configuration path cannot be resolved")?;
@@ -2303,6 +2318,70 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(default_config()).unwrap();
         assert!(value.is_object());
         assert_eq!(value["$schema"], "https://mochi.punds.ch/schema.json");
+    }
+
+    /// Runs `quickstart` against a profile folder and the two variables.
+    fn quickstart_in(profile: &Path, config: Option<&Path>, hotkeys: Option<&Path>) -> Result<()> {
+        quickstart_with(&|name| match name {
+            "USERPROFILE" => Some(profile.as_os_str().to_owned()),
+            "MOCHI_CONFIG" => config.map(|p| p.as_os_str().to_owned()),
+            "MOCHI_HOTKEYS" => hotkeys.map(|p| p.as_os_str().to_owned()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn quickstart_writes_the_files_the_daemon_would_load() {
+        let dir =
+            std::env::temp_dir().join(format!("mochic-quickstart-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let profile = dir.join("profile");
+        let config = dir.join("elsewhere").join("desk.json");
+        let hotkeys = dir.join("elsewhere").join("keys");
+        let ran = quickstart_in(&profile, Some(&config), Some(&hotkeys));
+        let wrote = (
+            std::fs::read_to_string(&config),
+            std::fs::read_to_string(&hotkeys),
+        );
+        let profile_touched = profile.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        ran.unwrap();
+        assert_eq!(
+            wrote.0.ok().as_deref(),
+            Some(default_config()),
+            "MOCHI_CONFIG names the file"
+        );
+        assert_eq!(
+            wrote.1.ok().as_deref(),
+            Some(mochi_hotkey::DEFAULT),
+            "MOCHI_HOTKEYS names the file"
+        );
+        assert!(
+            !profile_touched,
+            "nothing goes to the profile when both are named"
+        );
+    }
+
+    #[test]
+    fn quickstart_without_the_variables_writes_to_the_profile_and_keeps_a_whkdrc() {
+        let dir =
+            std::env::temp_dir().join(format!("mochic-quickstart-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let keys = dir.join(".config").join("mochi");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("whkdrc"), "alt + h : mochic focus left\n").unwrap();
+        let ran = quickstart_in(&dir, None, None);
+        let config = std::fs::read_to_string(dir.join("mochi.json"));
+        let named = keys.join("hotkeys").exists();
+        let legacy = std::fs::read_to_string(keys.join("whkdrc"));
+        let _ = std::fs::remove_dir_all(&dir);
+        ran.unwrap();
+        assert_eq!(config.ok().as_deref(), Some(default_config()));
+        assert!(!named, "a whkdrc already holds the bindings");
+        assert_eq!(
+            legacy.ok().as_deref(),
+            Some("alt + h : mochic focus left\n")
+        );
     }
 
     // --- check ----------------------------------------------------------

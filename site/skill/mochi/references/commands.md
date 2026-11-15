@@ -102,7 +102,7 @@ Notes on these commands:
 
 | Syntax | What it does |
 |---|---|
-| `mochic quickstart` | Writes `%USERPROFILE%\mochi.json` and `%USERPROFILE%\.config\mochi\hotkeys`, each only if it does not exist yet. If that folder already holds a hotkey file under the other name Mochi reads, no hotkey file is written. |
+| `mochic quickstart` | Writes the two files the daemon would load: the ones `MOCHI_CONFIG` and `MOCHI_HOTKEYS` name when they are set, otherwise `%USERPROFILE%\mochi.json` and `%USERPROFILE%\.config\mochi\hotkeys`, each only if it does not exist yet. If that folder already holds a hotkey file under the other name Mochi reads, no hotkey file is written. |
 | `mochic check [PATH] [--json]` | Validates a configuration file without applying anything. |
 | `mochic schema [--output PATH] [--json]` | Prints the JSON schema of `mochi.json`. `-o` is the short form of `--output`. With `--output`, `--json` prints a document with `version` and `path` instead of `wrote <path>`; a file that cannot be written is an error document with the code `io`. Without `--output`, `--json` prints the schema unchanged. |
 
