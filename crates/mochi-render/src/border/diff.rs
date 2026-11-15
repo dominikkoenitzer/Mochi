@@ -6,7 +6,7 @@
 //! not changed is not repainted, not moved, and not even sent to the border
 //! thread.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::WindowHandle;
 use crate::animation::FrameUpdate;
@@ -65,6 +65,9 @@ impl BorderChanges {
 #[derive(Debug, Clone, Default)]
 pub struct BorderDiff {
     last: BTreeMap<isize, BorderSpec>,
+    /// Borders still on screen from before an invalidate, so the next pass
+    /// can take down the ones it no longer names.
+    stale: BTreeSet<isize>,
 }
 
 impl BorderDiff {
@@ -73,6 +76,7 @@ impl BorderDiff {
     pub fn new() -> Self {
         Self {
             last: BTreeMap::new(),
+            stale: BTreeSet::new(),
         }
     }
 
@@ -94,12 +98,20 @@ impl BorderDiff {
         self.last.get(&handle.0).map(|spec| spec.kind)
     }
 
-    /// Forgets everything, so that the next pass re-adds every border.
+    /// Forgets how every border looks, so that the next pass re-adds them all.
     ///
-    /// Used when the borders come off the screen and when the configuration
-    /// changes, because a new configuration repaints whatever is left.
+    /// Used when the displays or the configuration change, because both
+    /// repaint whatever is left. The frames are still on screen, so the next
+    /// pass still takes down every one it no longer names.
     pub fn invalidate(&mut self) {
+        self.stale.extend(self.last.keys().copied());
         self.last.clear();
+    }
+
+    /// Forgets everything, because every border came off the screen.
+    pub fn clear(&mut self) {
+        self.last.clear();
+        self.stale.clear();
     }
 
     /// Forgets one border, so that the next pass hands it to its window again.
@@ -143,11 +155,13 @@ impl BorderDiff {
         changes.removed = self
             .last
             .keys()
+            .chain(self.stale.iter())
             .filter(|key| !next.contains_key(key))
             .map(|key| WindowHandle(*key))
             .collect();
 
         self.last = next;
+        self.stale.clear();
         changes
     }
 
@@ -363,6 +377,21 @@ mod tests {
 
         let changes = diff.diff(vec![spec(A, LEFT, BorderKind::Single)]);
         assert!(changes.is_empty(), "B is taken down only once");
+    }
+
+    #[test]
+    fn after_a_clear_nothing_is_left_to_take_down() {
+        let mut diff = BorderDiff::new();
+        let _ = diff.diff(vec![
+            spec(A, LEFT, BorderKind::Single),
+            spec(B, RIGHT, BorderKind::Unfocused),
+        ]);
+
+        diff.invalidate();
+        diff.clear();
+        let changes = diff.diff(vec![spec(A, LEFT, BorderKind::Single)]);
+        assert!(changes.removed.is_empty(), "the clear took B down already");
+        assert_eq!(changes.added.len(), 1);
     }
 
     #[test]
