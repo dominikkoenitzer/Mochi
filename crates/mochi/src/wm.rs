@@ -2855,6 +2855,10 @@ impl WindowManager {
         let Some((monitor, workspace)) = self.core.locate_window(id) else {
             return;
         };
+        // Paused, the model must not change: a swap would show up at unpause.
+        if self.core.is_paused {
+            return;
+        }
         // A floating window keeps whatever the user did to it.
         if self
             .core
@@ -10344,6 +10348,27 @@ alt + j : focus down
         platform.points_at(tiles[0].left + 10, 500);
         wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(2));
         assert_ne!(order(&wm), before, "a drop on the other tile did not swap");
+    }
+
+    #[test]
+    fn a_drop_while_paused_leaves_the_tile_order_alone() {
+        let (mut wm, platform) = manager_focused_on(
+            vec![window(1, "One"), window(2, "Two"), window(3, "Three")],
+            Hwnd(1),
+        );
+        let before = ring_order(&wm);
+        let workspace = wm.state().workspace(0, 0).unwrap();
+        let onto =
+            workspace.latest_tiles()[workspace.container_idx_for_window(WindowId(2)).unwrap()];
+        wm.handle_command(Command::TogglePause);
+
+        // Let go of window 3 on window 2's tile while window 1 has the focus.
+        platform.points_at(onto.left + 10, onto.top + 10);
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(3));
+        assert_eq!(ring_order(&wm), before, "a paused drop swapped two tiles");
+
+        wm.handle_command(Command::TogglePause);
+        assert_eq!(ring_order(&wm), before, "unpausing swapped two tiles");
     }
 
     #[test]
