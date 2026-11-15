@@ -340,6 +340,33 @@ pub fn cleanup_after_exit(file: &Path, dir: &Path) -> Option<String> {
     ))
 }
 
+/// Why a step failed, in the words Windows has for it, without the error number Rust adds after them.
+pub fn io_reason(e: &std::io::Error) -> String {
+    let said = e.to_string();
+    match e.raw_os_error() {
+        Some(code) => said
+            .strip_suffix(&format!(" (os error {code})"))
+            .unwrap_or(&said)
+            .to_owned(),
+        None => said,
+    }
+}
+
+/// A failed step as one line of a dialog: what could not be done, then why, as a sentence of its own.
+pub fn could_not(action: &str, reason: &str) -> String {
+    let mut chars = reason.trim().chars();
+    let Some(first) = chars.next() else {
+        return format!("Could not {action}.");
+    };
+    let reason: String = first.to_uppercase().chain(chars).collect();
+    let end = if reason.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
+    format!("Could not {action}. {reason}{end}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,5 +622,24 @@ mod tests {
             cleanup_after_exit(Path::new(r"C:\100%\x.exe"), &l.root),
             None
         );
+    }
+
+    #[test]
+    fn a_failed_step_keeps_the_words_of_windows_without_the_number() {
+        let reason = io_reason(&std::io::Error::from_raw_os_error(5));
+        assert!(!reason.is_empty());
+        assert!(!reason.contains("os error"), "{reason}");
+        let message = could_not(r"create C:\Mochi\bin", &reason);
+        assert!(
+            message.starts_with(r"Could not create C:\Mochi\bin. "),
+            "{message}"
+        );
+        assert!(message.ends_with('.'), "{message}");
+        let other = io_reason(&std::io::Error::other("the share is offline"));
+        assert_eq!(
+            could_not("start Mochi", &other),
+            "Could not start Mochi. The share is offline."
+        );
+        assert_eq!(could_not("start Mochi", " "), "Could not start Mochi.");
     }
 }
