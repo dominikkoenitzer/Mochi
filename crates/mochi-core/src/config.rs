@@ -69,6 +69,10 @@ impl Colour {
             kind: "colour",
             value: text.to_string(),
         };
+        // `from_str_radix` takes a leading `+`, so `#+1+2+3` would pass without this.
+        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(invalid());
+        }
         let channel = |from: usize, to: usize| {
             u8::from_str_radix(digits.get(from..to).unwrap_or_default(), 16).map_err(|_| invalid())
         };
@@ -1280,6 +1284,14 @@ mod tests {
             Colour::from_colorref(14_662_655)
         );
         assert!(serde_json::from_str::<Colour>(r#""nope""#).is_err());
+    }
+
+    #[test]
+    fn a_colour_takes_only_hex_digits() {
+        for text in ["#+1+2+3", "+1+2+3", "#+f+f+f", "#ff+fff", "#-1-2-3"] {
+            assert!(Colour::parse(text).is_err(), "for {text}");
+        }
+        assert!(serde_json::from_str::<Colour>(r##""#+1+2+3""##).is_err());
     }
 
     #[test]
