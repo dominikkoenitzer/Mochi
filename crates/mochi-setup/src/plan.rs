@@ -31,6 +31,8 @@ pub struct Layout {
     pub config: PathBuf,
     pub hotkeys: PathBuf,
     pub legacy_hotkeys: PathBuf,
+    /// The folder Mochi writes its log to.
+    pub log_dir: PathBuf,
 }
 
 impl Layout {
@@ -44,6 +46,7 @@ impl Layout {
             config: profile.join("mochi.json"),
             hotkeys: hotkey_dir.join("hotkeys"),
             legacy_hotkeys: hotkey_dir.join("whkdrc"),
+            log_dir: local_app_data.join("mochi"),
             root,
         }
     }
@@ -54,6 +57,23 @@ impl Layout {
 
     pub fn mochic(&self) -> PathBuf {
         self.bin.join("mochic.exe")
+    }
+}
+
+/// A step the setup hands to mochic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MochicStep {
+    Quickstart,
+    Start,
+}
+
+/// The dialog line for a mochic step that ended with a nonzero `code`, from
+/// everything mochic printed while it ran.
+pub fn mochic_failed(step: MochicStep, code: i32, said: &str, log_dir: &Path) -> String {
+    let _ = log_dir;
+    match step {
+        MochicStep::Quickstart => format!("writing the default settings failed ({code}): {said}"),
+        MochicStep::Start => said.to_owned(),
     }
 }
 
