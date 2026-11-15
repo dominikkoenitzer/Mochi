@@ -67,13 +67,117 @@ pub enum MochicStep {
     Start,
 }
 
-/// The dialog line for a mochic step that ended with a nonzero `code`, from
-/// everything mochic printed while it ran.
-pub fn mochic_failed(step: MochicStep, code: i32, said: &str, log_dir: &Path) -> String {
-    let _ = log_dir;
+/// The dialog line for a mochic step that failed, from everything mochic
+/// printed while it ran.
+pub fn mochic_failed(step: MochicStep, said: &str, log_dir: &Path) -> String {
+    let reason = mochic_reason(said);
     match step {
-        MochicStep::Quickstart => format!("writing the default settings failed ({code}): {said}"),
-        MochicStep::Start => said.to_owned(),
+        MochicStep::Quickstart if reason.is_empty() => {
+            "Could not write the default settings.".to_owned()
+        }
+        MochicStep::Quickstart => format!("Could not write the default settings. {reason}"),
+        // mochi itself knows why it did not come up, and says so in its log.
+        MochicStep::Start if reason.is_empty() || reason.contains(r"\\.\pipe\") => format!(
+            "Could not start Mochi. The log in {} says why.",
+            log_dir.display()
+        ),
+        MochicStep::Start => format!("Could not start Mochi. {reason}"),
+    }
+}
+
+/// mochic's error line as sentences: the first line it starts with "mochic: ",
+/// without the os error number, one sentence per link of the cause chain.
+fn mochic_reason(said: &str) -> String {
+    let Some(line) = said.lines().find_map(|l| l.trim().strip_prefix("mochic: ")) else {
+        return String::new();
+    };
+    without_os_error(line)
+        .split(": ")
+        .filter_map(sentence)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn without_os_error(line: &str) -> String {
+    let mut rest = line;
+    let mut out = String::new();
+    while let Some(start) = rest.find(" (os error ") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find(')') {
+            Some(end) => &rest[start + end + 1..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+fn sentence(part: &str) -> Option<String> {
+    let part = part.trim().trim_end_matches('.').trim_end();
+    let mut chars = part.chars();
+    let first = chars.next()?;
+    Some(format!("{}{}.", first.to_uppercase(), chars.as_str()))
+}
+
+#[cfg(test)]
+mod mochic_words {
+    use super::*;
+
+    const LOG: &str = r"C:\Users\a\data\mochi";
+
+    // mochic's own advice line; the real one names a folder through an unexpanded variable.
+    const ADVICE: &str =
+        "Run `mochic check` to test your configuration, or read the log in %DATA%\\mochi";
+
+    fn exited() -> String {
+        format!("mochic: mochi exited with code 1 without opening \\\\.\\pipe\\mochi.\n{ADVICE}")
+    }
+
+    fn no_pipe() -> String {
+        format!(
+            "mochic: mochi is running but did not open \\\\.\\pipe\\mochi within 10 seconds.\n{ADVICE}"
+        )
+    }
+
+    const DENIED: &str = "wrote C:\\Users\\a\\mochi.json\nmochic: could not write C:\\Users\\a\\.config\\mochi\\hotkeys: Access is denied. (os error 5)";
+
+    fn assert_plain(message: &str) {
+        assert!(!message.is_empty());
+        assert!(!message.contains('\n'), "{message}");
+        for term in ["mochic", "%", "os error", "pipe", "(1)", "`"] {
+            assert!(!message.contains(term), "{term} in {message}");
+        }
+        assert!(message.starts_with("Could not "), "{message}");
+        assert!(message.ends_with('.'), "{message}");
+    }
+
+    #[test]
+    fn a_mochi_that_does_not_come_up_points_at_its_log() {
+        for said in [exited(), no_pipe(), String::new()] {
+            let message = mochic_failed(MochicStep::Start, &said, Path::new(LOG));
+            assert_plain(&message);
+            assert_eq!(
+                message,
+                "Could not start Mochi. The log in C:\\Users\\a\\data\\mochi says why."
+            );
+        }
+    }
+
+    #[test]
+    fn default_settings_that_cannot_be_written_keep_the_reason_mochic_gave() {
+        let message = mochic_failed(MochicStep::Quickstart, DENIED, Path::new(LOG));
+        assert_plain(&message);
+        assert_eq!(
+            message,
+            "Could not write the default settings. Could not write C:\\Users\\a\\.config\\mochi\\hotkeys. Access is denied."
+        );
+    }
+
+    #[test]
+    fn a_quickstart_that_says_nothing_still_reads_as_a_sentence() {
+        let message = mochic_failed(MochicStep::Quickstart, "", Path::new(LOG));
+        assert_plain(&message);
+        assert_eq!(message, "Could not write the default settings.");
     }
 }
 

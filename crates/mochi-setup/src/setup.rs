@@ -438,9 +438,8 @@ fn quickstart(layout: &Layout) -> Result<(), String> {
     }
     match win::run_hidden(&layout.mochic(), &["quickstart"]) {
         Ok((0, _)) => Ok(()),
-        Ok((code, said)) => Err(plan::mochic_failed(
+        Ok((_, said)) => Err(plan::mochic_failed(
             plan::MochicStep::Quickstart,
-            code,
             &said,
             &layout.log_dir,
         )),
@@ -527,9 +526,8 @@ fn start_mochi(layout: &Layout) -> Result<(), String> {
     }
     match win::run_hidden(&layout.mochic(), &["start"]) {
         Ok((0, _)) => Ok(()),
-        Ok((code, said)) => Err(plan::mochic_failed(
+        Ok((_, said)) => Err(plan::mochic_failed(
             plan::MochicStep::Start,
-            code,
             &said,
             &layout.log_dir,
         )),
