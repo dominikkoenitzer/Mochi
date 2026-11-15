@@ -955,6 +955,8 @@ impl WindowManager {
                 break;
             }
         }
+        // Nothing reads the channel past here: letting go of it drops queued replies and refuses later sends.
+        self.rx = std::sync::mpsc::channel().1;
 
         self.visuals.stop();
         self.subscribers
@@ -6483,6 +6485,36 @@ mod tests {
         let (response, flow) = wm.handle_command(Command::Stop);
         assert_eq!(response, Response::Ok);
         assert_eq!(flow, Flow::Stop);
+    }
+
+    #[test]
+    fn a_command_behind_the_stop_hears_at_once_that_mochi_is_going() {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
+        let (mut wm, _) = manager(vec![]);
+        let tx = wm.sender();
+        let (stop, stopped) = crate::events::Reply::channel();
+        tx.send(Event::command(Command::Stop, stop)).unwrap();
+        let (late, answer) = crate::events::Reply::channel();
+        tx.send(Event::command(Command::Retile, late)).unwrap();
+
+        wm.run().unwrap();
+
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(1)),
+            Ok(Response::Ok)
+        );
+        assert_eq!(
+            answer.recv_timeout(Duration::from_secs(1)),
+            Err(RecvTimeoutError::Disconnected),
+            "a command queued behind the stop was left waiting for an answer"
+        );
+        let (after, _) = crate::events::Reply::channel();
+        assert!(
+            tx.send(Event::command(Command::Retile, after)).is_err(),
+            "the ended loop still takes commands nobody will answer"
+        );
     }
 
     #[test]
