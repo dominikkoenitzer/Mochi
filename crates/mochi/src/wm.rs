@@ -9488,6 +9488,74 @@ alt + j : focus down
     }
 
     #[test]
+    fn a_manage_rule_added_at_runtime_leaves_a_minimized_window_on_the_taskbar() {
+        // Two windows of one tool the heuristics skip; the user has put one
+        // of them away before the rule that describes both arrives.
+        let palette = |id, title| {
+            let mut w = window(id, title);
+            w.exe = "Palette.exe".into();
+            w.ex_style = crate::platform::types::ex_style::WS_EX_TOOLWINDOW;
+            w
+        };
+        let mut put_away = palette(3, "Colours");
+        put_away.minimized = true;
+        let (mut wm, platform) =
+            manager(vec![window(1, "Editor"), put_away, palette(4, "Brushes")]);
+        assert_eq!(wm.state().all_window_ids().count(), 1, "skipped at startup");
+
+        let (response, _) = wm.handle_command(Command::ManageRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "Palette.exe".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert_eq!(response, Response::Ok);
+
+        assert!(
+            wm.core.is_managed(WindowId(4)),
+            "the rule did not adopt the window it describes"
+        );
+        assert!(
+            !wm.core.is_managed(WindowId(3)),
+            "the rule pulled a window the user had minimized into a tile"
+        );
+        assert!(!touched(&platform, Hwnd(3)));
+    }
+
+    #[test]
+    fn a_window_minimized_during_a_pause_is_left_on_the_taskbar_when_it_ends() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Terminal")]);
+        wm.handle_command(Command::TogglePause);
+        assert!(wm.state().is_paused);
+
+        // While Mochi is paused the user puts one window away and opens another.
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .push(window(3, "Opened while paused"));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(3));
+        assert!(
+            !wm.core.is_managed(WindowId(2)),
+            "a window minimized during the pause should have left the model"
+        );
+        forget_touches(&platform);
+
+        wm.handle_command(Command::TogglePause);
+
+        assert!(
+            wm.core.is_managed(WindowId(3)),
+            "the window opened during the pause was never picked up"
+        );
+        assert!(
+            !wm.core.is_managed(WindowId(2)),
+            "the end of the pause pulled a window the user had minimized into a tile"
+        );
+        assert!(!touched(&platform, Hwnd(2)));
+    }
+
+    #[test]
     fn a_restored_window_is_taken_back_even_while_it_still_reads_minimized() {
         // The restore's own event is the user bringing the window back. It
         // can be read before Windows has finished the restore, so the window
