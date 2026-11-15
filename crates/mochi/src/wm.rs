@@ -1114,7 +1114,7 @@ impl WindowManager {
             let Some(info) = self.uncloak_stale(info) else {
                 continue;
             };
-            if !self.is_candidate(&info) {
+            if !self.is_candidate(&info) || self.put_away_by_user(&info) {
                 continue;
             }
             self.manage(&info);
@@ -1197,6 +1197,14 @@ impl WindowManager {
     /// already being managed by something else.
     fn is_candidate(&self, info: &WindowInfo) -> bool {
         !self.unmanaged_by_user.contains(&info.hwnd) && self.could_manage(info)
+    }
+
+    /// Whether the user has this window minimized on the taskbar.
+    ///
+    /// A window Mochi minimized to hide a workspace is not the user's doing
+    /// and keeps its claim to a tile; the hidden record knows which those are.
+    fn put_away_by_user(&self, info: &WindowInfo) -> bool {
+        info.minimized && !self.we_hid(info.hwnd)
     }
 
     /// [`Self::is_candidate`] without the user's `unmanage`, which keeps a
@@ -4121,7 +4129,7 @@ impl WindowManager {
             if self.core.window(window_id(info.hwnd)).is_some() {
                 continue;
             }
-            if !self.is_candidate(&info) {
+            if !self.is_candidate(&info) || self.put_away_by_user(&info) {
                 continue;
             }
             self.manage(&info);
@@ -8832,6 +8840,89 @@ alt + j : focus down
             wm.state().locate_window(WindowId(1)),
             Some((0, 1)),
             "the window teleported back to its initial workspace on a restore"
+        );
+    }
+
+    /// Whether Mochi restored, focused or placed `hwnd` since the platform's
+    /// records were last read.
+    fn touched(platform: &FakePlatform, hwnd: Hwnd) -> bool {
+        platform
+            .shows
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|&(shown, state)| shown == hwnd && state != ShowState::Minimize)
+            || platform.focused.lock().unwrap().contains(&hwnd)
+            || platform
+                .history
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|&(moved, _)| moved == hwnd)
+    }
+
+    fn forget_touches(platform: &FakePlatform) {
+        platform.shows.lock().unwrap().clear();
+        platform.focused.lock().unwrap().clear();
+        platform.clear_history();
+    }
+
+    #[test]
+    fn a_minimized_window_stays_minimized_when_its_title_changes() {
+        // A music player renames its window at every song. The user had it
+        // minimized under a fullscreen game, and each rename took it back
+        // into the layout, which restored it and raised it over the game.
+        let (mut wm, platform) =
+            manager_focused_on(vec![window(1, "Game"), window(2, "Song one")], Hwnd(1));
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        assert!(!wm.core.is_managed(WindowId(2)));
+        forget_touches(&platform);
+
+        platform.windows.lock().unwrap()[1].title = "Song two".into();
+        wm.on_window_event(WindowEventKind::NameChange, Hwnd(2));
+        assert!(
+            !wm.core.is_managed(WindowId(2)),
+            "a rename took a minimized window back into the layout"
+        );
+        assert!(
+            !touched(&platform, Hwnd(2)),
+            "a rename restored, focused or moved a window the user minimized"
+        );
+
+        // Some applications hand their minimized window the foreground
+        // without restoring it; that is not the user bringing it back either.
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+        assert!(!wm.core.is_managed(WindowId(2)));
+        assert!(!touched(&platform, Hwnd(2)));
+    }
+
+    #[test]
+    fn a_window_minimized_before_the_start_is_left_on_the_taskbar() {
+        let mut minimized = window(2, "Terminal");
+        minimized.minimized = true;
+        let (wm, platform) = manager(vec![window(1, "Editor"), minimized]);
+        assert!(
+            !wm.core.is_managed(WindowId(2)),
+            "the start took over a window the user had minimized"
+        );
+        assert!(!touched(&platform, Hwnd(2)));
+    }
+
+    #[test]
+    fn a_restored_window_is_taken_back_even_while_it_still_reads_minimized() {
+        // The restore's own event is the user bringing the window back. It
+        // can be read before Windows has finished the restore, so the window
+        // may still answer that it is minimized.
+        let (mut wm, platform) =
+            manager_focused_on(vec![window(1, "Game"), window(2, "Song one")], Hwnd(1));
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+
+        wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(2));
+        assert!(
+            wm.core.is_managed(WindowId(2)),
+            "the user restored a window and it was never tiled again"
         );
     }
 
