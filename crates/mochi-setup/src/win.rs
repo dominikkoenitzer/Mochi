@@ -303,9 +303,9 @@ fn check(status: WIN32_ERROR, what: &str) -> Result<(), String> {
     if status.is_ok() {
         Ok(())
     } else {
-        Err(format!(
-            "{what}: {}",
-            windows_core::Error::from(status.to_hresult()).message()
+        Err(crate::plan::could_not(
+            what,
+            &windows_core::Error::from(status.to_hresult()).message(),
         ))
     }
 }
@@ -333,7 +333,7 @@ pub fn read_text(key: &str, name: &str) -> Result<Option<(String, bool)>, String
     {
         return Ok(None);
     }
-    check(status, &format!("reading {key}\\{name}"))?;
+    check(status, &format!("read {key}\\{name}"))?;
     let mut buffer = vec![0u16; (size as usize).div_ceil(2) + 1];
     let mut size = (buffer.len() * 2) as u32;
     let status = unsafe {
@@ -347,7 +347,7 @@ pub fn read_text(key: &str, name: &str) -> Result<Option<(String, bool)>, String
             Some(&mut size),
         )
     };
-    check(status, &format!("reading {key}\\{name}"))?;
+    check(status, &format!("read {key}\\{name}"))?;
     let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
     Ok(Some((
         String::from_utf16_lossy(&buffer[..len]),
@@ -368,7 +368,7 @@ pub fn write_text(key: &str, name: &str, value: &str, expand: bool) -> Result<()
             (data.len() * 2) as u32,
         )
     };
-    check(status, &format!("writing {key}\\{name}"))
+    check(status, &format!("write {key}\\{name}"))
 }
 
 pub fn write_value(key: &str, name: &str, value: &RegValue) -> Result<(), String> {
@@ -385,7 +385,7 @@ pub fn write_value(key: &str, name: &str, value: &RegValue) -> Result<(), String
                     4,
                 )
             };
-            check(status, &format!("writing {key}\\{name}"))
+            check(status, &format!("write {key}\\{name}"))
         }
     }
 }
@@ -398,7 +398,7 @@ pub fn delete_value(key: &str, name: &str) -> Result<(), String> {
     {
         return Ok(());
     }
-    check(status, &format!("removing {key}\\{name}"))
+    check(status, &format!("remove {key}\\{name}"))
 }
 
 /// Removes a key and everything under it; one that is not there is fine.
@@ -409,7 +409,7 @@ pub fn delete_key(key: &str) -> Result<(), String> {
     {
         return Ok(());
     }
-    check(status, &format!("removing {key}"))
+    check(status, &format!("remove {key}"))
 }
 
 /// Whether a key exists and holds neither values nor subkeys.
@@ -471,7 +471,9 @@ pub fn announce_environment_change() {
 /// a shortcut to mochic.exe itself would open a terminal window on every
 /// click, because mochic is a console program.
 pub fn create_shortcut(path: &Path, mochic: &Path, icon: &Path) -> Result<(), String> {
-    let fail = |e: windows_core::Error| format!("creating {}: {}", path.display(), e.message());
+    let fail = |e: windows_core::Error| {
+        crate::plan::could_not(&format!("create {}", path.display()), &e.message())
+    };
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let link: IShellLinkW =
@@ -494,7 +496,12 @@ pub fn create_shortcut(path: &Path, mochic: &Path, icon: &Path) -> Result<(), St
             .map_err(fail)?;
         let file: IPersistFile = link.cast().map_err(fail)?;
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+            std::fs::create_dir_all(dir).map_err(|e| {
+                crate::plan::could_not(
+                    &format!("create {}", dir.display()),
+                    &crate::plan::io_reason(&e),
+                )
+            })?;
         }
         file.Save(&HSTRING::from(path.as_os_str()), true)
             .map_err(fail)
@@ -510,5 +517,47 @@ pub fn first_instance() -> bool {
             Ok(_) => GetLastError() != ERROR_ALREADY_EXISTS,
             Err(_) => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+
+    #[test]
+    fn a_refused_registry_step_reads_plainly() {
+        let message = check(ERROR_ACCESS_DENIED, r"write Software\Mochi\InstallRoot").unwrap_err();
+        let start = r"Could not write Software\Mochi\InstallRoot. ";
+        assert!(message.starts_with(start), "{message}");
+        assert!(
+            message[start.len()..].starts_with(char::is_uppercase),
+            "{message}"
+        );
+        assert!(message.ends_with('.'), "{message}");
+    }
+
+    #[test]
+    fn a_start_menu_folder_that_cannot_be_made_reads_plainly() {
+        let dir =
+            std::env::temp_dir().join(format!("mochi-setup-words-shortcut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file"), b"").unwrap();
+        let folder = dir.join("file").join("Programs");
+        let message = create_shortcut(
+            &folder.join("Mochi.lnk"),
+            &dir.join("mochic.exe"),
+            &dir.join("mochi.exe"),
+        )
+        .unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        let start = format!("Could not create {}. ", folder.display());
+        assert!(message.starts_with(&start), "{message}");
+        assert!(
+            message[start.len()..].starts_with(char::is_uppercase),
+            "{message}"
+        );
+        assert!(!message.contains("os error"), "{message}");
     }
 }
