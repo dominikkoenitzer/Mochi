@@ -4222,7 +4222,10 @@ impl WindowManager {
             match result {
                 Ok(()) => given_back += 1,
                 Err(e) => {
-                    left_off += 1;
+                    // A window that was closed is not left off screen, it is gone.
+                    if self.platform.window_info(hwnd).is_ok() {
+                        left_off += 1;
+                    }
                     // Written back down, the same way `show_window` does. This
                     // is the last-resort escape hatch: clearing the record and
                     // then failing left the window cloaked and invisible to the
@@ -7954,6 +7957,10 @@ alt + j : focus down
             .lock()
             .unwrap()
             .hide(Hwnd(99), HidingBehaviour::Cloak);
+        platform.windows.lock().unwrap().push(WindowInfo {
+            cloaked: true,
+            ..window(99, "Lost")
+        });
         platform.cannot_be_restored(Hwnd(99));
 
         let (response, _) = wm.handle_command(Command::RestoreWindows);
@@ -7970,8 +7977,13 @@ alt + j : focus down
         for hwnd in [Hwnd(97), Hwnd(98), Hwnd(99)] {
             wm.hidden.lock().unwrap().hide(hwnd, HidingBehaviour::Cloak);
         }
-        platform.cannot_be_restored(Hwnd(98));
-        platform.cannot_be_restored(Hwnd(99));
+        for (hwnd, title) in [(98, "Lost"), (99, "Also lost")] {
+            platform.windows.lock().unwrap().push(WindowInfo {
+                cloaked: true,
+                ..window(hwnd, title)
+            });
+            platform.cannot_be_restored(Hwnd(hwnd));
+        }
 
         let (response, _) = wm.handle_command(Command::RestoreWindows);
         assert_eq!(
@@ -7982,6 +7994,20 @@ alt + j : focus down
         assert!(!wm.hidden.lock().unwrap().contains(Hwnd(97)));
         assert!(wm.hidden.lock().unwrap().contains(Hwnd(98)));
         assert!(wm.hidden.lock().unwrap().contains(Hwnd(99)));
+    }
+
+    #[test]
+    fn restore_windows_does_not_count_a_window_that_was_closed() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        // Still written down as hidden, but the window is gone, so its handle refuses the uncloak.
+        wm.hidden
+            .lock()
+            .unwrap()
+            .hide(Hwnd(99), HidingBehaviour::Cloak);
+        platform.cannot_be_restored(Hwnd(99));
+
+        let (response, _) = wm.handle_command(Command::RestoreWindows);
+        assert_eq!(response, Response::Ok);
     }
 
     #[test]
