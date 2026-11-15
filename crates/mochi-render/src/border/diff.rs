@@ -345,6 +345,27 @@ mod tests {
     }
 
     #[test]
+    fn a_window_that_left_across_an_invalidate_is_still_taken_down() {
+        let mut diff = BorderDiff::new();
+        let _ = diff.diff(vec![
+            spec(A, LEFT, BorderKind::Single),
+            spec(B, RIGHT, BorderKind::Unfocused),
+        ]);
+
+        // A display change: B's window moved to a workspace that is not shown.
+        diff.invalidate();
+        let changes = diff.diff(vec![spec(A, LEFT, BorderKind::Single)]);
+        assert_eq!(changes.removed, vec![B], "B's frame stays on screen");
+        assert!(
+            changes.specs().any(|s| s.target == A),
+            "A is handed over again"
+        );
+
+        let changes = diff.diff(vec![spec(A, LEFT, BorderKind::Single)]);
+        assert!(changes.is_empty(), "B is taken down only once");
+    }
+
+    #[test]
     fn a_frame_moves_the_borders_that_exist_and_adds_none() {
         let mut diff = BorderDiff::new();
         let _ = diff.diff(vec![spec(A, LEFT, BorderKind::Single)]);
