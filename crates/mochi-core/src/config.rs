@@ -75,7 +75,7 @@ impl Colour {
     ///
     /// Returns [`Error::Parse`] for anything else.
     pub fn parse(text: &str) -> Result<Self> {
-        let digits = text.trim().trim_start_matches('#');
+        let digits = text.trim().strip_prefix('#').unwrap_or(text.trim());
         let invalid = || Error::Parse {
             kind: "colour",
             value: text.to_string(),
@@ -1450,6 +1450,14 @@ mod tests {
         // gives back for that pink, and it has to survive the round trip.
         assert_eq!(Colour::from_colorref(0x00df_bbff), pink);
         assert_eq!(Colour::default(), Colour::new(0, 0, 0));
+    }
+
+    #[test]
+    fn a_colour_takes_one_hash_sign_at_most() {
+        for text in ["##ffbbdf", "###fff", " ##f0a ", "##f0"] {
+            assert!(Colour::parse(text).is_err(), "for {text}");
+        }
+        assert!(serde_json::from_str::<Colour>(r###""##ffbbdf""###).is_err());
     }
 
     #[test]
