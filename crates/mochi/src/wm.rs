@@ -1727,6 +1727,21 @@ impl WindowManager {
         }
     }
 
+    /// Takes off screen every managed window the model does not show and the
+    /// hidden record does not already hold.
+    fn hide_what_the_model_hides(&mut self) {
+        let visible: BTreeSet<WindowId> = self.core.visible_window_ids().into_iter().collect();
+        let held: BTreeSet<Hwnd> = record(&self.hidden).handles().into_iter().collect();
+        let mut owed = Changes::none();
+        owed.hide = self
+            .core
+            .all_window_ids()
+            .filter(|id| !visible.contains(id) && !held.contains(&handle(*id)))
+            .collect();
+        // Through apply_changes, so a window that held the keyboard hands it on.
+        self.apply_changes(owed);
+    }
+
     /// Brings a window back, undoing whatever took it off screen.
     fn show_window(&mut self, hwnd: Hwnd) {
         // Read the record, do not take it. It is cleared further down, once
@@ -3433,6 +3448,10 @@ impl WindowManager {
                     // restored across it, was never managed again and sat
                     // untiled over the layout for the rest of the session.
                     self.adopt_newly_eligible();
+                    // A display change during the pause rehomes windows onto
+                    // workspaces nobody is looking at, and the hide it sends
+                    // is dropped while paused. The retile only ever shows.
+                    self.hide_what_the_model_hides();
                     self.retile();
                 }
                 self.notify(NotificationEvent::Pause {
@@ -7774,6 +7793,92 @@ alt + j : focus down
             after.contains(&(Hwnd(7), true)),
             "the rehomed window was left on screen: {after:?}"
         );
+    }
+
+    #[test]
+    fn a_window_rehomed_off_a_screen_lost_while_paused_goes_off_screen_on_unpause() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        wm.handle_command(Command::FocusWorkspace { index: 2 });
+        let mut stray = window(7, "On the portrait screen");
+        stray.monitor = Some(MonitorId(2));
+        wm.manage(&stray);
+        assert!(wm.state().window(WindowId(7)).is_some());
+        wm.handle_command(Command::FocusMonitor { index: 0 });
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+
+        wm.handle_command(Command::TogglePause);
+        platform.set_monitors(vec![main_screen()]);
+        wm.refresh_monitors();
+        let before = platform.cloaks.lock().unwrap().len();
+        wm.handle_command(Command::TogglePause);
+
+        let after: Vec<_> = platform.cloaks.lock().unwrap()[before..].to_vec();
+        assert!(
+            after.contains(&(Hwnd(7), true)),
+            "the rehomed window stayed on screen after the pause: {after:?}"
+        );
+        assert!(
+            record(&wm.hidden).contains(Hwnd(7)),
+            "the hidden record does not name the rehomed window"
+        );
+    }
+
+    #[test]
+    fn a_pause_and_unpause_with_no_display_change_cloaks_nothing() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor"), window(2, "Terminal")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        wm.handle_command(Command::FocusWorkspace { index: 2 });
+        let mut other = window(7, "On the portrait screen");
+        other.monitor = Some(MonitorId(2));
+        wm.manage(&other);
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+
+        let before = platform.cloaks.lock().unwrap().len();
+        wm.handle_command(Command::TogglePause);
+        wm.handle_command(Command::TogglePause);
+
+        let after: Vec<_> = platform.cloaks.lock().unwrap()[before..].to_vec();
+        assert!(
+            !after.iter().any(|(_, cloaked)| *cloaked),
+            "a pause with nothing changed cloaked windows: {after:?}"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_leaves_a_window_hidden_as_the_pause_ends() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        wm.handle_command(Command::FocusWorkspace { index: 2 });
+        let mut stray = window(7, "On the portrait screen");
+        stray.monitor = Some(MonitorId(2));
+        wm.manage(&stray);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(7));
+        assert_eq!(wm.foreground, Some(Hwnd(7)));
+
+        wm.handle_command(Command::TogglePause);
+        platform.set_monitors(vec![main_screen()]);
+        wm.refresh_monitors();
+        let before = platform.desktop_focus.load(Ordering::SeqCst);
+        wm.handle_command(Command::TogglePause);
+
+        assert!(record(&wm.hidden).contains(Hwnd(7)));
+        assert_ne!(
+            wm.foreground,
+            Some(Hwnd(7)),
+            "the keyboard stayed on a window taken off screen"
+        );
+        assert!(platform.desktop_focus.load(Ordering::SeqCst) > before);
     }
 
     #[test]
