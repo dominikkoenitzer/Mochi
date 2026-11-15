@@ -337,7 +337,8 @@ fn hold_install_lock(bin: &Path) -> Result<Option<std::fs::File>, InstallBusy> {
 /// back, so a full disk or a file another program holds never leaves a new
 /// mochi.exe beside an old mochic.exe.
 fn put_binaries(bin: &Path, payload: &Payload) -> Result<(), String> {
-    std::fs::create_dir_all(bin).map_err(|e| format!("creating {}: {e}", bin.display()))?;
+    std::fs::create_dir_all(bin)
+        .map_err(|e| plan::could_not(&format!("create {}", bin.display()), &plan::io_reason(&e)))?;
     let files = [("mochi.exe", payload.mochi), ("mochic.exe", payload.mochic)];
     let staged = |name: &str| bin.join(format!("{name}.new"));
     let aside = |name: &str| bin.join(format!("{name}.old"));
@@ -357,7 +358,10 @@ fn put_binaries(bin: &Path, payload: &Payload) -> Result<(), String> {
     for (name, bytes) in files {
         if let Err(e) = std::fs::write(staged(name), bytes) {
             undo(&moved, &placed);
-            return Err(format!("writing {}: {e}", bin.join(name).display()));
+            return Err(plan::could_not(
+                &format!("write {}", bin.join(name).display()),
+                &plan::io_reason(&e),
+            ));
         }
     }
     for (name, _) in files {
@@ -368,14 +372,20 @@ fn put_binaries(bin: &Path, payload: &Payload) -> Result<(), String> {
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => {
                 undo(&moved, &placed);
-                return Err(format!("replacing {}: {e}", bin.join(name).display()));
+                return Err(plan::could_not(
+                    &format!("replace {}", bin.join(name).display()),
+                    &plan::io_reason(&e),
+                ));
             }
         }
     }
     for (name, _) in files {
         if let Err(e) = std::fs::rename(staged(name), bin.join(name)) {
             undo(&moved, &placed);
-            return Err(format!("replacing {}: {e}", bin.join(name).display()));
+            return Err(plan::could_not(
+                &format!("replace {}", bin.join(name).display()),
+                &plan::io_reason(&e),
+            ));
         }
         placed.push(name);
     }
@@ -400,9 +410,9 @@ fn keep_setup_copy(layout: &Layout, current: Option<&Path>) -> Result<(), String
     std::fs::copy(current, &layout.setup_copy)
         .map(drop)
         .map_err(|e| {
-            format!(
-                "copying the uninstaller to {}: {e}",
-                layout.setup_copy.display()
+            plan::could_not(
+                &format!("copy the uninstaller to {}", layout.setup_copy.display()),
+                &plan::io_reason(&e),
             )
         })
 }
@@ -438,10 +448,15 @@ fn quickstart(layout: &Layout) -> Result<(), String> {
     }
     match win::run_hidden(&layout.mochic(), &["quickstart"]) {
         Ok((0, _)) => Ok(()),
-        Ok((code, said)) => Err(format!(
-            "writing the default settings failed ({code}): {said}"
+        Ok((_, said)) => Err(plan::mochic_failed(
+            plan::MochicStep::Quickstart,
+            &said,
+            &layout.log_dir,
         )),
-        Err(e) => Err(format!("writing the default settings failed: {e}")),
+        Err(e) => Err(plan::could_not(
+            "write the default settings",
+            &plan::io_reason(&e),
+        )),
     }
 }
 
@@ -501,7 +516,10 @@ fn remove_file(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("removing {}: {e}", path.display())),
+        Err(e) => Err(plan::could_not(
+            &format!("remove {}", path.display()),
+            &plan::io_reason(&e),
+        )),
     }
 }
 
@@ -515,7 +533,8 @@ fn start_mochi(layout: &Layout) -> Result<(), String> {
                     .into(),
             );
         }
-        win::open_with_explorer(&layout.shortcut).map_err(|e| format!("starting Mochi: {e}"))?;
+        win::open_with_explorer(&layout.shortcut)
+            .map_err(|e| plan::could_not("start Mochi", &plan::io_reason(&e)))?;
         return if win::wait_for(Duration::from_secs(10), win::mochi_running) {
             Ok(())
         } else {
@@ -524,8 +543,12 @@ fn start_mochi(layout: &Layout) -> Result<(), String> {
     }
     match win::run_hidden(&layout.mochic(), &["start"]) {
         Ok((0, _)) => Ok(()),
-        Ok((_, said)) => Err(said),
-        Err(e) => Err(format!("starting Mochi: {e}")),
+        Ok((_, said)) => Err(plan::mochic_failed(
+            plan::MochicStep::Start,
+            &said,
+            &layout.log_dir,
+        )),
+        Err(e) => Err(plan::could_not("start Mochi", &plan::io_reason(&e))),
     }
 }
 
@@ -692,6 +715,79 @@ mod tests {
         assert!(matches!(ours, Ok(Some(_))), "a free lock was not taken");
         drop(ours);
         assert!(!lock.exists(), "the last handle takes the file with it");
+    }
+
+    /// A failed step as the dialog shows it: what and where, then Windows' reason without its number.
+    fn assert_plain(message: &str, start: &str) {
+        assert!(message.starts_with(start), "{message}");
+        let reason = &message[start.len()..];
+        assert!(reason.starts_with(char::is_uppercase), "{message}");
+        assert!(message.ends_with('.'), "{message}");
+        assert!(!message.contains("os error"), "{message}");
+    }
+
+    #[test]
+    fn a_bin_folder_that_cannot_be_made_reads_plainly() {
+        let dir = scratch("words-create");
+        std::fs::write(dir.0.join("file"), b"").unwrap();
+        let bin = dir.0.join("file").join("bin");
+        let message = put_binaries(&bin, &NEW).unwrap_err();
+        assert_plain(&message, &format!("Could not create {}. ", bin.display()));
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_written_reads_plainly() {
+        let dir = scratch("words-write");
+        std::fs::write(dir.0.join("mochi.exe.new"), b"").unwrap();
+        let held = hold(&dir.0.join("mochi.exe.new"));
+        let message = put_binaries(&dir.0, &NEW).unwrap_err();
+        drop(held);
+        let path = dir.0.join("mochi.exe");
+        assert_plain(&message, &format!("Could not write {}. ", path.display()));
+    }
+
+    #[test]
+    fn a_held_file_reads_plainly() {
+        let dir = scratch("words-replace");
+        old_pair(&dir.0);
+        let held = hold(&dir.0.join("mochi.exe"));
+        let message = put_binaries(&dir.0, &NEW).unwrap_err();
+        drop(held);
+        let path = dir.0.join("mochi.exe");
+        assert_plain(&message, &format!("Could not replace {}. ", path.display()));
+    }
+
+    #[test]
+    fn an_uninstaller_that_cannot_be_copied_reads_plainly() {
+        let dir = scratch("words-copy");
+        let current = dir.0.join("Mochi-Setup.exe");
+        std::fs::write(&current, b"setup").unwrap();
+        let layout = Layout::new(&dir.0.join("missing"), &dir.0, &dir.0);
+        let message = keep_setup_copy(&layout, Some(&current)).unwrap_err();
+        let start = format!(
+            "Could not copy the uninstaller to {}. ",
+            layout.setup_copy.display()
+        );
+        assert_plain(&message, &start);
+    }
+
+    #[test]
+    fn default_settings_that_cannot_be_written_read_plainly() {
+        let dir = scratch("words-quickstart");
+        let layout = Layout::new(&dir.0.join("missing"), &dir.0, &dir.0.join("profile"));
+        let message = quickstart(&layout).unwrap_err();
+        assert_plain(&message, "Could not write the default settings. ");
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_removed_reads_plainly() {
+        let dir = scratch("words-remove");
+        let path = dir.0.join("mochi.lnk");
+        std::fs::write(&path, b"").unwrap();
+        let held = hold(&path);
+        let message = remove_file(&path).unwrap_err();
+        drop(held);
+        assert_plain(&message, &format!("Could not remove {}. ", path.display()));
     }
 
     #[test]

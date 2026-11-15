@@ -55,8 +55,36 @@ use crate::platform::{
 };
 use crate::state::{State, snapshot};
 
-/// What a command that needs the keyboard hook answers without one.
-const NO_HOTKEYS: &str = "this daemon binds no keys, it was started with --no-hotkeys";
+/// Why a daemon holds no keyboard hook, so a command that needs one can say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoHook {
+    /// Started with `--no-hotkeys`.
+    Flag,
+    /// A dry run never installs the hook.
+    DryRun,
+    /// The hook was asked for and Windows did not install it.
+    Failed,
+}
+
+impl NoHook {
+    /// What a command that needs the keyboard hook answers without one.
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Flag => "this daemon binds no keys, it was started with --no-hotkeys",
+            Self::DryRun => "this daemon binds no keys, it is a dry run",
+            Self::Failed => "this daemon binds no keys, its keyboard hook could not be installed",
+        }
+    }
+
+    /// The `hook` field of `mochic hotkeys`.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "no-hotkeys",
+            Self::DryRun => "dry-run",
+            Self::Failed => "failed",
+        }
+    }
+}
 
 /// What a command that would change the desktop answers while paused.
 const PAUSED: &str = "mochi is paused, nothing was changed";
@@ -590,6 +618,9 @@ pub struct WindowManager {
     /// window can report in when the reason is long over: after the restore of
     /// a redraw, or after the switch back to its workspace.
     minimize_unseen: HashSet<Hwnd>,
+    /// The window the user is dragging or resizing, and its frame when the
+    /// drag began, so the drop can tell a resize from a move.
+    drag_start: Option<(Hwnd, Rect)>,
     /// Windows taken out with `unmanage`, kept out until `manage` or until they close.
     unmanaged_by_user: HashSet<Hwnd>,
     /// Windows that have taken a whole monitor over, and the monitor each one
@@ -646,6 +677,8 @@ pub struct WindowManager {
     visuals: crate::visuals::Visuals,
     /// The keyboard hook, when this daemon binds keys at all.
     hotkeys: Option<HotkeyDaemon>,
+    /// Why `hotkeys` is empty, read only while it is.
+    no_hook: NoHook,
     /// The hotkey file, for a reload and for `mochic hotkeys`.
     hotkey_path: Option<PathBuf>,
     /// The gate and the pause to put back when game mode ends.
@@ -672,6 +705,9 @@ pub struct WindowManager {
     /// in tests instead of starting anything.
     #[cfg(test)]
     launched: Mutex<Vec<String>>,
+    /// Makes every scratchpad command in a test fail to start.
+    #[cfg(test)]
+    launch_fails: std::sync::atomic::AtomicBool,
 }
 
 impl WindowManager {
@@ -733,6 +769,11 @@ impl WindowManager {
         }
         let hidden = Arc::new(Mutex::new(carried));
         let visuals = crate::visuals::Visuals::new(Arc::clone(&platform), Arc::clone(&hidden));
+        let no_hook = if session.dry_run {
+            NoHook::DryRun
+        } else {
+            NoHook::Flag
+        };
 
         let mut wm = Self {
             platform,
@@ -748,6 +789,7 @@ impl WindowManager {
             routed: HashSet::new(),
             minimized: HashSet::new(),
             minimize_unseen: HashSet::new(),
+            drag_start: None,
             unmanaged_by_user: HashSet::new(),
             fullscreen: BTreeMap::new(),
             display_changes: 0,
@@ -763,6 +805,7 @@ impl WindowManager {
             visual_config: Config::default(),
             visuals,
             hotkeys: None,
+            no_hook,
             hotkey_path: None,
             before_game_mode: None,
             hotkey_candidates: Vec::new(),
@@ -772,6 +815,8 @@ impl WindowManager {
             sent: Mutex::new(Vec::new()),
             #[cfg(test)]
             launched: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            launch_fails: std::sync::atomic::AtomicBool::new(false),
         };
 
         wm.refresh_monitors();
@@ -807,15 +852,33 @@ impl WindowManager {
     /// to start because a key could not be bound would leave the user with an
     /// untiled desktop over something `mochic` can still do by hand.
     pub fn start_hotkeys(&mut self, path: PathBuf, candidates: Vec<PathBuf>) {
+        let bindings = self.load_hotkey_file(path, candidates);
+        let started = HotkeyDaemon::start(self.tx.clone(), bindings);
+        self.take_hook(started);
+    }
+
+    /// Reads the hotkey file for `mochic hotkeys` and hands back what to bind.
+    fn load_hotkey_file(
+        &mut self,
+        path: PathBuf,
+        candidates: Vec<PathBuf>,
+    ) -> mochi_hotkey::Bindings {
         let (bindings, errors) = config::load_hotkeys(&path);
         self.hotkey_rows = rows_of(&bindings);
         self.hotkey_errors = errors;
         self.hotkey_path = Some(path);
         self.hotkey_candidates = candidates;
+        bindings
+    }
 
-        match HotkeyDaemon::start(self.tx.clone(), bindings) {
+    /// Keeps the hook that came up, or logs that it did not.
+    fn take_hook(&mut self, started: Result<HotkeyDaemon>) {
+        match started {
             Ok(daemon) => self.hotkeys = Some(daemon),
-            Err(e) => tracing::error!(error = %e, "no keyboard hook, Mochi binds no keys"),
+            Err(e) => {
+                tracing::error!(error = %e, "no keyboard hook, Mochi binds no keys");
+                self.no_hook = NoHook::Failed;
+            }
         }
     }
 
@@ -951,6 +1014,8 @@ impl WindowManager {
                 break;
             }
         }
+        // Nothing reads the channel past here: letting go of it drops queued replies and refuses later sends.
+        self.rx = std::sync::mpsc::channel().1;
 
         self.visuals.stop();
         self.subscribers
@@ -1114,7 +1179,7 @@ impl WindowManager {
             let Some(info) = self.uncloak_stale(info) else {
                 continue;
             };
-            if !self.is_candidate(&info) {
+            if !self.is_candidate(&info) || self.put_away_by_user(&info) {
                 continue;
             }
             self.manage(&info);
@@ -1197,6 +1262,14 @@ impl WindowManager {
     /// already being managed by something else.
     fn is_candidate(&self, info: &WindowInfo) -> bool {
         !self.unmanaged_by_user.contains(&info.hwnd) && self.could_manage(info)
+    }
+
+    /// Whether the user has this window minimized on the taskbar.
+    ///
+    /// A window Mochi minimized to hide a workspace is not the user's doing
+    /// and keeps its claim to a tile; the hidden record knows which those are.
+    fn put_away_by_user(&self, info: &WindowInfo) -> bool {
+        info.minimized && !self.we_hid(info.hwnd)
     }
 
     /// [`Self::is_candidate`] without the user's `unmanage`, which keeps a
@@ -1623,13 +1696,10 @@ impl WindowManager {
             HidingBehaviour::Hide => self.platform.show(hwnd, ShowState::Hide),
         };
         // A few windows cannot be cloaked by anyone, tool windows and splash
-        // screens among them. Hiding is the closest thing, and the record
+        // screens among them, and any window goes uncloakable for a moment
+        // while explorer restarts. Hiding is the closest thing, and the record
         // keeps the method actually used so the restore path undoes it.
-        if matches!(behaviour, HidingBehaviour::Cloak)
-            && result
-                .as_ref()
-                .is_err_and(|e| e.downcast_ref::<CloakUnsupported>().is_some())
-        {
+        if matches!(behaviour, HidingBehaviour::Cloak) && result.is_err() {
             tracing::debug!(%hwnd, "window cannot be cloaked, hiding it instead");
             behaviour = HidingBehaviour::Hide;
             result = self.platform.show(hwnd, ShowState::Hide);
@@ -1655,6 +1725,21 @@ impl WindowManager {
             }
             Err(e) => tracing::error!(%hwnd, ?behaviour, error = %e, "could not hide a window"),
         }
+    }
+
+    /// Takes off screen every managed window the model does not show and the
+    /// hidden record does not already hold.
+    fn hide_what_the_model_hides(&mut self) {
+        let visible: BTreeSet<WindowId> = self.core.visible_window_ids().into_iter().collect();
+        let held: BTreeSet<Hwnd> = record(&self.hidden).handles().into_iter().collect();
+        let mut owed = Changes::none();
+        owed.hide = self
+            .core
+            .all_window_ids()
+            .filter(|id| !visible.contains(id) && !held.contains(&handle(*id)))
+            .collect();
+        // Through apply_changes, so a window that held the keyboard hands it on.
+        self.apply_changes(owed);
     }
 
     /// Brings a window back, undoing whatever took it off screen.
@@ -2168,7 +2253,9 @@ impl WindowManager {
                 self.window_restored(hwnd);
             }
             WindowEventKind::Foreground => self.window_focused(hwnd),
-            WindowEventKind::MoveSizeStart => {}
+            WindowEventKind::MoveSizeStart => {
+                self.drag_start = self.platform.visible_frame(hwnd).map(|frame| (hwnd, frame));
+            }
             WindowEventKind::MoveSizeEnd => self.window_dropped(hwnd),
             WindowEventKind::NameChange => self.window_renamed(hwnd),
         }
@@ -2849,18 +2936,39 @@ impl WindowManager {
     ///
     /// A tiled window that was dragged onto another tile swaps with it, one
     /// dragged onto another monitor moves there, and anything else snaps back
-    /// to where the layout wants it.
+    /// to where the layout wants it. A resize only ever snaps back: the cursor
+    /// lets go of a grip on the window's own edge, and where that edge ended
+    /// up says nothing about where the user wants the window.
     fn window_dropped(&mut self, hwnd: Hwnd) {
+        let started = self
+            .drag_start
+            .take()
+            .filter(|&(dragged, _)| dragged == hwnd);
         let id = window_id(hwnd);
         let Some((monitor, workspace)) = self.core.locate_window(id) else {
             return;
         };
+        // Paused, the model must not change: a swap would show up at unpause.
+        if self.core.is_paused {
+            return;
+        }
         // A floating window keeps whatever the user did to it.
         if self
             .core
             .workspace(monitor, workspace)
             .is_ok_and(|target| target.floating_windows().position(|w| w.id == id).is_some())
         {
+            return;
+        }
+
+        let resized = started.is_some_and(|(_, before)| {
+            self.platform
+                .visible_frame(hwnd)
+                .is_some_and(|after| was_resized(before, after))
+        });
+        if resized {
+            tracing::debug!(%hwnd, "a tile was resized, putting it back");
+            self.retile();
             return;
         }
 
@@ -3074,10 +3182,9 @@ impl WindowManager {
             return;
         }
 
-        // Which screen had the focus, remembered the same way a monitor is
-        // carried across: by where it is, not by what Windows is calling it
-        // this time round.
-        let focused_area = self.core.focused_monitor().ok().map(|monitor| monitor.size);
+        // The focused screen's place in `previous`, followed through the carry below.
+        let mut focused_before = self.core.focused_indices().ok().map(|(monitor, _)| monitor);
+        let mut focused_after = None;
 
         let mut previous = Vec::new();
         while let Some(monitor) = self.core.remove_monitor(0) {
@@ -3097,7 +3204,17 @@ impl WindowManager {
         for info in infos {
             let carried = same_panel(&previous, info);
             let mut monitor = match carried {
-                Some(idx) => previous.remove(idx),
+                Some(idx) => {
+                    match focused_before {
+                        Some(focused) if focused == idx => {
+                            focused_after = Some(self.core.monitors().len());
+                            focused_before = None;
+                        }
+                        Some(focused) if focused > idx => focused_before = Some(focused - 1),
+                        _ => {}
+                    }
+                    previous.remove(idx)
+                }
                 None => {
                     fresh.push(self.core.monitors().len());
                     Monitor::new(info.id.0, info.size, info.work_area)
@@ -3178,11 +3295,7 @@ impl WindowManager {
             self.apply_changes(settling);
         }
 
-        if let Some(idx) = focused_area.and_then(|area| {
-            self.core
-                .monitors()
-                .position(|monitor| monitor.size == area)
-        }) {
+        if let Some(idx) = focused_after {
             self.core.monitors_mut().focus(idx);
         }
 
@@ -3340,6 +3453,10 @@ impl WindowManager {
                     // restored across it, was never managed again and sat
                     // untiled over the layout for the rest of the session.
                     self.adopt_newly_eligible();
+                    // A display change during the pause rehomes windows onto
+                    // workspaces nobody is looking at, and the hide it sends
+                    // is dropped while paused. The retile only ever shows.
+                    self.hide_what_the_model_hides();
                     self.retile();
                 }
                 self.notify(NotificationEvent::Pause {
@@ -3645,11 +3762,18 @@ impl WindowManager {
                 None => serde_json::json!({ "keys": row.keys, "command": row.command }),
             })
             .collect();
+        // Composed here rather than stored, so a reload that rewrites the parse errors keeps it.
+        let mut errors = Vec::with_capacity(self.hotkey_errors.len() + 1);
+        if self.hotkeys.is_none() && self.no_hook == NoHook::Failed {
+            errors.push(NoHook::Failed.reason().to_owned());
+        }
+        errors.extend(self.hotkey_errors.iter().cloned());
         serde_json::json!({
             "path": self.hotkey_path.as_ref().map(|p| p.display().to_string()),
             "gate": self.hotkeys.as_ref().map_or("off", |h| h.gate().as_str()),
+            "hook": self.hotkeys.as_ref().map_or(self.no_hook.as_str(), |_| "installed"),
             "bindings": bindings,
-            "errors": self.hotkey_errors,
+            "errors": errors,
         })
     }
 
@@ -3677,7 +3801,7 @@ impl WindowManager {
     /// `set-hotkeys`: bind keys, or stop binding them without stopping tiling.
     fn set_hotkeys(&mut self, enable: bool) -> Response {
         let Some(gate) = self.hotkeys.as_ref().map(HotkeyDaemon::gate) else {
-            return Response::error(NO_HOTKEYS);
+            return Response::error(self.no_hook.reason());
         };
 
         // Asking for the keyboard while game mode holds it is a request to
@@ -3711,7 +3835,7 @@ impl WindowManager {
     /// rather than in a half-suspended state nobody can leave.
     fn toggle_game_mode(&mut self) -> Response {
         let Some(hotkeys) = self.hotkeys.as_ref() else {
-            return Response::error(NO_HOTKEYS);
+            return Response::error(self.no_hook.reason());
         };
         let entering = hotkeys.gate() != Gate::GameMode;
 
@@ -3974,6 +4098,10 @@ impl WindowManager {
         if self.core.is_managed(window_id(hwnd)) {
             return Response::Ok;
         }
+        // Paused, the window would only be queued and land on the focused workspace at unpause.
+        if self.core.is_paused {
+            return Response::error(PAUSED);
+        }
         // Tiled, it would leave a hole in the layout each time the scratchpad hides it.
         if let Some(index) = self.scratchpad_holding(hwnd) {
             return Response::error(format!(
@@ -4042,6 +4170,10 @@ impl WindowManager {
         workspace_padding: Option<i32>,
         container_padding: Option<i32>,
     ) -> Response {
+        // Refused before the write, or the new padding would show at unpause.
+        if self.core.is_paused {
+            return Response::error(PAUSED);
+        }
         match self.core.workspace_mut(monitor, workspace) {
             Ok(target) => {
                 if workspace_padding.is_some() {
@@ -4121,7 +4253,7 @@ impl WindowManager {
             if self.core.window(window_id(info.hwnd)).is_some() {
                 continue;
             }
-            if !self.is_candidate(&info) {
+            if !self.is_candidate(&info) || self.put_away_by_user(&info) {
                 continue;
             }
             self.manage(&info);
@@ -4211,7 +4343,7 @@ impl WindowManager {
             return Response::Ok;
         }
 
-        let mut given_back = 0;
+        let (mut given_back, mut left_off) = (0, 0);
         for hwnd in stranded {
             let behaviour = record(&self.hidden).show(hwnd);
             let result = match behaviour {
@@ -4222,6 +4354,10 @@ impl WindowManager {
             match result {
                 Ok(()) => given_back += 1,
                 Err(e) => {
+                    // A window that was closed is not left off screen, it is gone.
+                    if self.platform.window_info(hwnd).is_ok() {
+                        left_off += 1;
+                    }
                     // Written back down, the same way `show_window` does. This
                     // is the last-resort escape hatch: clearing the record and
                     // then failing left the window cloaked and invisible to the
@@ -4234,7 +4370,12 @@ impl WindowManager {
             }
         }
         tracing::warn!(count = given_back, "gave stranded windows back");
-        Response::Ok
+        // The escape hatch must not claim a rescue that did not happen.
+        match left_off {
+            0 => Response::Ok,
+            1 => Response::error("1 window could not be brought back"),
+            n => Response::error(format!("{n} windows could not be brought back")),
+        }
     }
 
     /// Re-asks the rules about every window that is already managed.
@@ -4618,17 +4759,22 @@ impl WindowManager {
         }
     }
 
-    /// Starts a scratchpad's command, or in tests writes down that it would.
-    fn launch_scratchpad(&self, line: &str) {
+    /// Starts a scratchpad's command, or in tests writes down that it would,
+    /// and says whether it was started.
+    fn launch_scratchpad(&self, line: &str) -> bool {
         #[cfg(test)]
-        if let Ok(mut launched) = self.launched.lock() {
-            launched.push(line.to_owned());
+        {
+            if let Ok(mut launched) = self.launched.lock() {
+                launched.push(line.to_owned());
+            }
+            !self.launch_fails.load(std::sync::atomic::Ordering::Relaxed)
         }
         #[cfg(not(test))]
         if self.session.dry_run {
             tracing::info!(line, "dry run: the scratchpad command was not started");
+            true
         } else {
-            crate::events::hotkey::run_shell(mochi_hotkey::Shell::Cmd, line);
+            crate::events::hotkey::run_shell(mochi_hotkey::Shell::Cmd, line)
         }
     }
 
@@ -4706,8 +4852,10 @@ impl WindowManager {
             ));
         };
         tracing::info!(name = %pad.config.name, line, "starting the scratchpad command");
+        if !self.launch_scratchpad(&line) {
+            return Response::error("the scratchpad command could not be started");
+        }
         self.scratchpads[index].launched = Some(std::time::Instant::now());
-        self.launch_scratchpad(&line);
         Response::Ok
     }
 
@@ -5000,6 +5148,19 @@ const fn handle(id: WindowId) -> Hwnd {
     Hwnd(id.0)
 }
 
+/// Whether a drag from `before` to `after` was a resize rather than a move.
+///
+/// A resize grip moves one edge of an axis, or none, and leaves the other
+/// where it was; a move carries both edges of at least one axis along. The
+/// size alone is not enough: a window carried onto a monitor of another DPI
+/// comes out a different size as well.
+fn was_resized(before: Rect, after: Rect) -> bool {
+    let sized = before.width() != after.width() || before.height() != after.height();
+    let kept_x = before.left == after.left || before.right == after.right;
+    let kept_y = before.top == after.top || before.bottom == after.bottom;
+    sized && kept_x && kept_y
+}
+
 /// Whether a window is one of the Chromium and Electron family, whose content
 /// does not reliably survive a display change. See [`Redraw`].
 fn is_chromium(class: &str) -> bool {
@@ -5248,6 +5409,10 @@ mod tests {
         record_seen: Mutex<Vec<usize>>,
         /// Windows that cannot be uncloaked, the way an elevated one cannot.
         unrestorable: Mutex<Vec<Hwnd>>,
+        /// Windows the shell has no view for, so no cloak can ever reach them.
+        no_view: Mutex<Vec<Hwnd>>,
+        /// Windows whose cloak calls fail for now, the way they do while explorer restarts.
+        shell_away: Mutex<Vec<Hwnd>>,
         /// Windows Windows reports as maximized, which a test drives directly
         /// to stand in for the user pressing the maximize button.
         zoomed: Mutex<Vec<Hwnd>>,
@@ -5282,6 +5447,8 @@ mod tests {
                 record_watch: Mutex::new(None),
                 record_seen: Mutex::new(Vec::new()),
                 unrestorable: Mutex::new(Vec::new()),
+                no_view: Mutex::new(Vec::new()),
+                shell_away: Mutex::new(Vec::new()),
                 zoomed: Mutex::new(Vec::new()),
                 minimums: Mutex::new(Vec::new()),
                 min_size_asks: AtomicUsize::new(0),
@@ -5509,6 +5676,12 @@ mod tests {
             }
             if !cloaked && self.unrestorable.lock().unwrap().contains(&hwnd) {
                 return Err(anyhow::anyhow!("this window cannot be uncloaked"));
+            }
+            if self.no_view.lock().unwrap().contains(&hwnd) {
+                return Err(anyhow::Error::new(CloakUnsupported));
+            }
+            if self.shell_away.lock().unwrap().contains(&hwnd) {
+                return Err(anyhow::anyhow!("the shell could not cloak the window"));
             }
             self.cloaks.lock().unwrap().push((hwnd, cloaked));
             if cloaked {
@@ -6442,6 +6615,36 @@ mod tests {
     }
 
     #[test]
+    fn a_command_behind_the_stop_hears_at_once_that_mochi_is_going() {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
+        let (mut wm, _) = manager(vec![]);
+        let tx = wm.sender();
+        let (stop, stopped) = crate::events::Reply::channel();
+        tx.send(Event::command(Command::Stop, stop)).unwrap();
+        let (late, answer) = crate::events::Reply::channel();
+        tx.send(Event::command(Command::Retile, late)).unwrap();
+
+        wm.run().unwrap();
+
+        assert_eq!(
+            stopped.recv_timeout(Duration::from_secs(1)),
+            Ok(Response::Ok)
+        );
+        assert_eq!(
+            answer.recv_timeout(Duration::from_secs(1)),
+            Err(RecvTimeoutError::Disconnected),
+            "a command queued behind the stop was left waiting for an answer"
+        );
+        let (after, _) = crate::events::Reply::channel();
+        assert!(
+            tx.send(Event::command(Command::Retile, after)).is_err(),
+            "the ended loop still takes commands nobody will answer"
+        );
+    }
+
+    #[test]
     fn a_paused_manager_moves_nothing() {
         let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
         wm.handle_command(Command::TogglePause);
@@ -6727,6 +6930,79 @@ alt + j : focus down
             wm.state().is_paused,
             "game mode resumed a pause the user set themselves"
         );
+    }
+
+    #[test]
+    fn a_dry_run_says_it_is_a_dry_run_when_asked_for_hotkeys() {
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        for command in [
+            Command::SetHotkeys {
+                state: mochi_client::BooleanState::Enable,
+            },
+            Command::ToggleGameMode,
+        ] {
+            let (response, _) = wm.handle_command(command);
+            let message = response.error_message().unwrap_or_default().to_owned();
+            assert!(message.contains("dry run"), "{message}");
+            assert!(!message.contains("--no-hotkeys"), "{message}");
+        }
+
+        let (response, _) = wm.handle_command(Command::Hotkeys);
+        let Response::Hotkeys { hotkeys } = response else {
+            panic!("{response:?}");
+        };
+        assert_eq!(hotkeys["gate"], "off");
+        assert_eq!(hotkeys["hook"], "dry-run");
+        assert_eq!(hotkeys["errors"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_hook_that_failed_to_start_says_so_and_keeps_saying_so() {
+        let dir = std::env::temp_dir().join(format!("mochi-hookless-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let keys = dir.join("hotkeys");
+        std::fs::write(&keys, "alt + h : focus left\n").expect("write");
+
+        let (mut wm, _) = manager(vec![window(1, "Editor")]);
+        let _ = wm.load_hotkey_file(keys, Vec::new());
+        wm.take_hook(Err(anyhow::anyhow!("hook refused: access is denied (5)")));
+
+        for command in [
+            Command::SetHotkeys {
+                state: mochi_client::BooleanState::Enable,
+            },
+            Command::ToggleGameMode,
+        ] {
+            let (response, _) = wm.handle_command(command);
+            let message = response.error_message().unwrap_or_default().to_owned();
+            assert!(message.contains("could not be installed"), "{message}");
+            assert!(!message.contains("--no-hotkeys"), "{message}");
+            assert!(!message.contains("dry run"), "{message}");
+        }
+
+        for when in ["after the failed start", "after a reload"] {
+            let (response, _) = wm.handle_command(Command::Hotkeys);
+            let Response::Hotkeys { hotkeys } = response else {
+                panic!("{response:?}");
+            };
+            assert_eq!(hotkeys["gate"], "off", "{when}");
+            assert_eq!(hotkeys["hook"], "failed", "{when}");
+            assert_eq!(
+                hotkeys["bindings"].as_array().map(Vec::len),
+                Some(1),
+                "{when}"
+            );
+            let errors = hotkeys["errors"].as_array().cloned().unwrap_or_default();
+            assert_eq!(errors.len(), 1, "{when}: {errors:?}");
+            let sentence = errors[0].as_str().unwrap_or_default();
+            assert!(
+                sentence.contains("could not be installed"),
+                "{when}: {sentence}"
+            );
+            assert!(!sentence.contains("access is denied"), "{when}: {sentence}");
+            wm.reload_hotkeys();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -7525,6 +7801,92 @@ alt + j : focus down
     }
 
     #[test]
+    fn a_window_rehomed_off_a_screen_lost_while_paused_goes_off_screen_on_unpause() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        wm.handle_command(Command::FocusWorkspace { index: 2 });
+        let mut stray = window(7, "On the portrait screen");
+        stray.monitor = Some(MonitorId(2));
+        wm.manage(&stray);
+        assert!(wm.state().window(WindowId(7)).is_some());
+        wm.handle_command(Command::FocusMonitor { index: 0 });
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+
+        wm.handle_command(Command::TogglePause);
+        platform.set_monitors(vec![main_screen()]);
+        wm.refresh_monitors();
+        let before = platform.cloaks.lock().unwrap().len();
+        wm.handle_command(Command::TogglePause);
+
+        let after: Vec<_> = platform.cloaks.lock().unwrap()[before..].to_vec();
+        assert!(
+            after.contains(&(Hwnd(7), true)),
+            "the rehomed window stayed on screen after the pause: {after:?}"
+        );
+        assert!(
+            record(&wm.hidden).contains(Hwnd(7)),
+            "the hidden record does not name the rehomed window"
+        );
+    }
+
+    #[test]
+    fn a_pause_and_unpause_with_no_display_change_cloaks_nothing() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor"), window(2, "Terminal")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        wm.handle_command(Command::FocusWorkspace { index: 2 });
+        let mut other = window(7, "On the portrait screen");
+        other.monitor = Some(MonitorId(2));
+        wm.manage(&other);
+        wm.handle_command(Command::FocusWorkspace { index: 0 });
+
+        let before = platform.cloaks.lock().unwrap().len();
+        wm.handle_command(Command::TogglePause);
+        wm.handle_command(Command::TogglePause);
+
+        let after: Vec<_> = platform.cloaks.lock().unwrap()[before..].to_vec();
+        assert!(
+            !after.iter().any(|(_, cloaked)| *cloaked),
+            "a pause with nothing changed cloaked windows: {after:?}"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_leaves_a_window_hidden_as_the_pause_ends() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Editor")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        wm.handle_command(Command::FocusWorkspace { index: 2 });
+        let mut stray = window(7, "On the portrait screen");
+        stray.monitor = Some(MonitorId(2));
+        wm.manage(&stray);
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(7));
+        assert_eq!(wm.foreground, Some(Hwnd(7)));
+
+        wm.handle_command(Command::TogglePause);
+        platform.set_monitors(vec![main_screen()]);
+        wm.refresh_monitors();
+        let before = platform.desktop_focus.load(Ordering::SeqCst);
+        wm.handle_command(Command::TogglePause);
+
+        assert!(record(&wm.hidden).contains(Hwnd(7)));
+        assert_ne!(
+            wm.foreground,
+            Some(Hwnd(7)),
+            "the keyboard stayed on a window taken off screen"
+        );
+        assert!(platform.desktop_focus.load(Ordering::SeqCst) > before);
+    }
+
+    #[test]
     fn a_screen_plugged_in_after_startup_gets_the_workspaces_its_entry_describes() {
         // One screen at startup, exactly as his desk was: the daemon comes up
         // with the 4K and the portrait panel still unplugged.
@@ -7942,6 +8304,66 @@ alt + j : focus down
     }
 
     #[test]
+    fn restore_windows_says_so_when_a_window_stays_off_screen() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        wm.hidden
+            .lock()
+            .unwrap()
+            .hide(Hwnd(99), HidingBehaviour::Cloak);
+        platform.windows.lock().unwrap().push(WindowInfo {
+            cloaked: true,
+            ..window(99, "Lost")
+        });
+        platform.cannot_be_restored(Hwnd(99));
+
+        let (response, _) = wm.handle_command(Command::RestoreWindows);
+        assert_eq!(
+            response,
+            Response::error("1 window could not be brought back")
+        );
+        assert!(wm.hidden.lock().unwrap().contains(Hwnd(99)));
+    }
+
+    #[test]
+    fn restore_windows_gives_back_what_it_can_and_counts_the_rest() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        for hwnd in [Hwnd(97), Hwnd(98), Hwnd(99)] {
+            wm.hidden.lock().unwrap().hide(hwnd, HidingBehaviour::Cloak);
+        }
+        for (hwnd, title) in [(98, "Lost"), (99, "Also lost")] {
+            platform.windows.lock().unwrap().push(WindowInfo {
+                cloaked: true,
+                ..window(hwnd, title)
+            });
+            platform.cannot_be_restored(Hwnd(hwnd));
+        }
+
+        let (response, _) = wm.handle_command(Command::RestoreWindows);
+        assert_eq!(
+            response,
+            Response::error("2 windows could not be brought back")
+        );
+        assert!(platform.cloaks.lock().unwrap().contains(&(Hwnd(97), false)));
+        assert!(!wm.hidden.lock().unwrap().contains(Hwnd(97)));
+        assert!(wm.hidden.lock().unwrap().contains(Hwnd(98)));
+        assert!(wm.hidden.lock().unwrap().contains(Hwnd(99)));
+    }
+
+    #[test]
+    fn restore_windows_does_not_count_a_window_that_was_closed() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        // Still written down as hidden, but the window is gone, so its handle refuses the uncloak.
+        wm.hidden
+            .lock()
+            .unwrap()
+            .hide(Hwnd(99), HidingBehaviour::Cloak);
+        platform.cannot_be_restored(Hwnd(99));
+
+        let (response, _) = wm.handle_command(Command::RestoreWindows);
+        assert_eq!(response, Response::Ok);
+    }
+
+    #[test]
     fn restore_windows_leaves_a_hidden_workspace_where_it_is() {
         let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
         // Both windows are on workspace 0; moving to another workspace hides
@@ -8012,6 +8434,51 @@ alt + j : focus down
             .0
             .is_ok()
         );
+    }
+
+    #[test]
+    fn padding_while_paused_is_refused_and_left_as_it_was() {
+        let (mut wm, platform) = manager(vec![window(1, "One")]);
+        let before = wm.state().workspace(0, 0).unwrap().workspace_padding;
+        wm.handle_command(Command::TogglePause);
+
+        let (response, _) = wm.handle_command(Command::WorkspacePadding {
+            monitor: 0,
+            workspace: 0,
+            size: 100,
+        });
+        assert_eq!(response, Response::error(PAUSED));
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().workspace_padding,
+            before
+        );
+
+        let placed = platform.last_placements()[0].1;
+        wm.handle_command(Command::TogglePause);
+        assert_eq!(
+            wm.state().workspace(0, 0).unwrap().workspace_padding,
+            before,
+            "the padding came back at unpause"
+        );
+        assert_eq!(platform.last_placements()[0].1, placed);
+    }
+
+    #[test]
+    fn manage_while_paused_is_refused_and_queues_nothing() {
+        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.foreground = Some(Hwnd(2));
+        assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
+        wm.handle_command(Command::TogglePause);
+        wm.foreground = Some(Hwnd(2));
+        let announced = manage_events(&wm);
+
+        let (response, _) = wm.handle_command(Command::Manage);
+        assert_eq!(response, Response::error(PAUSED));
+        assert_eq!(manage_events(&wm), announced);
+        assert!(wm.state().pending_windows.is_empty());
+
+        wm.handle_command(Command::TogglePause);
+        assert!(!wm.state().is_managed(WindowId(2)));
     }
 
     #[test]
@@ -8208,6 +8675,64 @@ alt + j : focus down
         assert!(
             wm.hidden().lock().unwrap().is_empty(),
             "a window that can never be restored was written down again"
+        );
+    }
+
+    #[test]
+    fn a_window_no_cloak_can_reach_is_hidden_instead() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        platform.no_view.lock().unwrap().push(Hwnd(2));
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+
+        assert!(
+            platform
+                .shows
+                .lock()
+                .unwrap()
+                .contains(&(Hwnd(2), ShowState::Hide))
+        );
+        assert_eq!(
+            wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
+            Some(HidingBehaviour::Hide)
+        );
+    }
+
+    #[test]
+    fn a_window_whose_shell_is_away_is_hidden_instead() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        platform.shell_away.lock().unwrap().push(Hwnd(2));
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+
+        assert!(
+            platform
+                .shows
+                .lock()
+                .unwrap()
+                .contains(&(Hwnd(2), ShowState::Hide)),
+            "a cloak the shell could not make left the window on screen"
+        );
+        assert_eq!(
+            wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
+            Some(HidingBehaviour::Hide)
+        );
+    }
+
+    #[test]
+    fn restore_keeps_a_window_the_shell_could_not_uncloak_yet() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert_eq!(
+            wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
+            Some(HidingBehaviour::Cloak)
+        );
+        platform.shell_away.lock().unwrap().push(Hwnd(2));
+
+        restore(platform.as_ref(), &wm.hidden());
+
+        assert_eq!(
+            wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
+            Some(HidingBehaviour::Cloak),
+            "a window still cloaked was let go after the shell failed once"
         );
     }
 
@@ -8523,6 +9048,67 @@ alt + j : focus down
     }
 
     #[test]
+    fn a_focused_screen_that_is_rotated_keeps_the_focus() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+        assert_eq!(wm.state().focused_monitor_idx(), 1);
+
+        // Same device name and handle, width and height swapped.
+        let mut rotated = portrait_screen();
+        rotated.size = Rect::new(3840, 0, 5760, 1080);
+        rotated.work_area = Rect::new(3840, 0, 5760, 1080);
+        platform.set_monitors(vec![main_screen(), rotated.clone()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+
+        let panel = wm
+            .state()
+            .monitors()
+            .position(|m| m.size == rotated.size)
+            .expect("the rotated screen is gone");
+        assert_eq!(
+            wm.state().focused_monitor_idx(),
+            panel,
+            "the focus moved off the screen that was only rotated"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_pair_of_screens_keeps_the_focus() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+
+        platform.set_monitors(vec![main_screen(), portrait_screen()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+
+        assert_eq!(wm.state().focused_monitor_idx(), 1);
+    }
+
+    #[test]
+    fn an_unplugged_focused_screen_hands_the_focus_to_the_one_left() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "One"), window(2, "Two")],
+            vec![main_screen(), portrait_screen()],
+        );
+        wm.handle_command(Command::FocusMonitor { index: 1 });
+
+        platform.set_monitors(vec![main_screen()]);
+        wm.on_monitor_event(MonitorEventKind::DisplayChange);
+
+        assert_eq!(wm.state().monitors().len(), 1);
+        assert_eq!(wm.state().focused_monitor_idx(), 0);
+        assert_eq!(
+            wm.state().focused_monitor().map(|m| m.size).ok(),
+            Some(main_screen().size)
+        );
+    }
+
+    #[test]
     fn a_rule_for_a_panel_that_was_asleep_at_startup_routes_once_it_wakes() {
         // The portrait panel is asleep when the configuration is read, so its
         // entry configures nothing and its rule has nowhere to send a window.
@@ -8832,6 +9418,157 @@ alt + j : focus down
             wm.state().locate_window(WindowId(1)),
             Some((0, 1)),
             "the window teleported back to its initial workspace on a restore"
+        );
+    }
+
+    /// Whether Mochi restored, focused or placed `hwnd` since the platform's
+    /// records were last read.
+    fn touched(platform: &FakePlatform, hwnd: Hwnd) -> bool {
+        platform
+            .shows
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|&(shown, state)| shown == hwnd && state != ShowState::Minimize)
+            || platform.focused.lock().unwrap().contains(&hwnd)
+            || platform
+                .history
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|&(moved, _)| moved == hwnd)
+    }
+
+    fn forget_touches(platform: &FakePlatform) {
+        platform.shows.lock().unwrap().clear();
+        platform.focused.lock().unwrap().clear();
+        platform.clear_history();
+    }
+
+    #[test]
+    fn a_minimized_window_stays_minimized_when_its_title_changes() {
+        // A music player renames its window at every song. The user had it
+        // minimized under a fullscreen game, and each rename took it back
+        // into the layout, which restored it and raised it over the game.
+        let (mut wm, platform) =
+            manager_focused_on(vec![window(1, "Game"), window(2, "Song one")], Hwnd(1));
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        assert!(!wm.core.is_managed(WindowId(2)));
+        forget_touches(&platform);
+
+        platform.windows.lock().unwrap()[1].title = "Song two".into();
+        wm.on_window_event(WindowEventKind::NameChange, Hwnd(2));
+        assert!(
+            !wm.core.is_managed(WindowId(2)),
+            "a rename took a minimized window back into the layout"
+        );
+        assert!(
+            !touched(&platform, Hwnd(2)),
+            "a rename restored, focused or moved a window the user minimized"
+        );
+
+        // Some applications hand their minimized window the foreground
+        // without restoring it; that is not the user bringing it back either.
+        wm.on_window_event(WindowEventKind::Foreground, Hwnd(2));
+        assert!(!wm.core.is_managed(WindowId(2)));
+        assert!(!touched(&platform, Hwnd(2)));
+    }
+
+    #[test]
+    fn a_window_minimized_before_the_start_is_left_on_the_taskbar() {
+        let mut minimized = window(2, "Terminal");
+        minimized.minimized = true;
+        let (wm, platform) = manager(vec![window(1, "Editor"), minimized]);
+        assert!(
+            !wm.core.is_managed(WindowId(2)),
+            "the start took over a window the user had minimized"
+        );
+        assert!(!touched(&platform, Hwnd(2)));
+    }
+
+    #[test]
+    fn a_manage_rule_added_at_runtime_leaves_a_minimized_window_on_the_taskbar() {
+        // Two windows of one tool the heuristics skip; the user has put one
+        // of them away before the rule that describes both arrives.
+        let palette = |id, title| {
+            let mut w = window(id, title);
+            w.exe = "Palette.exe".into();
+            w.ex_style = crate::platform::types::ex_style::WS_EX_TOOLWINDOW;
+            w
+        };
+        let mut put_away = palette(3, "Colours");
+        put_away.minimized = true;
+        let (mut wm, platform) =
+            manager(vec![window(1, "Editor"), put_away, palette(4, "Brushes")]);
+        assert_eq!(wm.state().all_window_ids().count(), 1, "skipped at startup");
+
+        let (response, _) = wm.handle_command(Command::ManageRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "Palette.exe".into(),
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert_eq!(response, Response::Ok);
+
+        assert!(
+            wm.core.is_managed(WindowId(4)),
+            "the rule did not adopt the window it describes"
+        );
+        assert!(
+            !wm.core.is_managed(WindowId(3)),
+            "the rule pulled a window the user had minimized into a tile"
+        );
+        assert!(!touched(&platform, Hwnd(3)));
+    }
+
+    #[test]
+    fn a_window_minimized_during_a_pause_is_left_on_the_taskbar_when_it_ends() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Terminal")]);
+        wm.handle_command(Command::TogglePause);
+        assert!(wm.state().is_paused);
+
+        // While Mochi is paused the user puts one window away and opens another.
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+        platform
+            .windows
+            .lock()
+            .unwrap()
+            .push(window(3, "Opened while paused"));
+        wm.on_window_event(WindowEventKind::Created, Hwnd(3));
+        assert!(
+            !wm.core.is_managed(WindowId(2)),
+            "a window minimized during the pause should have left the model"
+        );
+        forget_touches(&platform);
+
+        wm.handle_command(Command::TogglePause);
+
+        assert!(
+            wm.core.is_managed(WindowId(3)),
+            "the window opened during the pause was never picked up"
+        );
+        assert!(
+            !wm.core.is_managed(WindowId(2)),
+            "the end of the pause pulled a window the user had minimized into a tile"
+        );
+        assert!(!touched(&platform, Hwnd(2)));
+    }
+
+    #[test]
+    fn a_restored_window_is_taken_back_even_while_it_still_reads_minimized() {
+        // The restore's own event is the user bringing the window back. It
+        // can be read before Windows has finished the restore, so the window
+        // may still answer that it is minimized.
+        let (mut wm, platform) =
+            manager_focused_on(vec![window(1, "Game"), window(2, "Song one")], Hwnd(1));
+        platform.windows.lock().unwrap()[1].minimized = true;
+        wm.on_window_event(WindowEventKind::MinimizeStart, Hwnd(2));
+
+        wm.on_window_event(WindowEventKind::MinimizeEnd, Hwnd(2));
+        assert!(
+            wm.core.is_managed(WindowId(2)),
+            "the user restored a window and it was never tiled again"
         );
     }
 
@@ -9528,6 +10265,31 @@ alt + j : focus down
             .push(process_window(6, "scratch", 60));
         wm.on_window_event(WindowEventKind::Created, Hwnd(6));
         assert!(wm.state().is_managed(window_id(Hwnd(6))));
+    }
+
+    #[test]
+    fn a_scratchpad_command_that_did_not_start_is_an_error_and_is_tried_again() {
+        let (mut wm, _platform) = scratch_manager(vec![process_window(1, "Editor", 10)]);
+        wm.launch_fails
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            toggle(&mut wm).error_message(),
+            Some("the scratchpad command could not be started")
+        );
+        assert!(wm.scratchpads[0].launched.is_none());
+        assert_eq!(
+            toggle(&mut wm).error_message(),
+            Some("the scratchpad command could not be started"),
+            "a second press answered as if the first start were still under way"
+        );
+        assert_eq!(wm.launched.lock().unwrap().len(), 2);
+
+        wm.launch_fails
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(toggle(&mut wm), Response::Ok);
+        assert!(wm.scratchpads[0].launched.is_some());
+        assert_eq!(wm.launched.lock().unwrap().len(), 3);
     }
 
     #[test]
@@ -10347,6 +11109,27 @@ alt + j : focus down
     }
 
     #[test]
+    fn a_drop_while_paused_leaves_the_tile_order_alone() {
+        let (mut wm, platform) = manager_focused_on(
+            vec![window(1, "One"), window(2, "Two"), window(3, "Three")],
+            Hwnd(1),
+        );
+        let before = ring_order(&wm);
+        let workspace = wm.state().workspace(0, 0).unwrap();
+        let onto =
+            workspace.latest_tiles()[workspace.container_idx_for_window(WindowId(2)).unwrap()];
+        wm.handle_command(Command::TogglePause);
+
+        // Let go of window 3 on window 2's tile while window 1 has the focus.
+        platform.points_at(onto.left + 10, onto.top + 10);
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(3));
+        assert_eq!(ring_order(&wm), before, "a paused drop swapped two tiles");
+
+        wm.handle_command(Command::TogglePause);
+        assert_eq!(ring_order(&wm), before, "unpausing swapped two tiles");
+    }
+
+    #[test]
     fn a_tile_dropped_on_a_covered_monitor_snaps_back() {
         for maximize in [true, false] {
             let (mut wm, platform) = manager_on(
@@ -10410,6 +11193,103 @@ alt + j : focus down
             placed.is_some_and(|rect| main_screen().work_area.contains_rect(&rect)),
             "left where it fell, placed {placed:?}"
         );
+    }
+
+    /// The tiles of the first workspace, by the window each one shows.
+    fn tile_order(wm: &WindowManager) -> Vec<WindowId> {
+        wm.state()
+            .workspace(0, 0)
+            .unwrap()
+            .containers()
+            .iter()
+            .filter_map(mochi_core::model::Container::focused_window_id)
+            .collect()
+    }
+
+    #[test]
+    fn a_tile_resized_over_its_neighbour_does_not_swap() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        let before = tile_order(&wm);
+        let (mine, theirs) = (tile_of(&wm, 1), tile_of(&wm, 2));
+        let y = (mine.top + mine.bottom) / 2;
+        // The grip on the side that faces the neighbour, pulled 400 pixels
+        // into its tile; the cursor lets go on the new edge.
+        let (resized, x) = if mine.right <= theirs.left {
+            let right = theirs.left + 400;
+            (Rect { right, ..mine }, right - 1)
+        } else {
+            let left = theirs.right - 400;
+            (Rect { left, ..mine }, left)
+        };
+        assert!(
+            theirs.contains(x, y),
+            "the drop is meant to be on the neighbour"
+        );
+
+        platform.moves_by_itself(Hwnd(1), mine);
+        wm.on_window_event(WindowEventKind::MoveSizeStart, Hwnd(1));
+        platform.moves_by_itself(Hwnd(1), resized);
+        platform.points_at(x, y);
+        platform.clear_history();
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(1));
+        assert_eq!(tile_order(&wm), before, "a resize swapped the two tiles");
+        let placed = platform.rect_of(Hwnd(1));
+        assert!(
+            placed.is_some_and(|rect| !rect.contains(x, y)),
+            "left over the neighbour, placed {placed:?}"
+        );
+
+        // The same window carried whole onto the neighbour still swaps.
+        let carried = Rect::new(mine.left + x - mine.right, mine.top, x, mine.bottom);
+        platform.moves_by_itself(Hwnd(1), mine);
+        wm.on_window_event(WindowEventKind::MoveSizeStart, Hwnd(1));
+        platform.moves_by_itself(Hwnd(1), carried);
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(1));
+        assert_ne!(
+            tile_order(&wm),
+            before,
+            "a drag onto the neighbour did not swap"
+        );
+    }
+
+    #[test]
+    fn only_a_grip_counts_as_a_resize() {
+        let tile = Rect::new(0, 0, 1000, 800);
+        assert!(was_resized(tile, Rect::new(0, 0, 1400, 800)), "right edge");
+        assert!(
+            was_resized(tile, Rect::new(-200, -100, 1000, 800)),
+            "top left corner"
+        );
+        assert!(
+            !was_resized(tile, Rect::new(300, 0, 1300, 800)),
+            "carried sideways"
+        );
+        assert!(
+            !was_resized(tile, Rect::new(4000, 100, 4667, 633)),
+            "carried onto a monitor of another DPI"
+        );
+        assert!(!was_resized(tile, tile), "let go where it was");
+    }
+
+    #[test]
+    fn a_tile_resized_onto_another_monitor_stays_on_its_own() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Main"), window_on_portrait(2, "Portrait")],
+            vec![main_screen(), portrait_screen()],
+        );
+        let mine = tile_of(&wm, 1);
+        let resized = Rect {
+            right: 4100,
+            ..mine
+        };
+        platform.moves_by_itself(Hwnd(1), mine);
+        wm.on_window_event(WindowEventKind::MoveSizeStart, Hwnd(1));
+        platform.moves_by_itself(Hwnd(1), resized);
+        platform.points_at(4099, 500);
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(1));
+
+        assert_eq!(wm.state().locate_window(WindowId(1)), Some((0, 0)));
+        assert_eq!(wm.state().locate_window(WindowId(2)), Some((1, 0)));
     }
 
     #[test]
