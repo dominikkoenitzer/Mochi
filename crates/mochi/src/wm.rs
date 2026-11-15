@@ -590,6 +590,9 @@ pub struct WindowManager {
     /// window can report in when the reason is long over: after the restore of
     /// a redraw, or after the switch back to its workspace.
     minimize_unseen: HashSet<Hwnd>,
+    /// The window the user is dragging or resizing, and its frame when the
+    /// drag began, so the drop can tell a resize from a move.
+    drag_start: Option<(Hwnd, Rect)>,
     /// Windows taken out with `unmanage`, kept out until `manage` or until they close.
     unmanaged_by_user: HashSet<Hwnd>,
     /// Windows that have taken a whole monitor over, and the monitor each one
@@ -748,6 +751,7 @@ impl WindowManager {
             routed: HashSet::new(),
             minimized: HashSet::new(),
             minimize_unseen: HashSet::new(),
+            drag_start: None,
             unmanaged_by_user: HashSet::new(),
             fullscreen: BTreeMap::new(),
             display_changes: 0,
@@ -2176,7 +2180,9 @@ impl WindowManager {
                 self.window_restored(hwnd);
             }
             WindowEventKind::Foreground => self.window_focused(hwnd),
-            WindowEventKind::MoveSizeStart => {}
+            WindowEventKind::MoveSizeStart => {
+                self.drag_start = self.platform.visible_frame(hwnd).map(|frame| (hwnd, frame));
+            }
             WindowEventKind::MoveSizeEnd => self.window_dropped(hwnd),
             WindowEventKind::NameChange => self.window_renamed(hwnd),
         }
@@ -2857,8 +2863,14 @@ impl WindowManager {
     ///
     /// A tiled window that was dragged onto another tile swaps with it, one
     /// dragged onto another monitor moves there, and anything else snaps back
-    /// to where the layout wants it.
+    /// to where the layout wants it. A resize only ever snaps back: the cursor
+    /// lets go of a grip on the window's own edge, and where that edge ended
+    /// up says nothing about where the user wants the window.
     fn window_dropped(&mut self, hwnd: Hwnd) {
+        let started = self
+            .drag_start
+            .take()
+            .filter(|&(dragged, _)| dragged == hwnd);
         let id = window_id(hwnd);
         let Some((monitor, workspace)) = self.core.locate_window(id) else {
             return;
@@ -2869,6 +2881,17 @@ impl WindowManager {
             .workspace(monitor, workspace)
             .is_ok_and(|target| target.floating_windows().position(|w| w.id == id).is_some())
         {
+            return;
+        }
+
+        let resized = started.is_some_and(|(_, before)| {
+            self.platform
+                .visible_frame(hwnd)
+                .is_some_and(|after| was_resized(before, after))
+        });
+        if resized {
+            tracing::debug!(%hwnd, "a tile was resized, putting it back");
+            self.retile();
             return;
         }
 
@@ -5006,6 +5029,19 @@ const fn window_id(hwnd: Hwnd) -> WindowId {
 /// The platform's handle for a window.
 const fn handle(id: WindowId) -> Hwnd {
     Hwnd(id.0)
+}
+
+/// Whether a drag from `before` to `after` was a resize rather than a move.
+///
+/// A resize grip moves one edge of an axis, or none, and leaves the other
+/// where it was; a move carries both edges of at least one axis along. The
+/// size alone is not enough: a window carried onto a monitor of another DPI
+/// comes out a different size as well.
+fn was_resized(before: Rect, after: Rect) -> bool {
+    let sized = before.width() != after.width() || before.height() != after.height();
+    let kept_x = before.left == after.left || before.right == after.right;
+    let kept_y = before.top == after.top || before.bottom == after.bottom;
+    sized && kept_x && kept_y
 }
 
 /// Whether a window is one of the Chromium and Electron family, whose content
@@ -10501,6 +10537,103 @@ alt + j : focus down
             placed.is_some_and(|rect| main_screen().work_area.contains_rect(&rect)),
             "left where it fell, placed {placed:?}"
         );
+    }
+
+    /// The tiles of the first workspace, by the window each one shows.
+    fn tile_order(wm: &WindowManager) -> Vec<WindowId> {
+        wm.state()
+            .workspace(0, 0)
+            .unwrap()
+            .containers()
+            .iter()
+            .filter_map(mochi_core::model::Container::focused_window_id)
+            .collect()
+    }
+
+    #[test]
+    fn a_tile_resized_over_its_neighbour_does_not_swap() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor"), window(2, "Browser")]);
+        let before = tile_order(&wm);
+        let (mine, theirs) = (tile_of(&wm, 1), tile_of(&wm, 2));
+        let y = (mine.top + mine.bottom) / 2;
+        // The grip on the side that faces the neighbour, pulled 400 pixels
+        // into its tile; the cursor lets go on the new edge.
+        let (resized, x) = if mine.right <= theirs.left {
+            let right = theirs.left + 400;
+            (Rect { right, ..mine }, right - 1)
+        } else {
+            let left = theirs.right - 400;
+            (Rect { left, ..mine }, left)
+        };
+        assert!(
+            theirs.contains(x, y),
+            "the drop is meant to be on the neighbour"
+        );
+
+        platform.moves_by_itself(Hwnd(1), mine);
+        wm.on_window_event(WindowEventKind::MoveSizeStart, Hwnd(1));
+        platform.moves_by_itself(Hwnd(1), resized);
+        platform.points_at(x, y);
+        platform.clear_history();
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(1));
+        assert_eq!(tile_order(&wm), before, "a resize swapped the two tiles");
+        let placed = platform.rect_of(Hwnd(1));
+        assert!(
+            placed.is_some_and(|rect| !rect.contains(x, y)),
+            "left over the neighbour, placed {placed:?}"
+        );
+
+        // The same window carried whole onto the neighbour still swaps.
+        let carried = Rect::new(mine.left + x - mine.right, mine.top, x, mine.bottom);
+        platform.moves_by_itself(Hwnd(1), mine);
+        wm.on_window_event(WindowEventKind::MoveSizeStart, Hwnd(1));
+        platform.moves_by_itself(Hwnd(1), carried);
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(1));
+        assert_ne!(
+            tile_order(&wm),
+            before,
+            "a drag onto the neighbour did not swap"
+        );
+    }
+
+    #[test]
+    fn only_a_grip_counts_as_a_resize() {
+        let tile = Rect::new(0, 0, 1000, 800);
+        assert!(was_resized(tile, Rect::new(0, 0, 1400, 800)), "right edge");
+        assert!(
+            was_resized(tile, Rect::new(-200, -100, 1000, 800)),
+            "top left corner"
+        );
+        assert!(
+            !was_resized(tile, Rect::new(300, 0, 1300, 800)),
+            "carried sideways"
+        );
+        assert!(
+            !was_resized(tile, Rect::new(4000, 100, 4667, 633)),
+            "carried onto a monitor of another DPI"
+        );
+        assert!(!was_resized(tile, tile), "let go where it was");
+    }
+
+    #[test]
+    fn a_tile_resized_onto_another_monitor_stays_on_its_own() {
+        let (mut wm, platform) = manager_on(
+            vec![window(1, "Main"), window_on_portrait(2, "Portrait")],
+            vec![main_screen(), portrait_screen()],
+        );
+        let mine = tile_of(&wm, 1);
+        let resized = Rect {
+            right: 4100,
+            ..mine
+        };
+        platform.moves_by_itself(Hwnd(1), mine);
+        wm.on_window_event(WindowEventKind::MoveSizeStart, Hwnd(1));
+        platform.moves_by_itself(Hwnd(1), resized);
+        platform.points_at(4099, 500);
+        wm.on_window_event(WindowEventKind::MoveSizeEnd, Hwnd(1));
+
+        assert_eq!(wm.state().locate_window(WindowId(1)), Some((0, 0)));
+        assert_eq!(wm.state().locate_window(WindowId(2)), Some((1, 0)));
     }
 
     #[test]

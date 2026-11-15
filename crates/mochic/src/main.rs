@@ -459,27 +459,28 @@ fn administrator_args(
 }
 
 fn quickstart() -> Result<()> {
-    let profile = std::env::var_os("USERPROFILE")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .context("USERPROFILE is not set")?;
+    quickstart_with(&|name| std::env::var_os(name))
+}
 
-    write_unless_present(&profile.join("mochi.json"), default_config())?;
-
+/// `quickstart`, reading the environment through `var`.
+///
+/// The files go where the daemon will look for them, by the same rules: a
+/// starting file anywhere else is one it never reads, and `check` would go on
+/// saying there is no file.
+fn quickstart_with(var: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Result<()> {
+    let (config, _) = config_path_from(None, var("MOCHI_CONFIG"), var("USERPROFILE"))?;
     // The hotkey directory may already hold a file under the name a standalone
     // hotkey daemon uses, which is one of the names Mochi reads. Writing the
     // other one next to it would shadow a working set of bindings with the
-    // defaults, so either name counts as "there is already a file here".
-    let keys = profile.join(".config").join("mochi");
-    if keys.join("whkdrc").exists() {
-        println!(
-            "{} already exists, leaving it alone",
-            keys.join("whkdrc").display()
-        );
-    } else {
-        write_unless_present(&keys.join("hotkeys"), mochi_hotkey::DEFAULT)?;
-    }
-    Ok(())
+    // defaults, so the rule hands back that file and it is left alone.
+    let profile = var("USERPROFILE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let hotkeys = hotkey_path_from(var("MOCHI_HOTKEYS"), profile)
+        .context("USERPROFILE is not set, so the hotkey file path cannot be resolved")?;
+
+    write_unless_present(&config, default_config())?;
+    write_unless_present(&hotkeys, mochi_hotkey::DEFAULT)
 }
 
 /// Writes a starting file, and says either way which one it meant.
@@ -972,16 +973,30 @@ fn looks_like_app_rules(text: &str) -> bool {
 /// different file than the daemon would is worse than no `check` at all: it
 /// would report a desktop fixed that is still broken.
 fn resolve_config_path(explicit: Option<&Path>) -> Result<(PathBuf, String)> {
+    config_path_from(
+        explicit,
+        std::env::var_os("MOCHI_CONFIG"),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+/// The rule behind [`resolve_config_path`], given the values of `MOCHI_CONFIG`
+/// and `USERPROFILE`.
+fn config_path_from(
+    explicit: Option<&Path>,
+    from_env: Option<std::ffi::OsString>,
+    profile: Option<std::ffi::OsString>,
+) -> Result<(PathBuf, String)> {
     if let Some(path) = explicit {
         return Ok((path.to_path_buf(), "given on the command line".to_owned()));
     }
-    if let Some(from_env) = std::env::var_os("MOCHI_CONFIG").filter(|v| !v.is_empty()) {
+    if let Some(from_env) = from_env.filter(|v| !v.is_empty()) {
         return Ok((
             PathBuf::from(from_env),
             "the file the daemon would load, named by MOCHI_CONFIG".to_owned(),
         ));
     }
-    let profile = std::env::var_os("USERPROFILE")
+    let profile = profile
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .context("USERPROFILE is not set, so the configuration path cannot be resolved")?;
@@ -1167,8 +1182,199 @@ fn check_config_text(label: &str, text: &str) -> Findings {
                 .map_or_else(String::new, |known| format!(" Did you mean {known:?}?"));
             format!("{label} has a key {key:?} that Mochi does not read. It parses and is then ignored.{suggestion}")
         }));
+    found
+        .warnings
+        .extend(nested_inert_keys(text).into_iter().map(|(path, known)| {
+            let suggestion =
+                known.map_or_else(String::new, |known| format!(" Did you mean {known:?}?"));
+            format!("{label} has a key {path:?} that Mochi does not read. It parses and is then ignored.{suggestion}")
+        }));
 
     found
+}
+
+/// The keys inside the blocks of `mochi.json` that the parser read past, each
+/// with its place in the file and the key it most likely meant.
+///
+/// The top level is `inert_keys`. Below it, every value under a key Mochi
+/// knows is walked against the schema the config types generate, and a key
+/// the schema has no room for at that place is a candidate. The parser has
+/// the last word: the file with the key taken out has to parse to exactly the
+/// same config, so an alias the schema does not list is never called dead.
+fn nested_inert_keys(text: &str) -> Vec<(String, Option<String>)> {
+    use serde_json::Value;
+
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let (Ok(Value::Object(file)), Ok(parsed), Ok(schema)) = (
+        serde_json::from_str::<Value>(text),
+        Config::from_json(text),
+        serde_json::from_str::<Value>(&mochi_core::config::json_schema()),
+    ) else {
+        return Vec::new();
+    };
+    let Some(top) = schema.get("properties").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+    for (key, value) in &file {
+        if let Some(shape) = top.get(key) {
+            let mut at = vec![Step::Key(key.clone())];
+            unread_keys(&schema, &[shape], value, &mut at, &mut found);
+        }
+    }
+
+    let file = Value::Object(file);
+    found
+        .into_iter()
+        .filter(|(at, _)| {
+            let mut without = file.clone();
+            remove_at(&mut without, at).is_some()
+                && Config::from_json(&without.to_string()).is_ok_and(|other| other == parsed)
+        })
+        .map(|(at, known)| {
+            let meant = match at.last() {
+                Some(Step::Key(key)) => nearest_among(key, known.iter().map(String::as_str)),
+                _ => None,
+            };
+            (place(&at), meant)
+        })
+        .collect()
+}
+
+/// One step on the way from the top of `mochi.json` to a value in it.
+#[derive(Clone)]
+enum Step {
+    Key(String),
+    Index(usize),
+}
+
+/// A place in the file as a user would point at it: `monitors[0].workspaces`.
+fn place(at: &[Step]) -> String {
+    let mut text = String::new();
+    for step in at {
+        match step {
+            Step::Key(key) if text.is_empty() => text.push_str(key),
+            Step::Key(key) => {
+                text.push('.');
+                text.push_str(key);
+            }
+            Step::Index(index) => text.push_str(&format!("[{index}]")),
+        }
+    }
+    text
+}
+
+/// Walks `value` against the schema nodes that describe it and records every
+/// key no node has room for, with the keys that would have been read there.
+fn unread_keys<'a>(
+    root: &'a serde_json::Value,
+    nodes: &[&'a serde_json::Value],
+    value: &serde_json::Value,
+    at: &mut Vec<Step>,
+    found: &mut Vec<(Vec<Step>, Vec<String>)>,
+) {
+    use serde_json::Value;
+
+    let mut open = Vec::new();
+    for node in nodes {
+        shapes(root, node, &mut open);
+    }
+    match value {
+        Value::Object(map) => {
+            // A struct names its keys; a map such as `layout_rules` takes any
+            // key its pattern allows and only its values have a shape.
+            let mut known: std::collections::BTreeMap<&str, Vec<&Value>> = Default::default();
+            let mut entries = Vec::new();
+            let mut is_map = false;
+            for shape in &open {
+                if let Some(properties) = shape.get("properties").and_then(Value::as_object) {
+                    for (key, inner) in properties {
+                        known.entry(key.as_str()).or_default().push(inner);
+                    }
+                }
+                if let Some(patterns) = shape.get("patternProperties").and_then(Value::as_object) {
+                    entries.extend(patterns.values());
+                    is_map = true;
+                }
+                if let Some(extra) = shape.get("additionalProperties").filter(|e| e.is_object()) {
+                    entries.push(extra);
+                    is_map = true;
+                }
+            }
+            if known.is_empty() && !is_map {
+                // Nothing here says which keys belong, so nothing is judged.
+                return;
+            }
+            for (key, inner) in map {
+                // A `null` reads the same as a key that was never there.
+                if key.starts_with('$') || inner.is_null() {
+                    continue;
+                }
+                at.push(Step::Key(key.clone()));
+                if let Some(inner_nodes) = known.get(key.as_str()) {
+                    unread_keys(root, inner_nodes, inner, at, found);
+                } else if is_map {
+                    unread_keys(root, &entries, inner, at, found);
+                } else {
+                    found.push((at.clone(), known.keys().map(|k| (*k).to_owned()).collect()));
+                }
+                at.pop();
+            }
+        }
+        Value::Array(list) => {
+            let items: Vec<&Value> = open.iter().filter_map(|shape| shape.get("items")).collect();
+            for (index, inner) in list.iter().enumerate() {
+                at.push(Step::Index(index));
+                unread_keys(root, &items, inner, at, found);
+                at.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The plain shapes a schema node stands for, with every `$ref` followed and
+/// every `anyOf`, `oneOf` and `allOf` opened up.
+fn shapes<'a>(
+    root: &'a serde_json::Value,
+    node: &'a serde_json::Value,
+    out: &mut Vec<&'a serde_json::Value>,
+) {
+    let target = node
+        .get("$ref")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .and_then(|name| root.get("$defs")?.get(name));
+    if let Some(target) = target {
+        shapes(root, target, out);
+    }
+    for list in ["anyOf", "oneOf", "allOf"] {
+        for branch in node
+            .get(list)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            shapes(root, branch, out);
+        }
+    }
+    out.push(node);
+}
+
+/// Takes the key at the end of `at` out of `value`.
+fn remove_at(value: &mut serde_json::Value, at: &[Step]) -> Option<()> {
+    let (Step::Key(key), path) = at.split_last()? else {
+        return None;
+    };
+    let mut here = value;
+    for step in path {
+        here = match step {
+            Step::Key(key) => here.get_mut(key.as_str())?,
+            Step::Index(index) => here.get_mut(*index)?,
+        };
+    }
+    here.as_object_mut()?.remove(key).map(drop)
 }
 
 /// Checks the text of a community `applications.json`.
@@ -1349,19 +1555,29 @@ fn inert_keys(text: &str) -> Vec<String> {
 fn nearest_key(typo: &str) -> Option<String> {
     let schema: serde_json::Value =
         serde_json::from_str(&mochi_core::config::json_schema()).ok()?;
+    nearest_among(
+        typo,
+        schema
+            .get("properties")?
+            .as_object()?
+            .keys()
+            .map(String::as_str),
+    )
+}
+
+/// The key out of `known` a misspelling was most likely meant to be.
+fn nearest_among<'a>(typo: &str, known: impl IntoIterator<Item = &'a str>) -> Option<String> {
     // A third of the key may differ, at least one character and at most four.
     // Wider than that and `border` starts being offered for `animation`, which
     // is worse than offering nothing: a guess a user follows is a second wrong
     // file to find the fault in.
     let allowed = (typo.len() / 3).clamp(1, 4);
-    schema
-        .get("properties")?
-        .as_object()?
-        .keys()
-        .map(|known| (edit_distance(known, typo), known.clone()))
+    known
+        .into_iter()
+        .map(|known| (edit_distance(known, typo), known))
         .filter(|(distance, _)| *distance <= allowed)
         .min_by_key(|(distance, known)| (*distance, known.len()))
-        .map(|(_, known)| known)
+        .map(|(_, known)| known.to_owned())
 }
 
 /// The number of single character edits between two keys.
@@ -2115,6 +2331,70 @@ mod tests {
         assert_eq!(value["$schema"], "https://mochi.punds.ch/schema.json");
     }
 
+    /// Runs `quickstart` against a profile folder and the two variables.
+    fn quickstart_in(profile: &Path, config: Option<&Path>, hotkeys: Option<&Path>) -> Result<()> {
+        quickstart_with(&|name| match name {
+            "USERPROFILE" => Some(profile.as_os_str().to_owned()),
+            "MOCHI_CONFIG" => config.map(|p| p.as_os_str().to_owned()),
+            "MOCHI_HOTKEYS" => hotkeys.map(|p| p.as_os_str().to_owned()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn quickstart_writes_the_files_the_daemon_would_load() {
+        let dir =
+            std::env::temp_dir().join(format!("mochic-quickstart-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let profile = dir.join("profile");
+        let config = dir.join("elsewhere").join("desk.json");
+        let hotkeys = dir.join("elsewhere").join("keys");
+        let ran = quickstart_in(&profile, Some(&config), Some(&hotkeys));
+        let wrote = (
+            std::fs::read_to_string(&config),
+            std::fs::read_to_string(&hotkeys),
+        );
+        let profile_touched = profile.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        ran.unwrap();
+        assert_eq!(
+            wrote.0.ok().as_deref(),
+            Some(default_config()),
+            "MOCHI_CONFIG names the file"
+        );
+        assert_eq!(
+            wrote.1.ok().as_deref(),
+            Some(mochi_hotkey::DEFAULT),
+            "MOCHI_HOTKEYS names the file"
+        );
+        assert!(
+            !profile_touched,
+            "nothing goes to the profile when both are named"
+        );
+    }
+
+    #[test]
+    fn quickstart_without_the_variables_writes_to_the_profile_and_keeps_a_whkdrc() {
+        let dir =
+            std::env::temp_dir().join(format!("mochic-quickstart-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let keys = dir.join(".config").join("mochi");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("whkdrc"), "alt + h : mochic focus left\n").unwrap();
+        let ran = quickstart_in(&dir, None, None);
+        let config = std::fs::read_to_string(dir.join("mochi.json"));
+        let named = keys.join("hotkeys").exists();
+        let legacy = std::fs::read_to_string(keys.join("whkdrc"));
+        let _ = std::fs::remove_dir_all(&dir);
+        ran.unwrap();
+        assert_eq!(config.ok().as_deref(), Some(default_config()));
+        assert!(!named, "a whkdrc already holds the bindings");
+        assert_eq!(
+            legacy.ok().as_deref(),
+            Some("alt + h : mochic focus left\n")
+        );
+    }
+
     // --- check ----------------------------------------------------------
 
     #[test]
@@ -2395,6 +2675,89 @@ mod tests {
             vec!["nonsense".to_owned()]
         );
         assert!(inert_keys("not json at all").is_empty());
+    }
+
+    #[test]
+    fn a_misspelt_key_inside_a_block_is_named_where_it_sits() {
+        let found = check_config_text(
+            "mochi.json",
+            r##"{
+  "monitors": [
+    { "workspaces": [ { "name": "one", "layuot": "Columns", "workspace_paddin": 4 } ] },
+    { "workspace": [ { "layout": "Rows" } ] }
+  ],
+  "animation": { "enable": true },
+  "border_colours": { "singel": "#ff0000", "stack": { "r": 1, "g": 2, "b": 3 } },
+  "scratchpads": [ { "name": "term", "match": { "kind": "Title", "id": "Terminal", "strategy": "Equals" } } ]
+}"##,
+        );
+        assert!(found.errors.is_empty(), "{found:?}");
+        let named = |path: &str, meant: &str| {
+            found.warnings.iter().any(|w| {
+                w.contains(&format!("{path:?}")) && w.contains(&format!("Did you mean {meant:?}?"))
+            })
+        };
+        assert!(
+            named("monitors[0].workspaces[0].layuot", "layout"),
+            "{found:?}"
+        );
+        assert!(
+            named(
+                "monitors[0].workspaces[0].workspace_paddin",
+                "workspace_padding"
+            ),
+            "{found:?}"
+        );
+        assert!(named("monitors[1].workspace", "workspaces"), "{found:?}");
+        assert!(named("animation.enable", "enabled"), "{found:?}");
+        assert!(named("border_colours.singel", "single"), "{found:?}");
+        assert!(
+            found
+                .warnings
+                .iter()
+                .any(|w| w.contains("\"scratchpads[0].match.strategy\"")),
+            "{found:?}"
+        );
+        assert_eq!(found.warnings.len(), 6, "{found:?}");
+    }
+
+    #[test]
+    fn every_key_a_complete_file_uses_is_read() {
+        let complete = r##"{
+  "$schema": "https://example.invalid/schema.json",
+  "monitors": [
+    {
+      "workspaces": [
+        {
+          "name": "code",
+          "layout": "BSP",
+          "workspace_padding": 4,
+          "container_padding": 4,
+          "layout_rules": { "1": "Columns", "3": "Rows" },
+          "initial_workspace_rules": [ { "kind": "Exe", "id": "Code.exe" } ],
+          "workspace_rules": [ [ { "kind": "Exe", "id": "a.exe" }, { "kind": "Title", "id": "x", "matching_strategy": "Contains" } ] ],
+          "apply_window_based_work_area_offset": true,
+          "float_override": false
+        }
+      ],
+      "work_area_offset": { "left": 0, "top": 40, "right": 0, "bottom": 0 },
+      "window_based_work_area_offset": { "left": 10 },
+      "window_based_work_area_offset_limit": 1
+    }
+  ],
+  "animation": { "enabled": true, "duration": 200, "fps": 60 },
+  "border_colours": { "single": { "r": 1, "g": 2, "b": 3 }, "unfocused": "#222222", "stack": 255 },
+  "stackbar": { "height": 30, "tabs": { "width": 200, "font_family": "Segoe UI", "background": "#000000" } },
+  "scratchpads": [ { "name": "term", "match": { "kind": "Exe", "id": "wt.exe" }, "width": 0.5 } ],
+  "global_work_area_offset": { "top": 10 },
+  "display_index_preferences": { "0": "DISPLAY1" }
+}"##;
+        let found = check_config_text("mochi.json", complete);
+        assert!(found.errors.is_empty(), "{found:?}");
+        assert!(nested_inert_keys(complete).is_empty(), "{found:?}");
+        assert!(nested_inert_keys(mochi_core::config::QUICKSTART).is_empty());
+        assert!(nested_inert_keys("\u{feff}{ \"animation\": { \"enabled\": true } }").is_empty());
+        assert!(nested_inert_keys("not json at all").is_empty());
     }
 
     #[test]

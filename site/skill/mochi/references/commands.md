@@ -102,14 +102,14 @@ Notes on these commands:
 
 | Syntax | What it does |
 |---|---|
-| `mochic quickstart` | Writes `%USERPROFILE%\mochi.json` and `%USERPROFILE%\.config\mochi\hotkeys`, each only if it does not exist yet. If that folder already holds a hotkey file under the other name Mochi reads, no hotkey file is written. |
+| `mochic quickstart` | Writes the two files the daemon would load: the ones `MOCHI_CONFIG` and `MOCHI_HOTKEYS` name when they are set, otherwise `%USERPROFILE%\mochi.json` and `%USERPROFILE%\.config\mochi\hotkeys`, each only if it does not exist yet. If that folder already holds a hotkey file under the other name Mochi reads, no hotkey file is written. |
 | `mochic check [PATH] [--json]` | Validates a configuration file without applying anything. |
 | `mochic schema [--output PATH] [--json]` | Prints the JSON schema of `mochi.json`. `-o` is the short form of `--output`. With `--output`, `--json` prints a document with `version` and `path` instead of `wrote <path>`; a file that cannot be written is an error document with the code `io`. Without `--output`, `--json` prints the schema unchanged. |
 
 `check` details:
 
 - No `PATH` means the file the daemon would load: `MOCHI_CONFIG`, then `%USERPROFILE%\mochi.json`.
-- Reports parse errors with line and column, rules that cannot work, top-level keys that are ignored, and the file named by `app_specific_configuration_path` (problems there are warnings).
+- Reports parse errors with line and column, rules that cannot work, keys that are ignored at any depth, and the file named by `app_specific_configuration_path` (problems there are warnings).
 - Also reads the hotkey file and reports the number of bindings and every line that did not parse.
 - Given an application rules file instead of a `mochi.json`, it checks that file as one.
 - The last line is `ok: <path> is usable` (optionally `, with N warning(s)`) or `not usable: <reason>`. Exit 0 when usable, 1 when not. Warnings never change the exit code.
