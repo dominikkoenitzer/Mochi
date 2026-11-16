@@ -36,10 +36,11 @@ It names no author and does not link to this repository.
   out. It measures the visitor's browser for ten seconds and shows the result; nothing is sent.
   `diag/vendor/` is the shared diagnostic panel, copied in by `test/sync-diag.mjs` and never edited
   here. CI fails when a copied file no longer matches its record in `test/diag-upstream.json`.
-- `test/` checks the page in Chromium, Firefox and WebKit at 360, 390, 768, 1440 and 2560 px, light and
-  dark: no console errors, no failed requests, no sideways scrolling, no serious accessibility faults,
-  screenshots against the baselines in `test/snapshots/`, every link answering, and the download
-  button sending each system to a release file whose name stays the same from release to release.
+- `test/` checks the page in all three Playwright browser engines at 360, 390, 768, 1440 and 2560 px,
+  light and dark: no console errors, no failed requests, no sideways scrolling, no serious
+  accessibility faults, screenshots against the baselines in `test/snapshots/`, every link answering,
+  and the download button sending each system to a release file whose name stays the same from
+  release to release.
   `test/serve.mjs` serves this folder with the addresses from `vercel.json`, the way the host does.
 
   ```

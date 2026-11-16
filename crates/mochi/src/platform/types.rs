@@ -134,7 +134,7 @@ pub const SHELL_CLASS_PREFIXES: &[&str] = &[
     "Windows.UI.Composition.DesktopWindowContentBridge",
 ];
 
-/// Processes whose windows are part of the shell chrome.
+/// Processes whose windows belong to the shell itself.
 pub const SHELL_EXES: &[&str] = &[
     "dwm.exe",
     "SearchHost.exe",

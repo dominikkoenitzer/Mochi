@@ -64,7 +64,7 @@ A key the file names replaces a value set with a `mochic` command since the last
 | `border_offset` | integer | `-1` | Distance outside the window frame; negative pulls it in. |
 | `border_style` | `System`, `Rounded`, `Square` | `System` | Corner shape. |
 | `border_colours` | object | none | Colours per window kind, see below. |
-| `transparency` | boolean | `false` | Make unfocused windows translucent. Chromium, Electron and UWP windows always stay opaque. |
+| `transparency` | boolean | `false` | Make unfocused windows translucent. Most browsers, apps built on a browser engine and UWP windows always stay opaque. |
 | `transparency_alpha` | integer 0 to 255 | `200` | Opacity of unfocused windows; 255 is opaque. |
 | `transparency_ignore_rules` | rule list | `[]` | Windows that stay opaque. |
 | `animation` | object | none | Move and resize animation, see below. |
