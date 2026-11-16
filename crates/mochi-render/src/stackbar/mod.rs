@@ -195,7 +195,7 @@ mod tests {
                     "focused_text": "#111111",
                     "unfocused_text": "#222222",
                     "background": "#333333",
-                    "font_family": "JetBrainsMono Nerd Font",
+                    "font_family": "Plain Mono Font",
                     "font_size": 14
                 }
             }"##,
@@ -207,10 +207,7 @@ mod tests {
         assert_eq!(style.height, 32);
         assert_eq!(style.tab_width, 200);
         assert_eq!(style.label, StackbarLabel::Process);
-        assert_eq!(
-            style.font_family.as_deref(),
-            Some("JetBrainsMono Nerd Font")
-        );
+        assert_eq!(style.font_family.as_deref(), Some("Plain Mono Font"));
         assert!((style.font_size - 14.0).abs() < f32::EPSILON);
         assert_eq!(style.focused_text, Colour::new(0x11, 0x11, 0x11));
         assert_eq!(style.unfocused_text, Colour::new(0x22, 0x22, 0x22));

@@ -1571,7 +1571,7 @@ mod tests {
                         "focused_text": "#ffbbdf",
                         "unfocused_text": "#313244",
                         "background": "#1e1e2e",
-                        "font_family": "JetBrainsMono Nerd Font",
+                        "font_family": "Plain Mono Font",
                         "font_size": 12
                     }
                 }
@@ -1585,7 +1585,7 @@ mod tests {
         let tabs = stackbar.tabs.expect("tabs");
         assert_eq!(tabs.width, Some(200));
         assert_eq!(tabs.focused_text, Some(Colour::new(255, 187, 223)));
-        assert_eq!(tabs.font_family.as_deref(), Some("JetBrainsMono Nerd Font"));
+        assert_eq!(tabs.font_family.as_deref(), Some("Plain Mono Font"));
         assert_eq!(StackbarMode::default(), StackbarMode::Never);
         assert_eq!(StackbarLabel::default(), StackbarLabel::Title);
     }

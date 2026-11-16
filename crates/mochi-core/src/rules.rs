@@ -1422,7 +1422,7 @@ mod tests {
                     "Drawing1 - Diagram",
                     "DIAGRAMA",
                     "DIAGRAM.EXE",
-                    r"C:\Program Files\Office Suite\root\Office16\DIAGRAM.EXE",
+                    r"C:\Program Files\Office Suite\root\App16\DIAGRAM.EXE",
                 ),
             ),
             (
