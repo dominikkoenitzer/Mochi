@@ -102,14 +102,14 @@ Notes on these commands:
 
 | Syntax | What it does |
 |---|---|
-| `mochic quickstart` | Writes `%USERPROFILE%\mochi.json` and `%USERPROFILE%\.config\mochi\hotkeys`, each only if it does not exist yet. If that folder already holds a hotkey file under the other name Mochi reads, no hotkey file is written. |
+| `mochic quickstart` | Writes the two files the daemon would load: the ones `MOCHI_CONFIG` and `MOCHI_HOTKEYS` name when they are set, otherwise `%USERPROFILE%\mochi.json` and `%USERPROFILE%\.config\mochi\hotkeys`, each only if it does not exist yet. If that folder already holds a hotkey file under the other name Mochi reads, no hotkey file is written. |
 | `mochic check [PATH] [--json]` | Validates a configuration file without applying anything. |
 | `mochic schema [--output PATH] [--json]` | Prints the JSON schema of `mochi.json`. `-o` is the short form of `--output`. With `--output`, `--json` prints a document with `version` and `path` instead of `wrote <path>`; a file that cannot be written is an error document with the code `io`. Without `--output`, `--json` prints the schema unchanged. |
 
 `check` details:
 
 - No `PATH` means the file the daemon would load: `MOCHI_CONFIG`, then `%USERPROFILE%\mochi.json`.
-- Reports parse errors with line and column, rules that cannot work, top-level keys that are ignored, and the file named by `app_specific_configuration_path` (problems there are warnings).
+- Reports parse errors with line and column, rules that cannot work, keys that are ignored at any depth, and the file named by `app_specific_configuration_path` (problems there are warnings).
 - Also reads the hotkey file and reports the number of bindings and every line that did not parse.
 - Given an application rules file instead of a `mochi.json`, it checks that file as one.
 - The last line is `ok: <path> is usable` (optionally `, with N warning(s)`) or `not usable: <reason>`. Exit 0 when usable, 1 when not. Warnings never change the exit code.
@@ -135,7 +135,7 @@ Top-level keys of `state`: `version`, `dry_run`, `paused`, `config_path`, `app_c
 
 `why --json` has `hwnd` (hex, for example `0x1a2b`), `title`, `exe`, `class` and `managed`. A managed window adds `monitor` and `workspace`; one that is not managed adds `reason`. `fullscreen_monitor`, `scratchpad`, `overridable` and `hotkeys_blocked` are there only when they apply. `reason` is one of `scratchpad`, `paused`, `manage-class`, `rule`, `unknown`, or a trait of the window itself: `not visible`, `cloaked`, `child window`, `tool window`, `no-activate window`, `owned window`, `no title`, `too small`, `shell class`, `shell process`, `elevated, out of reach` (the window runs as administrator and Mochi does not; the `elevated` setting in `mochi.json` lifts this), `always on top`, `click-through overlay`, `no-tiling marker` (the window carries the `NoTiling` property).
 
-`hotkeys --json` has `path`, `gate` (`all`, `off` or `game-mode`), `bindings` (each `keys`, `command`, optional `mode`) and `errors`.
+`hotkeys --json` has `path`, `gate` (`all`, `off` or `game-mode`), `hook` (`installed`, `no-hotkeys`, `dry-run` or `failed`; without a hook `set-hotkeys enable` cannot turn keys on), `bindings` (each `keys`, `command`, optional `mode`) and `errors`.
 
 ## Notifications
 

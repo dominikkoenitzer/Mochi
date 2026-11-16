@@ -66,7 +66,8 @@ impl BorderManager {
         })
     }
 
-    /// Forgets what is on screen, so the next pass hands over every border again.
+    /// Makes the next pass hand over every border again, and still take down
+    /// the ones it no longer names.
     ///
     /// The daemon calls this when the displays change. A border's measurements
     /// are worked out at the DPI of the screen its rectangle lands on, so a
@@ -140,7 +141,7 @@ impl BorderManager {
     ///
     /// [`crate::RenderError::ThreadGone`] when the border thread has stopped.
     pub fn clear(&self) -> Result<()> {
-        self.with_diff(BorderDiff::invalidate);
+        self.with_diff(BorderDiff::clear);
         self.worker.send(BorderMessage::Clear)
     }
 
@@ -162,7 +163,7 @@ impl BorderManager {
     /// explicitly on shutdown so that the frames are gone before the windows
     /// they belong to are restored.
     pub fn stop(&self) {
-        self.with_diff(BorderDiff::invalidate);
+        self.with_diff(BorderDiff::clear);
         self.worker.stop();
     }
 

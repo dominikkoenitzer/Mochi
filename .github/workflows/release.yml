@@ -215,14 +215,16 @@ jobs:
           retention-days: 14
 
       # install.ps1 rides along so that releases/latest/download/install.ps1
-      # is always the installer that matches the newest zip.
+      # is always the installer that matches the newest zip. Generated notes
+      # would list commit authors, so the body is fixed text.
       - name: Publish release
         if: github.ref_type == 'tag' || inputs.tag != ''
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: ${{ inputs.tag || github.ref_name }}
-          generate_release_notes: true
+          body: "Download and install Mochi from https://mochi.punds.ch."
+          generate_release_notes: false
           files: |
             dist/Mochi-Setup.exe
             dist/Mochi-Setup.exe.sha256

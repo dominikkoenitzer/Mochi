@@ -3251,6 +3251,30 @@ mod tests {
     }
 
     #[test]
+    fn a_floating_window_that_waited_is_focused_without_the_warp_of_a_tiled_one() {
+        let mut state = with_windows(1);
+        state.mouse_follows_focus = true;
+        state.rules.floating_applications.push(MatchingRule::simple(
+            ApplicationIdentifier::Exe,
+            "Calculator.exe",
+            MatchingStrategy::Equals,
+        ));
+        state.toggle_pause().unwrap();
+        state.add_window(Window::new(2)).unwrap();
+        state
+            .add_window(Window::new(3).with_exe("Calculator.exe"))
+            .unwrap();
+
+        let changes = state.toggle_pause().unwrap();
+        assert_eq!(state.workspace(0, 0).unwrap().floating_windows().len(), 1);
+        assert_eq!(changes.focus, Some(WindowId(3)));
+        assert_eq!(
+            changes.warp_mouse_to, None,
+            "the cursor must not jump to the tile of window 2"
+        );
+    }
+
+    #[test]
     fn a_window_that_closes_again_while_paused_is_forgotten() {
         let mut state = with_windows(1);
         state.toggle_pause().unwrap();

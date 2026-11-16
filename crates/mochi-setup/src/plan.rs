@@ -31,6 +31,8 @@ pub struct Layout {
     pub config: PathBuf,
     pub hotkeys: PathBuf,
     pub legacy_hotkeys: PathBuf,
+    /// The folder Mochi writes its log to.
+    pub log_dir: PathBuf,
 }
 
 impl Layout {
@@ -44,6 +46,7 @@ impl Layout {
             config: profile.join("mochi.json"),
             hotkeys: hotkey_dir.join("hotkeys"),
             legacy_hotkeys: hotkey_dir.join("whkdrc"),
+            log_dir: local_app_data.join("mochi"),
             root,
         }
     }
@@ -54,6 +57,166 @@ impl Layout {
 
     pub fn mochic(&self) -> PathBuf {
         self.bin.join("mochic.exe")
+    }
+}
+
+/// A step the setup hands to mochic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MochicStep {
+    Quickstart,
+    Start,
+}
+
+/// The dialog line for a mochic step that failed, from everything mochic
+/// printed while it ran.
+pub fn mochic_failed(step: MochicStep, said: &str, log_dir: &Path) -> String {
+    let reason = mochic_reason(said);
+    match step {
+        MochicStep::Quickstart if reason.is_empty() => {
+            "Could not write the default settings.".to_owned()
+        }
+        MochicStep::Quickstart => format!("Could not write the default settings. {reason}"),
+        // mochi itself knows why it did not come up, and says so in its log.
+        MochicStep::Start if reason.is_empty() || reason.contains(r"\\.\pipe\") => format!(
+            "Could not start Mochi. The log in {} says why.",
+            log_dir.display()
+        ),
+        MochicStep::Start => format!("Could not start Mochi. {reason}"),
+    }
+}
+
+/// mochic's error line as sentences: the first line it starts with "mochic: ",
+/// without error codes, one sentence per link of the cause chain.
+fn mochic_reason(said: &str) -> String {
+    let Some(line) = said.lines().find_map(|l| l.trim().strip_prefix("mochic: ")) else {
+        return String::new();
+    };
+    without_error_codes(line)
+        .split(": ")
+        .filter_map(sentence)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The line without the codes Rust and Windows put after a reason: " (os error 5)", " (0x80070005)".
+fn without_error_codes(line: &str) -> String {
+    let mut rest = line;
+    let mut out = String::new();
+    while let Some(start) = rest.find(" (") {
+        let inside = &rest[start + 2..];
+        match inside.find(')') {
+            Some(end) if is_error_code(&inside[..end]) => {
+                out.push_str(&rest[..start]);
+                rest = &inside[end + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..start + 2]);
+                rest = inside;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_error_code(code: &str) -> bool {
+    if let Some(number) = code.strip_prefix("os error ") {
+        return number.trim_start_matches('-').parse::<u32>().is_ok();
+    }
+    code.strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == 8 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn sentence(part: &str) -> Option<String> {
+    let part = part.trim().trim_end_matches('.').trim_end();
+    let mut chars = part.chars();
+    let first = chars.next()?;
+    Some(format!("{}{}.", first.to_uppercase(), chars.as_str()))
+}
+
+#[cfg(test)]
+mod mochic_words {
+    use super::*;
+
+    const LOG: &str = r"C:\Users\a\data\mochi";
+
+    // mochic's own advice line; the real one names a folder through an unexpanded variable.
+    const ADVICE: &str =
+        "Run `mochic check` to test your configuration, or read the log in %DATA%\\mochi";
+
+    fn exited() -> String {
+        format!("mochic: mochi exited with code 1 without opening \\\\.\\pipe\\mochi.\n{ADVICE}")
+    }
+
+    fn no_pipe() -> String {
+        format!(
+            "mochic: mochi is running but did not open \\\\.\\pipe\\mochi within 10 seconds.\n{ADVICE}"
+        )
+    }
+
+    const DENIED: &str = "wrote C:\\Users\\a\\mochi.json\nmochic: could not write C:\\Users\\a\\.config\\mochi\\hotkeys: Access is denied. (os error 5)";
+
+    // The administrator start fails through Windows' own error, which ends in its code.
+    const NOT_ELEVATED: &str = "mochic: could not start C:\\Users\\a\\Programs\\Mochi\\bin\\mochi.exe as administrator: Access is denied. (0x80070005)";
+
+    fn assert_plain(message: &str) {
+        assert!(!message.is_empty());
+        assert!(!message.contains('\n'), "{message}");
+        for term in ["mochic", "%", "os error", "0x", "pipe", "(1)", "`"] {
+            assert!(!message.contains(term), "{term} in {message}");
+        }
+        assert!(message.starts_with("Could not "), "{message}");
+        assert!(message.ends_with('.'), "{message}");
+    }
+
+    #[test]
+    fn a_mochi_that_does_not_come_up_points_at_its_log() {
+        for said in [exited(), no_pipe(), String::new()] {
+            let message = mochic_failed(MochicStep::Start, &said, Path::new(LOG));
+            assert_plain(&message);
+            assert_eq!(
+                message,
+                "Could not start Mochi. The log in C:\\Users\\a\\data\\mochi says why."
+            );
+        }
+    }
+
+    #[test]
+    fn default_settings_that_cannot_be_written_keep_the_reason_mochic_gave() {
+        let message = mochic_failed(MochicStep::Quickstart, DENIED, Path::new(LOG));
+        assert_plain(&message);
+        assert_eq!(
+            message,
+            "Could not write the default settings. Could not write C:\\Users\\a\\.config\\mochi\\hotkeys. Access is denied."
+        );
+    }
+
+    #[test]
+    fn an_administrator_start_that_fails_keeps_its_reason_without_the_windows_code() {
+        let message = mochic_failed(MochicStep::Start, NOT_ELEVATED, Path::new(LOG));
+        assert_plain(&message);
+        assert_eq!(
+            message,
+            "Could not start Mochi. Could not start C:\\Users\\a\\Programs\\Mochi\\bin\\mochi.exe as administrator. Access is denied."
+        );
+    }
+
+    #[test]
+    fn brackets_that_are_not_codes_stay_in_the_reason() {
+        let said = "mochic: could not write C:\\Program Files (x86)\\m\\hotkeys: Access is denied. (os error 5)";
+        let message = mochic_failed(MochicStep::Quickstart, said, Path::new(LOG));
+        assert_plain(&message);
+        assert_eq!(
+            message,
+            "Could not write the default settings. Could not write C:\\Program Files (x86)\\m\\hotkeys. Access is denied."
+        );
+    }
+
+    #[test]
+    fn a_quickstart_that_says_nothing_still_reads_as_a_sentence() {
+        let message = mochic_failed(MochicStep::Quickstart, "", Path::new(LOG));
+        assert_plain(&message);
+        assert_eq!(message, "Could not write the default settings.");
     }
 }
 
@@ -340,6 +503,33 @@ pub fn cleanup_after_exit(file: &Path, dir: &Path) -> Option<String> {
     ))
 }
 
+/// Why a step failed, in the words Windows has for it, without the error number Rust adds after them.
+pub fn io_reason(e: &std::io::Error) -> String {
+    let said = e.to_string();
+    match e.raw_os_error() {
+        Some(code) => said
+            .strip_suffix(&format!(" (os error {code})"))
+            .unwrap_or(&said)
+            .to_owned(),
+        None => said,
+    }
+}
+
+/// A failed step as one line of a dialog: what could not be done, then why, as a sentence of its own.
+pub fn could_not(action: &str, reason: &str) -> String {
+    let mut chars = reason.trim().chars();
+    let Some(first) = chars.next() else {
+        return format!("Could not {action}.");
+    };
+    let reason: String = first.to_uppercase().chain(chars).collect();
+    let end = if reason.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
+    format!("Could not {action}. {reason}{end}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,5 +785,24 @@ mod tests {
             cleanup_after_exit(Path::new(r"C:\100%\x.exe"), &l.root),
             None
         );
+    }
+
+    #[test]
+    fn a_failed_step_keeps_the_words_of_windows_without_the_number() {
+        let reason = io_reason(&std::io::Error::from_raw_os_error(5));
+        assert!(!reason.is_empty());
+        assert!(!reason.contains("os error"), "{reason}");
+        let message = could_not(r"create C:\Mochi\bin", &reason);
+        assert!(
+            message.starts_with(r"Could not create C:\Mochi\bin. "),
+            "{message}"
+        );
+        assert!(message.ends_with('.'), "{message}");
+        let other = io_reason(&std::io::Error::other("the share is offline"));
+        assert_eq!(
+            could_not("start Mochi", &other),
+            "Could not start Mochi. The share is offline."
+        );
+        assert_eq!(could_not("start Mochi", " "), "Could not start Mochi.");
     }
 }

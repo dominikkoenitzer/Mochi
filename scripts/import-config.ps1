@@ -103,7 +103,8 @@ function Get-Newline {
 
 function Split-Lines {
     param([Parameter(Mandatory)][AllowEmptyString()][string] $Text)
-    return @($Text -split "`r?`n")
+    # The leading comma keeps a single line an array instead of letting the output unroll it.
+    return , @($Text -split "`r?`n")
 }
 
 function Show-LineDiff {
@@ -154,7 +155,7 @@ function Write-Target {
         return
     }
 
-    if ((Test-Path $Path) -and -not $Force) {
+    if ((Test-Path -LiteralPath $Path) -and -not $Force) {
         Write-Detail "$Path exists, not overwriting it (use -Force)"
         return
     }
@@ -164,7 +165,7 @@ function Write-Target {
     }
 
     $dir = Split-Path -Parent (Resolve-FullPath -Path $Path)
-    if ($dir -and -not (Test-Path $dir)) {
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
     }
     # Resolved first. .NET resolves a relative path against the process
@@ -179,7 +180,7 @@ function Write-Target {
 }
 
 function Convert-Config {
-    if (-not (Test-Path $Config)) {
+    if (-not (Test-Path -LiteralPath $Config)) {
         Write-Detail "$Config not found, skipping the configuration"
         return
     }
@@ -236,7 +237,7 @@ function Convert-Config {
             $asc = $json.app_specific_configuration_path
             Write-Detail "app_specific_configuration_path kept: $asc"
             $expanded = $asc -replace '\$Env:USERPROFILE', $env:USERPROFILE -replace '/', '\'
-            if (Test-Path $expanded) {
+            if (Test-Path -LiteralPath $expanded) {
                 Write-Detail "   the file is there, the applications.json format is read as is"
             } else {
                 Write-Detail "   the file is missing, drop the key or fix the path"
@@ -250,7 +251,7 @@ function Convert-Config {
 }
 
 function Convert-Hotkeys {
-    if (-not (Test-Path $Hotkeys)) {
+    if (-not (Test-Path -LiteralPath $Hotkeys)) {
         Write-Detail "$Hotkeys not found, skipping the hotkeys"
         return
     }

@@ -75,11 +75,15 @@ impl Colour {
     ///
     /// Returns [`Error::Parse`] for anything else.
     pub fn parse(text: &str) -> Result<Self> {
-        let digits = text.trim().trim_start_matches('#');
+        let digits = text.trim().strip_prefix('#').unwrap_or(text.trim());
         let invalid = || Error::Parse {
             kind: "colour",
             value: text.to_string(),
         };
+        // `from_str_radix` takes a leading `+`, so `#+1+2+3` would pass without this.
+        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(invalid());
+        }
         let channel = |from: usize, to: usize| {
             u8::from_str_radix(digits.get(from..to).unwrap_or_default(), 16).map_err(|_| invalid())
         };
@@ -118,6 +122,9 @@ impl Serialize for Colour {
     }
 }
 
+/// White, the largest `COLORREF` that is a colour; a higher byte is a flag.
+const LAST_COLORREF: u32 = 0x00FF_FFFF;
+
 #[derive(Deserialize)]
 #[serde(
     untagged,
@@ -126,7 +133,7 @@ impl Serialize for Colour {
 enum ColourRepr {
     Hex(String),
     Channels { r: u8, g: u8, b: u8 },
-    ColorRef(u32),
+    ColorRef(u64),
 }
 
 impl<'de> Deserialize<'de> for Colour {
@@ -134,7 +141,12 @@ impl<'de> Deserialize<'de> for Colour {
         match ColourRepr::deserialize(deserializer)? {
             ColourRepr::Hex(text) => Colour::parse(&text).map_err(D::Error::custom),
             ColourRepr::Channels { r, g, b } => Ok(Colour::new(r, g, b)),
-            ColourRepr::ColorRef(raw) => Ok(Colour::from_colorref(raw)),
+            ColourRepr::ColorRef(raw) => match u32::try_from(raw) {
+                Ok(value) if value <= LAST_COLORREF => Ok(Colour::from_colorref(value)),
+                _ => Err(D::Error::custom(format!(
+                    "{raw} is not a valid colour, a colour number goes up to {LAST_COLORREF}"
+                ))),
+            },
         }
     }
 }
@@ -158,7 +170,7 @@ impl schemars::JsonSchema for Colour {
                     },
                     "required": ["r", "g", "b"]
                 },
-                { "type": "integer", "minimum": 0 }
+                { "type": "integer", "minimum": 0, "maximum": LAST_COLORREF }
             ]
         })
     }
@@ -1422,6 +1434,14 @@ mod tests {
     }
 
     #[test]
+    fn a_colour_takes_only_hex_digits() {
+        for text in ["#+1+2+3", "+1+2+3", "#+f+f+f", "#ff+fff", "#-1-2-3"] {
+            assert!(Colour::parse(text).is_err(), "for {text}");
+        }
+        assert!(serde_json::from_str::<Colour>(r##""#+1+2+3""##).is_err());
+    }
+
+    #[test]
     fn colours_serialise_as_hex() {
         let pink = Colour::new(255, 187, 223);
         assert_eq!(pink.to_hex(), "#ffbbdf");
@@ -1438,6 +1458,40 @@ mod tests {
         // gives back for that pink, and it has to survive the round trip.
         assert_eq!(Colour::from_colorref(0x00df_bbff), pink);
         assert_eq!(Colour::default(), Colour::new(0, 0, 0));
+    }
+
+    #[test]
+    fn a_colour_takes_one_hash_sign_at_most() {
+        for text in ["##ffbbdf", "###fff", " ##f0a ", "##f0"] {
+            assert!(Colour::parse(text).is_err(), "for {text}");
+        }
+        assert!(serde_json::from_str::<Colour>(r###""##ffbbdf""###).is_err());
+    }
+
+    #[test]
+    fn a_colour_number_past_white_is_refused() {
+        for number in ["16777216", "4294901760"] {
+            let json = format!(r#"{{"border_colours": {{"single": {number}}}}}"#);
+            let error = Config::from_json(&json).unwrap_err().to_string();
+            assert!(error.contains("goes up to 16777215"), "{number}: {error}");
+            assert!(!error.contains("ColourRepr"), "{error}");
+        }
+        for (number, colour) in [
+            ("0", Colour::new(0, 0, 0)),
+            ("16711680", Colour::new(0, 0, 255)),
+            ("16777215", Colour::new(255, 255, 255)),
+        ] {
+            assert_eq!(serde_json::from_str::<Colour>(number).unwrap(), colour);
+        }
+    }
+
+    #[test]
+    fn a_colour_number_past_four_bytes_names_the_range() {
+        for number in ["4294967296", "18446744073709551615"] {
+            let json = format!(r#"{{"border_colours": {{"single": {number}}}}}"#);
+            let error = Config::from_json(&json).unwrap_err().to_string();
+            assert!(error.contains("goes up to 16777215"), "{number}: {error}");
+        }
     }
 
     #[test]

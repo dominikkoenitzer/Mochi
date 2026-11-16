@@ -21,7 +21,14 @@ fn main() {
             // the rights then, through the prompt Windows shows for it.
             .requested_execution_level(ExecutionLevel::AsInvoker);
         embed_manifest(manifest).expect("could not embed the application manifest");
+        // File properties and Task Manager show these, not the crate name.
         winresource::WindowsResource::new()
+            .set("FileDescription", "Mochi")
+            .set("ProductName", "Mochi")
+            .set("CompanyName", "Mochi")
+            .set("OriginalFilename", "mochi.exe")
+            .set("InternalName", "mochi")
+            .set("LegalCopyright", env!("CARGO_PKG_LICENSE"))
             .set_icon("../../assets/mochi.ico")
             .compile()
             .expect("could not embed the icon");

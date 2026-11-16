@@ -779,6 +779,7 @@
         },
         {
           "type": "integer",
+          "maximum": 16777215,
           "minimum": 0
         }
       ]

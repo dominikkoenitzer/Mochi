@@ -140,8 +140,13 @@ impl Changes {
         self.restore.extend(other.restore);
         self.maximize = other.maximize.or(self.maximize);
         self.close = other.close.or(self.close);
-        self.focus = other.focus.or(self.focus);
-        self.warp_mouse_to = other.warp_mouse_to.or(self.warp_mouse_to);
+        // The warp belongs to its focus: a newer focus brings its own, even none.
+        if other.focus.is_some() {
+            self.focus = other.focus;
+            self.warp_mouse_to = other.warp_mouse_to;
+        } else {
+            self.warp_mouse_to = other.warp_mouse_to.or(self.warp_mouse_to);
+        }
         self.focused_monitor_changed |= other.focused_monitor_changed;
     }
 
@@ -239,6 +244,28 @@ mod tests {
         let mut a = Changes::none().focus(WindowId(1));
         a.merge(Changes::none().retile(0, 0));
         assert_eq!(a.focus, Some(WindowId(1)));
+    }
+
+    #[test]
+    fn a_newer_focus_brings_its_own_warp_even_when_it_has_none() {
+        let mut a = Changes::none().focus(WindowId(1));
+        a.warp_mouse_to = Some(Rect::new(0, 0, 960, 1080));
+        // A floating window has no tile, so its focus comes without a warp.
+        a.merge(Changes::none().focus(WindowId(2)));
+        assert_eq!(a.focus, Some(WindowId(2)));
+        assert_eq!(
+            a.warp_mouse_to, None,
+            "the cursor must not go to the tile of the window that lost the focus"
+        );
+    }
+
+    #[test]
+    fn a_merge_without_a_focus_keeps_the_older_focus_and_its_warp() {
+        let mut a = Changes::none().focus(WindowId(1));
+        a.warp_mouse_to = Some(Rect::new(0, 0, 960, 1080));
+        a.merge(Changes::none().retile(0, 0));
+        assert_eq!(a.focus, Some(WindowId(1)));
+        assert_eq!(a.warp_mouse_to, Some(Rect::new(0, 0, 960, 1080)));
     }
 
     #[test]
