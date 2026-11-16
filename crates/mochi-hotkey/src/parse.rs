@@ -1123,7 +1123,7 @@ mod tests {
 
     #[test]
     fn a_trailing_comment_is_cut_off_the_line() {
-        let bindings = parse("alt + h : mochic focus left   # vim keys");
+        let bindings = parse("alt + h : mochic focus left   # home row keys");
         let binding = bindings.get("alt + h".parse().unwrap()).unwrap();
         assert_eq!(binding.source, "mochic focus left");
     }

@@ -652,7 +652,7 @@ pub struct WindowManager {
     /// Kept because a reload REPLACES the rule sets rather than merging them:
     /// `Config::apply_to` assigns `state.rules` outright, unlike every other
     /// key, which is only written when the file names it. Without this, typing
-    /// `mochic ignore-rule exe wallpaper64.exe equals` and then editing any
+    /// `mochic ignore-rule exe backdrop64.exe equals` and then editing any
     /// unrelated key in mochi.json silently threw the rule away, and the
     /// application it was keeping out started being tiled again with nothing
     /// logged. The visuals are already deliberately sticky across a reload for
@@ -5725,7 +5725,7 @@ mod tests {
         WindowInfo {
             title: title.into(),
             class: "Chrome_WidgetWin_1".into(),
-            exe: "Code.exe".into(),
+            exe: "Editor.exe".into(),
             style: style::WS_VISIBLE | style::WS_CAPTION,
             rect: Rect::new(0, 0, 800, 600),
             frame: Rect::new(0, 0, 800, 600),
@@ -6667,7 +6667,7 @@ mod tests {
         let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
         let (response, _) = wm.handle_command(Command::IgnoreRule {
             identifier: mochi_client::RuleIdentifier::Exe,
-            id: "Code.exe".into(),
+            id: "Editor.exe".into(),
             matching_strategy: mochi_client::MatchingStrategy::Equals,
         });
         assert_eq!(response, Response::Ok);
@@ -6771,7 +6771,7 @@ mod tests {
         // `Config::apply_to` assigns `state.rules` outright rather than writing
         // only what the file names, so every reload used to throw away whatever
         // a `mochic` command had added. Typing `mochic ignore-rule exe
-        // wallpaper64.exe equals` and then editing any unrelated key in
+        // backdrop64.exe equals` and then editing any unrelated key in
         // mochi.json silently lost the rule, and the application it was keeping
         // out was tiled again with nothing logged.
         let dir = std::env::temp_dir().join(format!("mochi-rule-reload-{}", std::process::id()));
@@ -6786,7 +6786,7 @@ mod tests {
 
         let (response, _) = wm.handle_command(Command::IgnoreRule {
             identifier: mochi_client::RuleIdentifier::Exe,
-            id: "wallpaper64.exe".into(),
+            id: "backdrop64.exe".into(),
             matching_strategy: mochi_client::MatchingStrategy::Equals,
         });
         assert!(response.is_ok(), "the rule should be accepted");
@@ -8231,12 +8231,12 @@ alt + j : focus down
         let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
         wm.handle_command(Command::IgnoreRule {
             identifier: mochi_client::RuleIdentifier::Exe,
-            id: "Code.exe".into(),
+            id: "Editor.exe".into(),
             matching_strategy: mochi_client::MatchingStrategy::Equals,
         });
         wm.handle_command(Command::ManageRule {
             identifier: mochi_client::RuleIdentifier::Exe,
-            id: "Code.exe".into(),
+            id: "Editor.exe".into(),
             matching_strategy: mochi_client::MatchingStrategy::Equals,
         });
         // The user's own word is the last one, whichever order the two arrive
@@ -8249,7 +8249,7 @@ alt + j : focus down
         let (mut wm, _) = manager(vec![window(1, "Editor")]);
         let (response, _) = wm.handle_command(Command::WorkspaceRule {
             identifier: mochi_client::RuleIdentifier::Exe,
-            id: "Code.exe".into(),
+            id: "Editor.exe".into(),
             monitor: 4,
             workspace: 0,
             initial_only: false,
@@ -9664,7 +9664,7 @@ alt + j : focus down
             .object_name_change_applications
             .push(MatchingRule::simple(
                 ApplicationIdentifier::Exe,
-                "Code.exe".to_owned(),
+                "Editor.exe".to_owned(),
                 MatchingStrategy::Equals,
             ));
         wm.workspace_rules.push(WorkspaceRule {

@@ -29,7 +29,7 @@ function holdSend() {
       event.preventDefault();
       const status = send.closest("section")?.querySelector('p[role="status"]');
       if (status) status.textContent = NO_ADDRESS;
-      // Safari does not focus a clicked button, and the panel closes on Escape only with focus inside it.
+      // Some browsers do not focus a clicked button, and the panel closes on Escape only with focus inside it.
       send.focus();
     },
     true,

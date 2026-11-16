@@ -135,7 +135,7 @@ mod tests {
                             "index": 0,
                             "name": "1",
                             "containers": [],
-                            "monocle_container": { "index": 0, "windows": [window(5, "Code.exe", "main.rs")] },
+                            "monocle_container": { "index": 0, "windows": [window(5, "Editor.exe", "main.rs")] },
                             "maximized_window": null,
                             "floating_windows": [],
                         },
@@ -237,8 +237,8 @@ mod tests {
         state["monitors"][1]["workspaces"][0]["monocle_container"]["windows"]
             .as_array_mut()
             .unwrap()
-            .push(window(7, "Code.exe", "lib.rs"));
-        let filter = Filter::new(Some("code.exe"), None).unwrap().unwrap();
+            .push(window(7, "Editor.exe", "lib.rs"));
+        let filter = Filter::new(Some("editor.exe"), None).unwrap().unwrap();
         let found = windows(&state, &filter);
         assert_eq!(hwnds(&found), [5, 7]);
         assert!(found.iter().all(|w| w["placement"] == "monocle"));

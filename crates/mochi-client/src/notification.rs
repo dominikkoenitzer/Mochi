@@ -12,7 +12,7 @@ pub struct WindowRef {
     pub hwnd: i64,
     /// Window title at the time of the event.
     pub title: String,
-    /// File name of the owning process, for example `firefox.exe`.
+    /// File name of the owning process, for example `browser.exe`.
     pub exe: String,
 }
 

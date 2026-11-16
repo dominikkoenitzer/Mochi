@@ -40,7 +40,7 @@ pub struct Monitor {
     ///
     /// This is the identifier `display_index_preferences` pins a `monitors`
     /// entry to. It is stable across a reboot, a cable swap and a
-    /// `DisplayPort` renegotiation, but it is a model name such as `Odyssey G8`
+    /// `DisplayPort` renegotiation, but it is a model name such as `Wide Q8`
     /// or `Generic PnP Monitor`, never a serial number, so two panels of the
     /// same model carry the same string and nothing here can tell them apart.
     ///

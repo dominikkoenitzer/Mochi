@@ -1071,13 +1071,13 @@ mod tests {
             parse(&[
                 "ignore-rule",
                 "path",
-                "steamapps\\common",
+                "games\\common",
                 "--matching-strategy",
                 "contains"
             ]),
             Command::IgnoreRule {
                 identifier: RuleIdentifier::Path,
-                id: "steamapps\\common".into(),
+                id: "games\\common".into(),
                 matching_strategy: MatchingStrategy::Contains
             }
         );

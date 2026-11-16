@@ -469,11 +469,11 @@ conditions like "class equals X and title does not contain Y".
 
 ```json
 "ignore_rules": [
-  { "kind": "Exe", "id": "wallpaper64.exe", "matching_strategy": "Equals" },
-  { "kind": "Title", "id": " - Peek", "matching_strategy": "EndsWith" },
+  { "kind": "Exe", "id": "backdrop64.exe", "matching_strategy": "Equals" },
+  { "kind": "Title", "id": " - Viewer", "matching_strategy": "EndsWith" },
   [
-    { "kind": "Class", "id": "Ableton Live Window Class", "matching_strategy": "Equals" },
-    { "kind": "Title", "id": "Ableton", "matching_strategy": "DoesNotContain" }
+    { "kind": "Class", "id": "Sound Studio Window Class", "matching_strategy": "Equals" },
+    { "kind": "Title", "id": "Sound Studio", "matching_strategy": "DoesNotContain" }
   ]
 ]
 ```

@@ -460,7 +460,7 @@ fn window_handles() -> Result<Vec<HWND>> {
     Ok(list)
 }
 
-/// Reads the friendly monitor name, for example `Odyssey G80SD`.
+/// Reads the friendly monitor name, for example `Wide Q80X`.
 fn device_description(device_name: &str) -> String {
     let wide = super::wide::to_wide(device_name);
     let mut dd = DISPLAY_DEVICEW {
@@ -1284,12 +1284,12 @@ mod tests {
     fn an_ordinary_window_is_its_own_process() {
         let asked = Cell::new(false);
         let (pid, path) =
-            resolve_process(42, r"C:\Program Files\Editor\Code.exe".to_owned(), || {
+            resolve_process(42, r"C:\Program Files\Editor\Editor.exe".to_owned(), || {
                 asked.set(true);
                 None
             });
         assert_eq!(pid, 42);
-        assert_eq!(path, r"C:\Program Files\Editor\Code.exe");
+        assert_eq!(path, r"C:\Program Files\Editor\Editor.exe");
         assert!(
             !asked.get(),
             "only a frame host window is worth a child walk"

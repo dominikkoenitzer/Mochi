@@ -117,5 +117,5 @@ BSP, Columns, Rows, VerticalStack, HorizontalStack, UltrawideVerticalStack, Grid
   layout leaves it that room, taken from the tiles that can spare it. Only a
   screen too small for all of them still makes a window overlap a neighbour,
   and then it stays inside the workspace with the border drawn around it.
-- Electron and game windows each have quirks; ignore rules and a cloak check
+- Browser-engine apps and game windows each have quirks; ignore rules and a cloak check
   handle most of them.

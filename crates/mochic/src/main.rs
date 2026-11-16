@@ -1532,7 +1532,7 @@ fn rule_lists(sets: &RuleSets) -> [(&'static str, &'static str, &Vec<MatchingRul
 ///
 /// The rule is printed as the JSON it was written as, so it can be found by
 /// eye, and its line is named when the identifier appears exactly once in the
-/// file. An identifier that JSON had to escape, `steamapps\\common`, is not
+/// file. An identifier that JSON had to escape, `games\\common`, is not
 /// found by this search and simply goes unlocated rather than pointing at the
 /// wrong line.
 fn broken_rules(list: &str, text: Option<&str>, rules: &[MatchingRule]) -> Vec<String> {
@@ -2212,7 +2212,7 @@ mod tests {
     fn why_says_a_fullscreen_window_holds_its_monitor() {
         let why = serde_json::json!({
             "hwnd": "0x1a2b", "title": "A game", "exe": "game.exe",
-            "class": "UnityWndClass", "managed": true,
+            "class": "EngineWndClass", "managed": true,
             "monitor": 0, "workspace": 2, "fullscreen_monitor": 0,
         });
         let out = super::why_paragraph(&why);
@@ -2650,7 +2650,7 @@ mod tests {
         .unwrap();
         let rules = read_config(&file(
             "applications.json",
-            r#"{ "Steam": { "ignore": [{ "kind": "Exe", "id": "steam.exe" }] } }"#,
+            r#"{ "Launcher": { "ignore": [{ "kind": "Exe", "id": "launcher.exe" }] } }"#,
         ))
         .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -2940,7 +2940,7 @@ mod tests {
           "workspace_padding": 4,
           "container_padding": 4,
           "layout_rules": { "1": "Columns", "3": "Rows" },
-          "initial_workspace_rules": [ { "kind": "Exe", "id": "Code.exe" } ],
+          "initial_workspace_rules": [ { "kind": "Exe", "id": "Editor.exe" } ],
           "workspace_rules": [ [ { "kind": "Exe", "id": "a.exe" }, { "kind": "Title", "id": "x", "matching_strategy": "Contains" } ] ],
           "apply_window_based_work_area_offset": true,
           "float_override": false
@@ -2970,7 +2970,7 @@ mod tests {
     fn the_community_file_reports_its_mistyped_list_names_as_warnings() {
         let text = r#"{
   "$schema": "https://example.invalid/applications.json",
-  "Zoom": { "floating_applications": [{ "kind": "Exe", "id": "Zoom.exe" }] }
+  "Meeting": { "floating_applications": [{ "kind": "Exe", "id": "Meeting.exe" }] }
 }
 "#;
         let found = check_app_rules_text("applications.json", text);
@@ -2988,7 +2988,7 @@ mod tests {
 
     #[test]
     fn the_community_file_reports_its_broken_rules_under_its_own_key_names() {
-        let text = r#"{ "Zoom": { "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }] } }"#;
+        let text = r#"{ "Meeting": { "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }] } }"#;
         let found = check_app_rules_text("applications.json", text);
         assert_eq!(found.errors.len(), 1, "{found:?}");
         assert!(found.errors[0].starts_with("ignore[0]:"), "{found:?}");
@@ -2996,7 +2996,7 @@ mod tests {
 
     #[test]
     fn the_community_file_counts_one_rule_in_the_singular() {
-        let text = r#"{ "Zoom": { "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }] } }"#;
+        let text = r#"{ "Meeting": { "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }] } }"#;
         let found = check_app_rules_text("applications.json", text);
         assert_eq!(
             found.notes[0], "1 rule read from the application file",
@@ -3007,9 +3007,9 @@ mod tests {
             Some("1 of the 1 rule in applications.json cannot do what it says"),
         );
 
-        let text = r#"{ "Zoom": {
-  "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }, { "kind": "Exe", "id": "Zoom.exe" }],
-  "layered": [{ "kind": "Exe", "id": "Zoom.exe" }]
+        let text = r#"{ "Meeting": {
+  "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }, { "kind": "Exe", "id": "Meeting.exe" }],
+  "layered": [{ "kind": "Exe", "id": "Meeting.exe" }]
 } }"#;
         let found = check_app_rules_text("applications.json", text);
         assert_eq!(
@@ -3024,10 +3024,10 @@ mod tests {
 
     #[test]
     fn the_community_file_counts_more_rules_in_the_plural() {
-        let text = r#"{ "Zoom": {
+        let text = r#"{ "Meeting": {
   "ignore": [{ "kind": "Exe", "id": "(", "matching_strategy": "Regex" }, { "kind": "Exe", "id": ")", "matching_strategy": "Regex" }],
-  "layered": [{ "kind": "Exe", "id": "Zoom.exe" }],
-  "border_overflow": [{ "kind": "Exe", "id": "Zoom.exe" }]
+  "layered": [{ "kind": "Exe", "id": "Meeting.exe" }],
+  "border_overflow": [{ "kind": "Exe", "id": "Meeting.exe" }]
 } }"#;
         let found = check_app_rules_text("applications.json", text);
         assert_eq!(found.notes[0], "4 rules read from the application file");
@@ -3117,7 +3117,7 @@ mod tests {
     /// perfectly fine.
     #[test]
     fn an_application_rules_file_is_recognised_for_what_it_is() {
-        let apps = r#"{ "Zoom": { "ignore": [{ "kind": "Exe", "id": "Zoom.exe" }] } }"#;
+        let apps = r#"{ "Meeting": { "ignore": [{ "kind": "Exe", "id": "Meeting.exe" }] } }"#;
         assert!(looks_like_app_rules(apps));
         assert!(!looks_like_app_rules(default_config()));
         // An empty object is neither, and is a configuration by default.

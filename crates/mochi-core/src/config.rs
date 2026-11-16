@@ -911,7 +911,7 @@ impl Config {
     /// purpose; the carry is matched on geometry, where nobody did.
     ///
     /// [`Monitor::device_id`] is `EnumDisplayDevicesW`'s `DeviceString`, which
-    /// is a model name such as `Odyssey G8` or `Generic PnP Monitor` and never
+    /// is a model name such as `Wide Q8` or `Generic PnP Monitor` and never
     /// a serial number. Two panels of the same model therefore carry the same
     /// id, and this key cannot tell them apart: the first unclaimed one wins,
     /// and the other entry falls back to the monitor left over. Pin at least
@@ -1032,8 +1032,8 @@ mod tests {
 
     use crate::layout::MIN_TILE_SIZE;
 
-    /// A copy of a real config this crate has to keep working with.
-    const REAL_CONFIG: &str = r##"{
+    /// A full daily config: every key and rule kind such a file uses.
+    const DAILY_CONFIG: &str = r##"{
   "$schema": "https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/schema.json",
   "app_specific_configuration_path": "$Env:USERPROFILE/applications.json",
   "window_hiding_behaviour": "Cloak",
@@ -1061,19 +1061,19 @@ mod tests {
     "fps": 60
   },
   "ignore_rules": [
-    { "kind": "Path", "id": "steamapps\\common", "matching_strategy": "Contains" },
-    { "kind": "Path", "id": "Epic Games", "matching_strategy": "Contains" },
-    { "kind": "Path", "id": "Riot Games", "matching_strategy": "Contains" },
+    { "kind": "Path", "id": "games\\common", "matching_strategy": "Contains" },
+    { "kind": "Path", "id": "Store Games", "matching_strategy": "Contains" },
+    { "kind": "Path", "id": "Arena Games", "matching_strategy": "Contains" },
     { "kind": "Exe", "id": "GamePlayer.exe", "matching_strategy": "Equals" },
-    { "kind": "Path", "id": "XboxGames", "matching_strategy": "Contains" },
-    { "kind": "Path", "id": "EA Games", "matching_strategy": "Contains" },
-    { "kind": "Exe", "id": "wallpaper32.exe", "matching_strategy": "Equals" },
-    { "kind": "Exe", "id": "wallpaper64.exe", "matching_strategy": "Equals" },
-    { "kind": "Exe", "id": "zebar.exe", "matching_strategy": "Equals" },
-    { "kind": "Exe", "id": "TranslucentTB.exe", "matching_strategy": "Equals" },
-    { "kind": "Exe", "id": "PowerToys.PowerAccent.exe", "matching_strategy": "Equals" },
+    { "kind": "Path", "id": "ConsoleGames", "matching_strategy": "Contains" },
+    { "kind": "Path", "id": "Sport Games", "matching_strategy": "Contains" },
+    { "kind": "Exe", "id": "backdrop32.exe", "matching_strategy": "Equals" },
+    { "kind": "Exe", "id": "backdrop64.exe", "matching_strategy": "Equals" },
+    { "kind": "Exe", "id": "bar.exe", "matching_strategy": "Equals" },
+    { "kind": "Exe", "id": "ClearBar.exe", "matching_strategy": "Equals" },
+    { "kind": "Exe", "id": "Toolkit.Accent.exe", "matching_strategy": "Equals" },
     { "kind": "Title", "id": "[Pp]icture.in.[Pp]icture", "matching_strategy": "Regex" },
-    { "kind": "Title", "id": " - Peek", "matching_strategy": "EndsWith" }
+    { "kind": "Title", "id": " - Viewer", "matching_strategy": "EndsWith" }
   ],
   "monitors": [
     {
@@ -1105,13 +1105,13 @@ mod tests {
   ]
 }"##;
 
-    /// His file again, with the two keys this whole feature exists for.
+    /// The daily config again, with the two keys this whole feature exists for.
     ///
     /// The first entry is pinned to the 4K main screen, the second to the
     /// portrait panel. The portrait entry carries marks that say which entry
     /// it is, a portrait layout and its own padding, because that is exactly
     /// what must never end up on the 4K screen.
-    const PINNED_CONFIG: &str = r##"{
+    const PINNED_DAILY_CONFIG: &str = r##"{
   "$schema": "https://raw.githubusercontent.com/dominikkoenitzer/Mochi/main/schema.json",
   "app_specific_configuration_path": "$Env:USERPROFILE/applications.json",
   "window_hiding_behaviour": "Cloak",
@@ -1120,8 +1120,8 @@ mod tests {
   "default_workspace_padding": 14,
   "default_container_padding": 10,
   "display_index_preferences": {
-    "0": "Odyssey G8",
-    "1": "AW2521HF"
+    "0": "Wide Q8",
+    "1": "PT2400HZ"
   },
   "monitors": [
     {
@@ -1154,8 +1154,8 @@ mod tests {
 }"##;
 
     #[test]
-    fn the_real_user_config_loads_unchanged() {
-        let config = Config::from_json(REAL_CONFIG).expect("the config has to load as is");
+    fn a_daily_config_loads_unchanged() {
+        let config = Config::from_json(DAILY_CONFIG).expect("the config has to load as is");
 
         assert_eq!(
             config.app_specific_configuration_path,
@@ -1178,8 +1178,8 @@ mod tests {
     }
 
     #[test]
-    fn the_real_config_keeps_the_kawaii_pink_border() {
-        let config = Config::from_json(REAL_CONFIG).unwrap();
+    fn the_daily_config_keeps_the_kawaii_pink_border() {
+        let config = Config::from_json(DAILY_CONFIG).unwrap();
         let colours = config.border_colours.expect("border_colours");
         let pink = Colour::new(0xff, 0xbb, 0xdf);
         assert_eq!(colours.single, Some(pink));
@@ -1190,8 +1190,8 @@ mod tests {
     }
 
     #[test]
-    fn the_real_config_keeps_the_animation_settings() {
-        let config = Config::from_json(REAL_CONFIG).unwrap();
+    fn the_daily_config_keeps_the_animation_settings() {
+        let config = Config::from_json(DAILY_CONFIG).unwrap();
         let animation = config.animation.expect("animation");
         assert!(animation.is_enabled());
         assert_eq!(animation.duration_ms(), 250);
@@ -1200,8 +1200,8 @@ mod tests {
     }
 
     #[test]
-    fn the_real_config_keeps_every_ignore_rule() {
-        let config = Config::from_json(REAL_CONFIG).unwrap();
+    fn the_daily_config_keeps_every_ignore_rule() {
+        let config = Config::from_json(DAILY_CONFIG).unwrap();
         let sets = config.rule_sets();
         assert_eq!(sets.ignore_rules.len(), 13);
         assert!(sets.validate().is_empty(), "every regex compiles");
@@ -1211,27 +1211,27 @@ mod tests {
             "Game",
             "",
             "game.exe",
-            r"D:\SteamLibrary\steamapps\common\Game\game.exe"
+            r"D:\GameLibrary\games\common\Game\game.exe"
         )));
-        assert!(sets.should_ignore(&WindowInfo::new("", "", "zebar.exe", "")));
+        assert!(sets.should_ignore(&WindowInfo::new("", "", "bar.exe", "")));
         assert!(sets.should_ignore(&WindowInfo::new(
             "Picture-in-Picture",
             "",
-            "firefox.exe",
+            "browser.exe",
             ""
         )));
-        assert!(sets.should_ignore(&WindowInfo::new("shot.png - Peek", "", "Peek.exe", "")));
+        assert!(sets.should_ignore(&WindowInfo::new("shot.png - Viewer", "", "Viewer.exe", "")));
         assert!(!sets.should_ignore(&WindowInfo::new(
             "README.md",
             "",
-            "Code.exe",
-            r"C:\Program Files\Code.exe"
+            "Editor.exe",
+            r"C:\Program Files\Editor.exe"
         )));
     }
 
     #[test]
     fn the_real_config_has_two_monitors_with_nine_bsp_workspaces() {
-        let config = Config::from_json(REAL_CONFIG).unwrap();
+        let config = Config::from_json(DAILY_CONFIG).unwrap();
         let monitors = config.monitors.as_ref().expect("monitors");
         assert_eq!(monitors.len(), 2);
         for monitor in monitors {
@@ -1515,10 +1515,10 @@ mod tests {
                         "container_padding": 5,
                         "layout_rules": { "1": "BSP", "3": "Columns" },
                         "initial_workspace_rules": [
-                            { "kind": "Exe", "id": "Code.exe", "matching_strategy": "Equals" }
+                            { "kind": "Exe", "id": "Editor.exe", "matching_strategy": "Equals" }
                         ],
                         "workspace_rules": [
-                            { "kind": "Exe", "id": "firefox.exe", "matching_strategy": "Equals" }
+                            { "kind": "Exe", "id": "browser.exe", "matching_strategy": "Equals" }
                         ],
                         "apply_window_based_work_area_offset": true,
                         "float_override": true
@@ -1571,7 +1571,7 @@ mod tests {
                         "focused_text": "#ffbbdf",
                         "unfocused_text": "#313244",
                         "background": "#1e1e2e",
-                        "font_family": "JetBrainsMono Nerd Font",
+                        "font_family": "Plain Mono Font",
                         "font_size": 12
                     }
                 }
@@ -1585,7 +1585,7 @@ mod tests {
         let tabs = stackbar.tabs.expect("tabs");
         assert_eq!(tabs.width, Some(200));
         assert_eq!(tabs.focused_text, Some(Colour::new(255, 187, 223)));
-        assert_eq!(tabs.font_family.as_deref(), Some("JetBrainsMono Nerd Font"));
+        assert_eq!(tabs.font_family.as_deref(), Some("Plain Mono Font"));
         assert_eq!(StackbarMode::default(), StackbarMode::Never);
         assert_eq!(StackbarLabel::default(), StackbarLabel::Title);
     }
@@ -1597,7 +1597,7 @@ mod tests {
                 "monitor_index_preferences": {
                     "0": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 }
                 },
-                "display_index_preferences": { "1": "AW2521HF-12345" }
+                "display_index_preferences": { "1": "PT2400HZ-12345" }
             }"#,
         )
         .unwrap();
@@ -1612,7 +1612,7 @@ mod tests {
                 .unwrap()
                 .get(&1)
                 .map(String::as_str),
-            Some("AW2521HF-12345")
+            Some("PT2400HZ-12345")
         );
     }
 
@@ -1627,7 +1627,7 @@ mod tests {
 
     #[test]
     fn applying_the_real_config_configures_a_live_state() {
-        let config = Config::from_json(REAL_CONFIG).unwrap();
+        let config = Config::from_json(DAILY_CONFIG).unwrap();
         let mut state = State::new();
         state.add_monitor(Monitor::new(
             1,
@@ -1665,24 +1665,24 @@ mod tests {
 
     /// His 4K main screen, as the platform reports it. `gdi` is the GDI device
     /// name, the thing that can swap when `DisplayPort` renegotiates.
-    fn odyssey_4k(id: isize, gdi: &str) -> Monitor {
+    fn wide_4k(id: isize, gdi: &str) -> Monitor {
         Monitor::new(id, Rect::new(0, 0, 3840, 2160), Rect::new(0, 0, 3840, 2120))
             .with_name(gdi.trim_start_matches(r"\\.\"))
-            .with_device(gdi, "Odyssey G8")
+            .with_device(gdi, "Wide Q8")
     }
 
     /// His 1080p secondary, rotated into portrait, to the right of the 4K one.
-    fn aw2521hf_portrait(id: isize, gdi: &str) -> Monitor {
+    fn pt2400hz_portrait(id: isize, gdi: &str) -> Monitor {
         Monitor::new(
             id,
             Rect::new(3840, 0, 4920, 1920),
             Rect::new(3840, 0, 4920, 1880),
         )
         .with_name(gdi.trim_start_matches(r"\\.\"))
-        .with_device(gdi, "AW2521HF")
+        .with_device(gdi, "PT2400HZ")
     }
 
-    /// The marks that say a monitor got the portrait entry of [`PINNED_CONFIG`].
+    /// The marks that say a monitor got the portrait entry of [`PINNED_DAILY_CONFIG`].
     fn is_portrait_entry(monitor: &Monitor) -> bool {
         monitor.workspaces().len() == 9
             && monitor
@@ -1691,7 +1691,7 @@ mod tests {
                 .all(|w| w.layout == Layout::Rows && w.workspace_padding == Some(6))
     }
 
-    /// The marks that say a monitor got the 4K entry of [`PINNED_CONFIG`].
+    /// The marks that say a monitor got the 4K entry of [`PINNED_DAILY_CONFIG`].
     fn is_main_entry(monitor: &Monitor) -> bool {
         monitor.workspaces().len() == 9
             && monitor
@@ -1716,10 +1716,10 @@ mod tests {
 
     #[test]
     fn his_displays_in_the_enumeration_order_windows_usually_reports() {
-        let config = Config::from_json(PINNED_CONFIG).unwrap();
+        let config = Config::from_json(PINNED_DAILY_CONFIG).unwrap();
         let mut state = State::new();
-        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
-        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY2"));
+        state.add_monitor(wide_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(pt2400hz_portrait(2, r"\\.\DISPLAY2"));
 
         config.apply_to(&mut state);
 
@@ -1732,17 +1732,17 @@ mod tests {
         // The DisplayPort renegotiation case: Windows enumerates the portrait
         // panel first, so a positional match puts its nine workspaces, its
         // layout and its padding on the 4K screen.
-        let config = Config::from_json(PINNED_CONFIG).unwrap();
+        let config = Config::from_json(PINNED_DAILY_CONFIG).unwrap();
         let mut state = State::new();
-        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY1"));
-        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY2"));
+        state.add_monitor(pt2400hz_portrait(2, r"\\.\DISPLAY1"));
+        state.add_monitor(wide_4k(1, r"\\.\DISPLAY2"));
 
         config.apply_to(&mut state);
 
         let portrait = state.monitors().get(0).unwrap();
         let main = state.monitors().get(1).unwrap();
-        assert_eq!(portrait.device_id, "AW2521HF");
-        assert_eq!(main.device_id, "Odyssey G8");
+        assert_eq!(portrait.device_id, "PT2400HZ");
+        assert_eq!(main.device_id, "Wide Q8");
         assert!(
             is_portrait_entry(portrait),
             "the portrait panel got the wrong entry"
@@ -1754,9 +1754,9 @@ mod tests {
     fn an_entry_pinned_to_a_display_that_is_not_attached_is_held() {
         // Only the portrait panel is plugged in. The entry for the 4K screen
         // has to wait for the 4K screen rather than land on the panel.
-        let config = Config::from_json(PINNED_CONFIG).unwrap();
+        let config = Config::from_json(PINNED_DAILY_CONFIG).unwrap();
         let mut state = State::new();
-        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY1"));
+        state.add_monitor(pt2400hz_portrait(2, r"\\.\DISPLAY1"));
 
         config.apply_to(&mut state);
 
@@ -1782,8 +1782,8 @@ mod tests {
         )
         .unwrap();
         let mut state = State::new();
-        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY1"));
-        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY2"));
+        state.add_monitor(pt2400hz_portrait(2, r"\\.\DISPLAY1"));
+        state.add_monitor(wide_4k(1, r"\\.\DISPLAY2"));
 
         config.apply_to(&mut state);
 
@@ -1805,7 +1805,7 @@ mod tests {
         )
         .unwrap();
         let mut state = State::new();
-        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(wide_4k(1, r"\\.\DISPLAY1"));
 
         config.apply_to(&mut state);
 
@@ -1823,7 +1823,7 @@ mod tests {
                 "monitor_index_preferences": {
                     "0": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 }
                 },
-                "display_index_preferences": { "0": "AW2521HF" },
+                "display_index_preferences": { "0": "PT2400HZ" },
                 "monitors": [
                     { "workspaces": [{ "name": "pinned", "layout": "BSP" }] }
                 ]
@@ -1831,8 +1831,8 @@ mod tests {
         )
         .unwrap();
         let mut state = State::new();
-        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
-        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY2"));
+        state.add_monitor(wide_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(pt2400hz_portrait(2, r"\\.\DISPLAY2"));
 
         config.apply_to(&mut state);
 
@@ -1857,8 +1857,8 @@ mod tests {
         )
         .unwrap();
         let mut state = State::new();
-        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY1"));
-        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY2"));
+        state.add_monitor(pt2400hz_portrait(2, r"\\.\DISPLAY1"));
+        state.add_monitor(wide_4k(1, r"\\.\DISPLAY2"));
 
         config.apply_to(&mut state);
 
@@ -1872,7 +1872,7 @@ mod tests {
         // rather than fighting the pin for the same display.
         let config = Config::from_json(
             r#"{
-                "display_index_preferences": { "0": "AW2521HF" },
+                "display_index_preferences": { "0": "PT2400HZ" },
                 "monitors": [
                     { "workspaces": [{ "name": "pinned", "layout": "BSP" }] },
                     { "workspaces": [{ "name": "rest", "layout": "Rows" }] }
@@ -1881,8 +1881,8 @@ mod tests {
         )
         .unwrap();
         let mut state = State::new();
-        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
-        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY2"));
+        state.add_monitor(wide_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(pt2400hz_portrait(2, r"\\.\DISPLAY2"));
 
         config.apply_to(&mut state);
 
@@ -1897,13 +1897,13 @@ mod tests {
         // windows on monitor one.
         let config = Config::from_json(
             r#"{
-                "display_index_preferences": { "0": "AW2521HF" },
+                "display_index_preferences": { "0": "PT2400HZ" },
                 "monitors": [
                     {
                         "workspaces": [{
                             "name": "portrait",
                             "workspace_rules": [
-                                { "kind": "Exe", "id": "firefox.exe", "matching_strategy": "Equals" }
+                                { "kind": "Exe", "id": "browser.exe", "matching_strategy": "Equals" }
                             ]
                         }]
                     },
@@ -1913,8 +1913,8 @@ mod tests {
         )
         .unwrap();
         let mut state = State::new();
-        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
-        state.add_monitor(aw2521hf_portrait(2, r"\\.\DISPLAY2"));
+        state.add_monitor(wide_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(pt2400hz_portrait(2, r"\\.\DISPLAY2"));
 
         let rules = config.workspace_rules(&state);
 
@@ -1932,13 +1932,13 @@ mod tests {
         // rule has to be held back with it.
         let config = Config::from_json(
             r#"{
-                "display_index_preferences": { "0": "AW2521HF" },
+                "display_index_preferences": { "0": "PT2400HZ" },
                 "monitors": [
                     {
                         "workspaces": [{
                             "name": "portrait",
                             "workspace_rules": [
-                                { "kind": "Exe", "id": "firefox.exe", "matching_strategy": "Equals" }
+                                { "kind": "Exe", "id": "browser.exe", "matching_strategy": "Equals" }
                             ]
                         }]
                     }
@@ -1947,7 +1947,7 @@ mod tests {
         )
         .unwrap();
         let mut state = State::new();
-        state.add_monitor(odyssey_4k(1, r"\\.\DISPLAY1"));
+        state.add_monitor(wide_4k(1, r"\\.\DISPLAY1"));
 
         assert!(
             config.workspace_rules(&state).is_empty(),
@@ -2154,7 +2154,7 @@ mod tests {
 
     #[test]
     fn a_config_with_more_monitors_than_the_machine_has_is_fine() {
-        let config = Config::from_json(REAL_CONFIG).unwrap();
+        let config = Config::from_json(DAILY_CONFIG).unwrap();
         let mut state = State::new();
         config.apply_to(&mut state);
         assert!(state.monitors().is_empty());
@@ -2203,7 +2203,7 @@ mod tests {
 
     #[test]
     fn the_config_round_trips_through_json() {
-        let config = Config::from_json(REAL_CONFIG).unwrap();
+        let config = Config::from_json(DAILY_CONFIG).unwrap();
         let json = config.to_json().unwrap();
         let back = Config::from_json(&json).unwrap();
         assert_eq!(back, config);
@@ -2285,7 +2285,7 @@ mod tests {
         }
 
         // And every key the real config file uses has to be in there too.
-        let real: serde_json::Value = serde_json::from_str(REAL_CONFIG).unwrap();
+        let real: serde_json::Value = serde_json::from_str(DAILY_CONFIG).unwrap();
         for key in real
             .as_object()
             .expect("the fixture is an object")

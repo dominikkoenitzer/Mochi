@@ -471,7 +471,7 @@ mod tests {
         let screen = Rect::new(0, 0, 1920, 1080);
         let mut monitor = CoreMonitor::new(0x1234, screen, Rect::new(0, 0, 1920, 1032))
             .with_name("DISPLAY1")
-            .with_device(r"\\.\DISPLAY1", "Odyssey G80SD")
+            .with_device(r"\\.\DISPLAY1", "Wide Q80X")
             .with_dpi(144);
         monitor.ensure_workspaces(9);
         core.add_monitor(monitor);
@@ -488,14 +488,14 @@ mod tests {
         core.add_window(
             CoreWindow::new(0x111)
                 .with_title("Cargo.toml")
-                .with_exe("Code.exe")
+                .with_exe("Editor.exe")
                 .with_class("Chrome_WidgetWin_1"),
         )
         .unwrap();
         core.add_window(
             CoreWindow::new(0x222)
                 .with_title("Mochi")
-                .with_exe("firefox.exe"),
+                .with_exe("browser.exe"),
         )
         .unwrap();
 
@@ -531,7 +531,7 @@ mod tests {
         let first = &workspace["containers"][0];
         assert_eq!(first["windows"][0]["hwnd"], 0x111);
         assert_eq!(first["windows"][0]["title"], "Cargo.toml");
-        assert_eq!(first["windows"][0]["exe"], "Code.exe");
+        assert_eq!(first["windows"][0]["exe"], "Editor.exe");
         assert_eq!(
             first["rect"]["left"].as_i64(),
             core.rect_for_window(mochi_core::WindowId(0x111))

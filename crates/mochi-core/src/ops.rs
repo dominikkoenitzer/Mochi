@@ -1694,11 +1694,11 @@ mod tests {
         let mut state = state();
         state.rules.ignore_rules.push(MatchingRule::simple(
             ApplicationIdentifier::Exe,
-            "zebar.exe",
+            "bar.exe",
             MatchingStrategy::Equals,
         ));
         let changes = state
-            .add_window(Window::new(1).with_exe("zebar.exe"))
+            .add_window(Window::new(1).with_exe("bar.exe"))
             .unwrap();
         assert!(changes.is_empty());
         assert!(!state.is_managed(WindowId(1)));
