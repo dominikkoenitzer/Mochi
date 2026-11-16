@@ -79,13 +79,13 @@ the daemon start in any order.
 A notification carries a flattened event and an optional state snapshot:
 
 ```json
-{"event":"focus-change","window":{"hwnd":852368,"title":"Cargo.toml","exe":"Code.exe"}}
-{"event":"manage","window":{"hwnd":852368,"title":"Cargo.toml","exe":"Code.exe"}}
-{"event":"unmanage","window":{"hwnd":852368,"title":"","exe":"Code.exe"}}
+{"event":"focus-change","window":{"hwnd":852368,"title":"Cargo.toml","exe":"Editor.exe"}}
+{"event":"manage","window":{"hwnd":852368,"title":"Cargo.toml","exe":"Editor.exe"}}
+{"event":"unmanage","window":{"hwnd":852368,"title":"","exe":"Editor.exe"}}
 {"event":"workspace-change","monitor":0,"workspace":2,"name":"3"}
 {"event":"layout-change","monitor":0,"workspace":2,"layout":"BSP"}
 {"event":"monitors-changed","count":2}
-{"event":"reload","path":"C:\\Users\\domin\\mochi.json"}
+{"event":"reload","path":"C:\\Users\\someone\\mochi.json"}
 {"event":"pause","paused":true}
 {"event":"session-change","kind":"lock"}
 {"event":"stop"}
@@ -214,7 +214,7 @@ shape is stable across changes to the model:
       "containers": [{
         "index": 0, "stack": false, "focused_window": 852368,
         "rect": {"left":24,"top":24,"right":1920,"bottom":2088,"width":1896,"height":2064},
-        "windows": [{"hwnd":852368,"title":"Cargo.toml","exe":"Code.exe","class":"Chrome_WidgetWin_1","path":"C:\\Program Files\\Code\\Code.exe","rect":{"...":0},"actual_rect":{"...":0},"min_size":{"width":500,"height":400},"visible":true,"on_screen":true}]
+        "windows": [{"hwnd":852368,"title":"Cargo.toml","exe":"Editor.exe","class":"Chrome_WidgetWin_1","path":"C:\\Program Files\\Editor\\Editor.exe","rect":{"...":0},"actual_rect":{"...":0},"min_size":{"width":500,"height":400},"visible":true,"on_screen":true}]
       }],
       "monocle_container": null, "maximized_window": null, "floating_windows": []
     }]

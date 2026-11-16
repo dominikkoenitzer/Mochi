@@ -101,7 +101,7 @@ fn the_terminal_launcher_is_a_shell_line() {
 }
 
 #[test]
-fn the_vim_keys_and_the_arrows_do_the_same_thing() {
+fn the_home_row_keys_and_the_arrows_do_the_same_thing() {
     for (letter, arrow) in [("h", "left"), ("j", "down"), ("k", "up"), ("l", "right")] {
         assert_eq!(
             command(&format!("alt + {letter}")),

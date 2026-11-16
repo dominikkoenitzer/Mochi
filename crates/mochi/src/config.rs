@@ -539,7 +539,7 @@ mod tests {
         let apps = dir.join("applications.json");
         std::fs::write(
             &apps,
-            r#"{ "$schema": "x", "Zoom": { "ignore": [{ "kind": "Exe", "id": "Zoom.exe" }] } }"#,
+            r#"{ "$schema": "x", "Meeting": { "ignore": [{ "kind": "Exe", "id": "Meeting.exe" }] } }"#,
         )
         .unwrap();
 

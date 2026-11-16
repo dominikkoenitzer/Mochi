@@ -64,7 +64,7 @@ pub struct Window {
     /// The window title, as shown in the title bar.
     #[serde(default)]
     pub title: String,
-    /// The file name of the owning process, for example `firefox.exe`.
+    /// The file name of the owning process, for example `browser.exe`.
     #[serde(default)]
     pub exe: String,
     /// The Win32 window class name.
@@ -164,16 +164,16 @@ mod tests {
     #[test]
     fn builders_fill_the_cache() {
         let w = Window::new(7)
-            .with_title("README.md - Code")
-            .with_exe("Code.exe")
+            .with_title("README.md - Editor")
+            .with_exe("Editor.exe")
             .with_class("Chrome_WidgetWin_1")
-            .with_path(r"C:\Program Files\Code\Code.exe");
+            .with_path(r"C:\Program Files\Editor\Editor.exe");
         assert_eq!(w.id, WindowId(7));
         let info = w.info();
-        assert_eq!(info.exe, "Code.exe");
+        assert_eq!(info.exe, "Editor.exe");
         assert_eq!(info.class, "Chrome_WidgetWin_1");
-        assert_eq!(info.title, "README.md - Code");
-        assert!(info.path.ends_with("Code.exe"));
+        assert_eq!(info.title, "README.md - Editor");
+        assert!(info.path.ends_with("Editor.exe"));
     }
 
     #[test]

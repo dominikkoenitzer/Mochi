@@ -184,7 +184,7 @@ pub struct WindowInfo {
     pub title: String,
     /// Window class name.
     pub class: String,
-    /// File name of the owning process, for example `firefox.exe`.
+    /// File name of the owning process, for example `browser.exe`.
     pub exe: String,
     /// Full path of the owning process. Empty when it could not be read,
     /// which normally means the process is elevated and Mochi is not.
@@ -278,7 +278,7 @@ impl WindowInfo {
         }
     }
 
-    /// Short form for logs: `0x1234 "Title" (firefox.exe)`.
+    /// Short form for logs: `0x1234 "Title" (browser.exe)`.
     pub fn describe(&self) -> String {
         format!("{} {:?} ({})", self.hwnd, self.title, self.exe)
     }
@@ -679,8 +679,8 @@ mod tests {
         WindowInfo {
             title: "Some Editor".into(),
             class: "Chrome_WidgetWin_1".into(),
-            exe: "Code.exe".into(),
-            path: r"C:\Program Files\Code.exe".into(),
+            exe: "Editor.exe".into(),
+            path: r"C:\Program Files\Editor.exe".into(),
             pid: 4242,
             style: style::WS_VISIBLE | style::WS_CAPTION | style::WS_THICKFRAME,
             rect: Rect::new(0, 0, 1280, 800),

@@ -29,8 +29,8 @@
 //! let screen = Rect::new(0, 0, 1920, 1080);
 //! state.add_monitor(Monitor::new(1, screen, screen));
 //!
-//! state.add_window(Window::new(1).with_exe("Code.exe"))?;
-//! let changes = state.add_window(Window::new(2).with_exe("firefox.exe"))?;
+//! state.add_window(Window::new(1).with_exe("Editor.exe"))?;
+//! let changes = state.add_window(Window::new(2).with_exe("browser.exe"))?;
 //!
 //! // The first window keeps the left half, the new one takes the right.
 //! assert_eq!(state.rect_for_window(WindowId(1)), Some(Rect::new(0, 0, 960, 1080)));

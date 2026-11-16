@@ -4,7 +4,7 @@
 ///
 /// It is the whole feature set on one screen: every command worth a key appears
 /// at least once, so the file doubles as the reference. The layout is the one
-/// most tiling users already have in their fingers, vim keys for focus and the
+/// most tiling users already have in their fingers, h j k l for focus and the
 /// same keys with Shift to move.
 ///
 /// The tests below hold it to the grammar, so a command that is renamed or

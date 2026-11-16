@@ -102,7 +102,7 @@ Every rule list takes the same object:
 ```json
 "ignore_rules": [
   { "kind": "Exe", "id": "Taskmgr.exe", "matching_strategy": "Equals" },
-  { "kind": "Title", "id": " - Peek", "matching_strategy": "EndsWith" }
+  { "kind": "Title", "id": " - Viewer", "matching_strategy": "EndsWith" }
 ],
 "floating_applications": [
   { "kind": "Title", "id": "Picture-in-Picture", "matching_strategy": "Equals" }
@@ -144,7 +144,7 @@ Layouts: `BSP`, `Columns`, `Rows`, `VerticalStack`, `HorizontalStack`, `Ultrawid
     "workspaces": [
       { "name": "web", "layout": "BSP" },
       { "name": "chat", "layout": "Rows",
-        "workspace_rules": [ { "kind": "Exe", "id": "thunderbird.exe", "matching_strategy": "Equals" } ] }
+        "workspace_rules": [ { "kind": "Exe", "id": "mail.exe", "matching_strategy": "Equals" } ] }
     ]
   }
 ]

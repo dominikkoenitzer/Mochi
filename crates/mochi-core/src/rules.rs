@@ -4,7 +4,7 @@
 //! and friends copy across from an existing config file unchanged:
 //!
 //! ```json
-//! { "kind": "Exe", "id": "wallpaper64.exe", "matching_strategy": "Equals" }
+//! { "kind": "Exe", "id": "backdrop64.exe", "matching_strategy": "Equals" }
 //! ```
 //!
 //! A rule can also be an array of those objects, in which case every element
@@ -22,7 +22,7 @@ use crate::error::{Error, Result};
 /// The piece of window metadata a rule looks at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ApplicationIdentifier {
-    /// The file name of the owning executable, for example `firefox.exe`.
+    /// The file name of the owning executable, for example `browser.exe`.
     Exe,
     /// The Win32 window class.
     Class,
@@ -53,7 +53,7 @@ pub enum MatchingStrategy {
     /// The identifier has to describe the whole value: it matches when it is
     /// equal to the value, or when it is a regular expression that matches the
     /// value from end to end. An identifier that carries regex punctuation but
-    /// was meant literally, like `EVERYTHING_(1.5a)`, therefore still matches.
+    /// was meant literally, like `LOOKUP_(1.5a)`, therefore still matches.
     #[default]
     Legacy,
     /// Exact. Byte exact for `Class` and `Title`, and case insensitive for
@@ -161,7 +161,7 @@ impl IdWithIdentifier {
             // means, and only then the anchored regular expression. A legacy
             // id that carries punctuation but was meant literally still
             // matches, which the other honest option, anchoring alone, would
-            // not do: `EVERYTHING_(1.5a)` anchored is still a capture group
+            // not do: `LOOKUP_(1.5a)` anchored is still a capture group
             // and a `.` that eats any character.
             MatchingStrategy::Legacy => {
                 value == id || (looks_like_regex(&self.id) && regex_matches(&self.pattern(), raw))
@@ -924,10 +924,10 @@ mod tests {
 
     fn code() -> WindowInfo<'static> {
         WindowInfo::new(
-            "README.md - Mochi - Visual Studio Code",
+            "README.md - Mochi - Editor",
             "Chrome_WidgetWin_1",
-            "Code.exe",
-            r"C:\Users\domin\AppData\Local\Programs\Microsoft VS Code\Code.exe",
+            "Editor.exe",
+            r"C:\Users\someone\AppData\Local\Programs\Editor\Editor.exe",
         )
     }
 
@@ -937,33 +937,33 @@ mod tests {
         let rule =
             |strategy, id: &str| IdWithIdentifier::new(ApplicationIdentifier::Exe, id, strategy);
 
-        assert!(rule(MatchingStrategy::Equals, "Code.exe").matches(&w));
+        assert!(rule(MatchingStrategy::Equals, "Editor.exe").matches(&w));
         // Changed behaviour: an Exe is a file name, so its case does not count.
-        assert!(rule(MatchingStrategy::Equals, "code.exe").matches(&w));
+        assert!(rule(MatchingStrategy::Equals, "editor.exe").matches(&w));
         assert!(rule(MatchingStrategy::DoesNotEqual, "notepad.exe").matches(&w));
-        assert!(rule(MatchingStrategy::StartsWith, "Code").matches(&w));
+        assert!(rule(MatchingStrategy::StartsWith, "Edit").matches(&w));
         assert!(rule(MatchingStrategy::DoesNotStartWith, "Vs").matches(&w));
         assert!(rule(MatchingStrategy::EndsWith, ".exe").matches(&w));
         assert!(rule(MatchingStrategy::DoesNotEndWith, ".dll").matches(&w));
-        assert!(rule(MatchingStrategy::Contains, "ode").matches(&w));
-        assert!(rule(MatchingStrategy::DoesNotContain, "firefox").matches(&w));
-        assert!(rule(MatchingStrategy::Regex, "^Code\\.exe$").matches(&w));
-        assert!(!rule(MatchingStrategy::Regex, "^firefox").matches(&w));
+        assert!(rule(MatchingStrategy::Contains, "dit").matches(&w));
+        assert!(rule(MatchingStrategy::DoesNotContain, "browser").matches(&w));
+        assert!(rule(MatchingStrategy::Regex, "^Editor\\.exe$").matches(&w));
+        assert!(!rule(MatchingStrategy::Regex, "^browser").matches(&w));
     }
 
     #[test]
     fn legacy_is_equals_for_a_plain_identifier() {
-        let w = WindowInfo::new("", "AbletonVstPlugClass", "", "");
+        let w = WindowInfo::new("", "SoundPlugClass", "", "");
         let plain = IdWithIdentifier::new(
             ApplicationIdentifier::Class,
-            "AbletonVstPlugClass",
+            "SoundPlugClass",
             MatchingStrategy::Legacy,
         );
         assert!(plain.matches(&w));
 
         let partial = IdWithIdentifier::new(
             ApplicationIdentifier::Class,
-            "Ableton",
+            "Sound",
             MatchingStrategy::Legacy,
         );
         assert!(
@@ -1010,32 +1010,32 @@ mod tests {
 
     #[test]
     fn composite_rules_need_every_condition() {
-        let ableton = MatchingRule::Composite(vec![
+        let studio = MatchingRule::Composite(vec![
             IdWithIdentifier::new(
                 ApplicationIdentifier::Class,
-                "Ableton Live Window Class",
+                "Sound Studio Window Class",
                 MatchingStrategy::Equals,
             ),
             IdWithIdentifier::new(
                 ApplicationIdentifier::Title,
-                "Ableton",
+                "Sound",
                 MatchingStrategy::DoesNotContain,
             ),
         ]);
-        assert!(ableton.matches(&WindowInfo::new(
+        assert!(studio.matches(&WindowInfo::new(
             "Plugin",
-            "Ableton Live Window Class",
+            "Sound Studio Window Class",
             "",
             ""
         )));
-        assert!(!ableton.matches(&WindowInfo::new(
-            "Ableton Live 12",
-            "Ableton Live Window Class",
+        assert!(!studio.matches(&WindowInfo::new(
+            "Sound Studio 12",
+            "Sound Studio Window Class",
             "",
             ""
         )));
-        assert!(!ableton.matches(&WindowInfo::new("Plugin", "Other", "", "")));
-        assert_eq!(ableton.conditions().len(), 2);
+        assert!(!studio.matches(&WindowInfo::new("Plugin", "Other", "", "")));
+        assert_eq!(studio.conditions().len(), 2);
         assert!(!MatchingRule::Composite(vec![]).matches(&code()));
     }
 
@@ -1052,22 +1052,22 @@ mod tests {
     #[test]
     fn the_users_ignore_rules_deserialise_verbatim() {
         let json = r#"[
-            { "kind": "Path", "id": "steamapps\\common", "matching_strategy": "Contains" },
-            { "kind": "Exe", "id": "wallpaper64.exe", "matching_strategy": "Equals" },
+            { "kind": "Path", "id": "games\\common", "matching_strategy": "Contains" },
+            { "kind": "Exe", "id": "backdrop64.exe", "matching_strategy": "Equals" },
             { "kind": "Title", "id": "[Pp]icture.in.[Pp]icture", "matching_strategy": "Regex" },
-            { "kind": "Title", "id": " - Peek", "matching_strategy": "EndsWith" }
+            { "kind": "Title", "id": " - Viewer", "matching_strategy": "EndsWith" }
         ]"#;
         let rules: Vec<MatchingRule> = serde_json::from_str(json).unwrap();
         assert_eq!(rules.len(), 4);
 
-        let steam = WindowInfo::new("Game", "", "game.exe", r"D:\steamapps\common\Game\game.exe");
-        assert!(matches_any(&rules, &steam));
+        let game = WindowInfo::new("Game", "", "game.exe", r"D:\games\common\Game\game.exe");
+        assert!(matches_any(&rules, &game));
 
-        let pip = WindowInfo::new("Picture-in-Picture", "", "firefox.exe", "");
+        let pip = WindowInfo::new("Picture-in-Picture", "", "browser.exe", "");
         assert!(matches_any(&rules, &pip));
 
-        let peek = WindowInfo::new("image.png - Peek", "", "Peek.exe", "");
-        assert!(matches_any(&rules, &peek));
+        let viewer = WindowInfo::new("image.png - Viewer", "", "Viewer.exe", "");
+        assert!(matches_any(&rules, &viewer));
 
         assert!(!matches_any(&rules, &code()));
         assert!(rules.iter().all(|r| r.validate().is_ok()));
@@ -1078,7 +1078,7 @@ mod tests {
         let mut sets = RuleSets::new();
         sets.ignore_rules.push(MatchingRule::simple(
             ApplicationIdentifier::Exe,
-            "zebar.exe",
+            "bar.exe",
             MatchingStrategy::Equals,
         ));
         sets.floating_applications.push(MatchingRule::simple(
@@ -1087,12 +1087,12 @@ mod tests {
             MatchingStrategy::Equals,
         ));
 
-        let zebar = WindowInfo::new("", "", "zebar.exe", "");
+        let bar = WindowInfo::new("", "", "bar.exe", "");
         let calc = WindowInfo::new("", "", "Calculator.exe", "");
-        assert_eq!(sets.decide(&zebar), RuleDecision::Ignore);
+        assert_eq!(sets.decide(&bar), RuleDecision::Ignore);
         assert_eq!(sets.decide(&calc), RuleDecision::Float);
         assert_eq!(sets.decide(&code()), RuleDecision::Tile);
-        assert!(sets.should_ignore(&zebar));
+        assert!(sets.should_ignore(&bar));
         assert!(sets.should_float(&calc));
         assert!(!sets.is_empty());
         assert_eq!(sets.len(), 2);
@@ -1161,24 +1161,24 @@ mod tests {
     fn loads_the_current_applications_json_shape() {
         let json = r#"{
             "$schema": "https://example.invalid/schema.json",
-            "1Password": {
-                "ignore": [{ "kind": "Exe", "id": "1Password.exe", "matching_strategy": "Equals" }]
+            "Vault": {
+                "ignore": [{ "kind": "Exe", "id": "Vault.exe", "matching_strategy": "Equals" }]
             },
-            "Ableton Live": {
+            "Sound Studio": {
                 "ignore": [
-                    { "kind": "Class", "id": "Vst3PlugWindow", "matching_strategy": "Legacy" },
+                    { "kind": "Class", "id": "AudioPlugWindow", "matching_strategy": "Legacy" },
                     [
-                        { "kind": "Class", "id": "Ableton Live Window Class", "matching_strategy": "Equals" },
-                        { "kind": "Title", "id": "Ableton", "matching_strategy": "DoesNotContain" }
+                        { "kind": "Class", "id": "Sound Studio Window Class", "matching_strategy": "Equals" },
+                        { "kind": "Title", "id": "Sound", "matching_strategy": "DoesNotContain" }
                     ]
                 ]
             },
-            "Android Studio": {
-                "object_name_change": [{ "kind": "Exe", "id": "studio64.exe", "matching_strategy": "Equals" }]
+            "Builder": {
+                "object_name_change": [{ "kind": "Exe", "id": "builder64.exe", "matching_strategy": "Equals" }]
             },
-            "Affinity Designer 2": {
-                "ignore": [{ "kind": "Exe", "id": "Designer.exe", "matching_strategy": "Equals" }],
-                "manage": [{ "kind": "Title", "id": "Affinity Designer 2", "matching_strategy": "Equals" }]
+            "Vector Suite 2": {
+                "ignore": [{ "kind": "Exe", "id": "Vector.exe", "matching_strategy": "Equals" }],
+                "manage": [{ "kind": "Title", "id": "Vector Suite 2", "matching_strategy": "Equals" }]
             },
             "Chat": {
                 "tray_and_multi_window": [{ "kind": "Exe", "id": "Chat.exe", "matching_strategy": "Equals" }],
@@ -1200,28 +1200,28 @@ mod tests {
         assert_eq!(sets.floating_applications.len(), 1);
         assert_eq!(sets.border_overflow_applications.len(), 1);
 
-        assert!(sets.should_ignore(&WindowInfo::new("", "", "1Password.exe", "")));
+        assert!(sets.should_ignore(&WindowInfo::new("", "", "Vault.exe", "")));
         assert!(sets.should_ignore(&WindowInfo::new(
             "Plugin",
-            "Ableton Live Window Class",
+            "Sound Studio Window Class",
             "",
             ""
         )));
         assert!(!sets.should_ignore(&WindowInfo::new(
-            "Ableton Live 12",
-            "Ableton Live Window Class",
+            "Sound Studio 12",
+            "Sound Studio Window Class",
             "",
             ""
         )));
-        assert!(sets.changes_object_name(&WindowInfo::new("", "", "studio64.exe", "")));
+        assert!(sets.changes_object_name(&WindowInfo::new("", "", "builder64.exe", "")));
     }
 
     #[test]
     fn loads_the_legacy_applications_json_shape() {
         let json = r#"[
             {
-                "name": "Firefox",
-                "identifier": { "kind": "Exe", "id": "firefox.exe", "matching_strategy": "Equals" },
+                "name": "Browser",
+                "identifier": { "kind": "Exe", "id": "browser.exe", "matching_strategy": "Equals" },
                 "options": ["object_name_change", "tray_and_multi_window"]
             },
             {
@@ -1339,41 +1339,41 @@ mod tests {
     // regressions
     // -----------------------------------------------------------------
 
-    /// The six entries of the user's `applications.json` that pair a broad
-    /// `ignore` with a narrow `manage`, copied verbatim.
+    /// Six community rule entries that pair a broad `ignore` with a narrow
+    /// `manage`, each with the shape of the entry that once lost its window.
     const RESCUED: &str = r#"{
-        "Affinity Designer 2": {
-            "ignore": [{ "kind": "Exe", "id": "Designer.exe", "matching_strategy": "Equals" }],
-            "manage": [{ "kind": "Title", "id": "Affinity Designer 2", "matching_strategy": "Equals" }]
+        "Vector Suite 2": {
+            "ignore": [{ "kind": "Exe", "id": "Vector.exe", "matching_strategy": "Equals" }],
+            "manage": [{ "kind": "Title", "id": "Vector Suite 2", "matching_strategy": "Equals" }]
         },
-        "Affinity Photo 2": {
-            "ignore": [{ "kind": "Exe", "id": "Photo.exe", "matching_strategy": "Equals" }],
-            "manage": [{ "kind": "Title", "id": "Affinity Photo 2", "matching_strategy": "Equals" }]
+        "Raster Suite 2": {
+            "ignore": [{ "kind": "Exe", "id": "Raster.exe", "matching_strategy": "Equals" }],
+            "manage": [{ "kind": "Title", "id": "Raster Suite 2", "matching_strategy": "Equals" }]
         },
-        "Affinity Publisher 2": {
-            "ignore": [{ "kind": "Exe", "id": "Publisher.exe", "matching_strategy": "Equals" }],
-            "manage": [{ "kind": "Title", "id": "Affinity Publisher 2", "matching_strategy": "Equals" }]
+        "Layout Suite 2": {
+            "ignore": [{ "kind": "Exe", "id": "Layout.exe", "matching_strategy": "Equals" }],
+            "manage": [{ "kind": "Title", "id": "Layout Suite 2", "matching_strategy": "Equals" }]
         },
-        "GOG Galaxy": {
+        "Game Hub": {
             "ignore": [{ "kind": "Class", "id": "Chrome_RenderWidgetHostHWND", "matching_strategy": "Legacy" }],
-            "manage": [{ "kind": "Exe", "id": "GalaxyClient.exe", "matching_strategy": "Equals" }],
-            "tray_and_multi_window": [{ "kind": "Exe", "id": "GalaxyClient.exe", "matching_strategy": "Equals" }]
+            "manage": [{ "kind": "Exe", "id": "HubClient.exe", "matching_strategy": "Equals" }],
+            "tray_and_multi_window": [{ "kind": "Exe", "id": "HubClient.exe", "matching_strategy": "Equals" }]
         },
-        "visio": {
+        "diagram": {
             "ignore": [
-                { "kind": "Class", "id": "VISIOS", "matching_strategy": "Equals" },
-                { "kind": "Class", "id": "VISIOQ", "matching_strategy": "Equals" }
+                { "kind": "Class", "id": "DIAGRAMS", "matching_strategy": "Equals" },
+                { "kind": "Class", "id": "DIAGRAMQ", "matching_strategy": "Equals" }
             ],
-            "manage": [{ "kind": "Class", "id": "VISIOA", "matching_strategy": "Equals" }]
+            "manage": [{ "kind": "Class", "id": "DIAGRAMA", "matching_strategy": "Equals" }]
         },
-        "WeChat": {
+        "Messenger": {
             "ignore": [
-                { "kind": "Class", "id": "WeChatLoginWndForPC", "matching_strategy": "Equals" },
+                { "kind": "Class", "id": "MessengerLoginWndForPC", "matching_strategy": "Equals" },
                 { "kind": "Class", "id": "ChatWnd", "matching_strategy": "Equals" },
-                { "kind": "Exe", "id": "WeChatAppEx.exe", "matching_strategy": "Equals" }
+                { "kind": "Exe", "id": "MessengerAppEx.exe", "matching_strategy": "Equals" }
             ],
-            "manage": [{ "kind": "Class", "id": "WeChatMainWndForPC", "matching_strategy": "Equals" }],
-            "tray_and_multi_window": [{ "kind": "Class", "id": "WeChatMainWndForPC", "matching_strategy": "Equals" }]
+            "manage": [{ "kind": "Class", "id": "MessengerMainWndForPC", "matching_strategy": "Equals" }],
+            "tray_and_multi_window": [{ "kind": "Class", "id": "MessengerMainWndForPC", "matching_strategy": "Equals" }]
         }
     }"#;
 
@@ -1381,57 +1381,57 @@ mod tests {
     fn rescued_main_windows() -> Vec<(&'static str, WindowInfo<'static>)> {
         vec![
             (
-                "Affinity Designer 2",
+                "Vector Suite 2",
                 WindowInfo::new(
-                    "Affinity Designer 2",
+                    "Vector Suite 2",
                     "Qt5152QWindowIcon",
-                    "Designer.exe",
-                    r"C:\Program Files\Affinity\Designer 2\Designer.exe",
+                    "Vector.exe",
+                    r"C:\Program Files\Suite\Vector 2\Vector.exe",
                 ),
             ),
             (
-                "Affinity Photo 2",
+                "Raster Suite 2",
                 WindowInfo::new(
-                    "Affinity Photo 2",
+                    "Raster Suite 2",
                     "Qt5152QWindowIcon",
-                    "Photo.exe",
-                    r"C:\Program Files\Affinity\Photo 2\Photo.exe",
+                    "Raster.exe",
+                    r"C:\Program Files\Suite\Raster 2\Raster.exe",
                 ),
             ),
             (
-                "Affinity Publisher 2",
+                "Layout Suite 2",
                 WindowInfo::new(
-                    "Affinity Publisher 2",
+                    "Layout Suite 2",
                     "Qt5152QWindowIcon",
-                    "Publisher.exe",
-                    r"C:\Program Files\Affinity\Publisher 2\Publisher.exe",
+                    "Layout.exe",
+                    r"C:\Program Files\Suite\Layout 2\Layout.exe",
                 ),
             ),
             (
-                "GOG Galaxy",
+                "Game Hub",
                 WindowInfo::new(
-                    "GOG GALAXY",
+                    "GAME HUB",
                     "Chrome_RenderWidgetHostHWND",
-                    "GalaxyClient.exe",
-                    r"C:\Program Files (x86)\GOG Galaxy\GalaxyClient.exe",
+                    "HubClient.exe",
+                    r"C:\Program Files (x86)\Game Hub\HubClient.exe",
                 ),
             ),
             (
-                "visio",
+                "diagram",
                 WindowInfo::new(
-                    "Drawing1 - Visio",
-                    "VISIOA",
-                    "VISIO.EXE",
-                    r"C:\Program Files\Microsoft Office\root\Office16\VISIO.EXE",
+                    "Drawing1 - Diagram",
+                    "DIAGRAMA",
+                    "DIAGRAM.EXE",
+                    r"C:\Program Files\Office Suite\root\Office16\DIAGRAM.EXE",
                 ),
             ),
             (
-                "WeChat",
+                "Messenger",
                 WindowInfo::new(
-                    "WeChat",
-                    "WeChatMainWndForPC",
-                    "WeChat.exe",
-                    r"C:\Program Files\Tencent\WeChat\WeChat.exe",
+                    "Messenger",
+                    "MessengerMainWndForPC",
+                    "Messenger.exe",
+                    r"C:\Program Files\Messenger\Messenger.exe",
                 ),
             ),
         ]
@@ -1445,15 +1445,15 @@ mod tests {
         // also let a stranger's file cancel the line the user wrote to keep a
         // game off the tiling grid.
         let game = WindowInfo {
-            exe: "StarRail.exe",
-            class: "UnityWndClass",
-            title: "Honkai: Star Rail",
-            path: r"C:\Games\StarRail\StarRail.exe",
+            exe: "Voyage.exe",
+            class: "EngineWndClass",
+            title: "Voyage: Far Shore",
+            path: r"C:\Games\Voyage\Voyage.exe",
         };
 
         let community = MatchingRule::simple(
             ApplicationIdentifier::Exe,
-            "StarRail.exe".to_owned(),
+            "Voyage.exe".to_owned(),
             MatchingStrategy::Equals,
         );
 
@@ -1462,7 +1462,7 @@ mod tests {
         let mut rules = RuleSets::new();
         rules.ignore_rules.push(MatchingRule::simple(
             ApplicationIdentifier::Class,
-            "UnityWndClass".to_owned(),
+            "EngineWndClass".to_owned(),
             MatchingStrategy::Equals,
         ));
         rules.manage_rules.push(community.clone());
@@ -1525,31 +1525,31 @@ mod tests {
         }
 
         // The same file, the same two rules, the other two defects: a legacy id
-        // with literal parentheses, and an exe spelled `StarRail.Exe`.
-        let everything = WindowInfo::new("Everything", "EVERYTHING_(1.5a)", "Everything.exe", "");
-        assert!(sets.should_manage(&everything));
-        assert!(sets.is_tray_or_multi_window(&everything));
+        // with literal parentheses, and an exe spelled `Voyage.Exe`.
+        let lookup = WindowInfo::new("Lookup", "LOOKUP_(1.5a)", "Lookup.exe", "");
+        assert!(sets.should_manage(&lookup));
+        assert!(sets.is_tray_or_multi_window(&lookup));
         assert!(sets.should_manage(&WindowInfo::new(
-            "Honkai: Star Rail",
-            "UnityWndClass",
-            "StarRail.exe",
+            "Voyage: Far Shore",
+            "EngineWndClass",
+            "Voyage.exe",
             ""
         )));
     }
 
     #[test]
     fn a_legacy_id_with_literal_parentheses_matches_the_real_window_class() {
-        let everything = IdWithIdentifier::new(
+        let lookup = IdWithIdentifier::new(
             ApplicationIdentifier::Class,
-            "EVERYTHING_(1.5a)",
+            "LOOKUP_(1.5a)",
             MatchingStrategy::Legacy,
         );
         assert!(
-            everything.matches(&WindowInfo::new("Everything", "EVERYTHING_(1.5a)", "", "")),
+            lookup.matches(&WindowInfo::new("Lookup", "LOOKUP_(1.5a)", "", "")),
             "the real class, with the parentheses in it"
         );
         assert!(
-            !everything.matches(&WindowInfo::new("Everything", "EVERYTHING_", "", "")),
+            !lookup.matches(&WindowInfo::new("Lookup", "LOOKUP_", "", "")),
             "and not every class that starts like it"
         );
 
@@ -1560,11 +1560,11 @@ mod tests {
         );
         assert!(android.matches(&WindowInfo::new("", "android(splash)", "", "")));
 
-        // A legacy id stays ambiguous on purpose: `EVERYTHING_(1.5a)` read as a
-        // regular expression also matches `EVERYTHING_1x5a`, and a rule file
+        // A legacy id stays ambiguous on purpose: `LOOKUP_(1.5a)` read as a
+        // regular expression also matches `LOOKUP_1x5a`, and a rule file
         // that meant the pattern keeps working. No such class exists; the class
         // that does exist is the one that used to be missed.
-        assert!(everything.matches(&WindowInfo::new("", "EVERYTHING_1x5a", "", "")));
+        assert!(lookup.matches(&WindowInfo::new("", "LOOKUP_1x5a", "", "")));
     }
 
     #[test]
@@ -1624,24 +1624,24 @@ mod tests {
         let exe = |id: &str, strategy| {
             IdWithIdentifier::new(ApplicationIdentifier::Exe, id, strategy).matches(&w)
         };
-        assert!(exe("code.exe", MatchingStrategy::Equals));
-        assert!(exe("CODE.EXE", MatchingStrategy::Legacy));
-        assert!(exe("code", MatchingStrategy::StartsWith));
+        assert!(exe("editor.exe", MatchingStrategy::Equals));
+        assert!(exe("EDITOR.EXE", MatchingStrategy::Legacy));
+        assert!(exe("editor", MatchingStrategy::StartsWith));
         assert!(exe(".EXE", MatchingStrategy::EndsWith));
-        assert!(exe("ODE", MatchingStrategy::Contains));
-        assert!(exe("^code\\.exe$", MatchingStrategy::Regex));
-        assert!(!exe("code.exe", MatchingStrategy::DoesNotEqual));
+        assert!(exe("DIT", MatchingStrategy::Contains));
+        assert!(exe("^editor\\.exe$", MatchingStrategy::Regex));
+        assert!(!exe("editor.exe", MatchingStrategy::DoesNotEqual));
 
         let path = |id: &str, strategy| {
             IdWithIdentifier::new(ApplicationIdentifier::Path, id, strategy).matches(&w)
         };
-        assert!(path(r"c:\users\domin", MatchingStrategy::StartsWith));
-        assert!(path("microsoft vs code", MatchingStrategy::Contains));
+        assert!(path(r"c:\users\someone", MatchingStrategy::StartsWith));
+        assert!(path(r"programs\editor", MatchingStrategy::Contains));
 
         // Class and Title stay byte exact: they are content, not file names.
         let title = IdWithIdentifier::new(
             ApplicationIdentifier::Title,
-            "readme.md - mochi - visual studio code",
+            "readme.md - mochi - editor",
             MatchingStrategy::Equals,
         );
         assert!(!title.matches(&w));
@@ -1668,7 +1668,7 @@ mod tests {
         ));
         let keeper = MatchingRule::simple(
             ApplicationIdentifier::Exe,
-            "zebar.exe",
+            "bar.exe",
             MatchingStrategy::Equals,
         );
         sets.ignore_rules.push(keeper.clone());
@@ -1697,8 +1697,8 @@ mod tests {
             "Calculator": {
                 "floating_applications": [{ "kind": "Exe", "id": "Calculator.exe", "matching_strategy": "Equals" }]
             },
-            "Steam": {
-                "ignore": [{ "kind": "Exe", "id": "steam.exe", "matching_strategy": "Equals" }]
+            "Launcher": {
+                "ignore": [{ "kind": "Exe", "id": "launcher.exe", "matching_strategy": "Equals" }]
             },
             "Nonsense": 5
         }"#;
@@ -1723,8 +1723,8 @@ mod tests {
 
     #[test]
     fn app_rules_saved_with_a_byte_order_mark_load() {
-        let json = "\u{feff}{\"Steam\": {\"ignore\": \
-                    [{\"kind\": \"Exe\", \"id\": \"steam.exe\", \"matching_strategy\": \"Equals\"}]}}";
+        let json = "\u{feff}{\"Launcher\": {\"ignore\": \
+                    [{\"kind\": \"Exe\", \"id\": \"launcher.exe\", \"matching_strategy\": \"Equals\"}]}}";
         let (sets, warnings) =
             load_app_specific_configuration_reporting_unknown_keys(json).unwrap();
         assert_eq!(sets.ignore_rules.len(), 1);
@@ -1760,7 +1760,7 @@ mod tests {
         // rule written for that very game could never fire.
         let protected = WindowInfo {
             exe: "",
-            class: "UnityWndClass",
+            class: "EngineWndClass",
             title: "Some Game",
             path: "",
         };

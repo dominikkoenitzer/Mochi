@@ -667,7 +667,7 @@ mod tests {
         // The other half, and why the check is on the exact alpha rather than
         // on the style: this window is layered at an alpha that is not ours, so
         // it belongs to whatever drew it. Adopting it would mean taking the
-        // style off something that needs it. An NVIDIA overlay sits at alpha 0
+        // style off something that needs it. A graphics driver overlay sits at alpha 0
         // for exactly this reason.
         let fake = Fake::default();
         fake.strand(B, 0);

@@ -246,8 +246,8 @@ mod tests {
                 rect: Rect::new(400, 400, 1600, 900),
                 above: WindowHandle::NONE,
                 tabs: vec![
-                    StackbarTab::new(WindowHandle(1), "firefox", true),
-                    StackbarTab::new(WindowHandle(2), "Code", false),
+                    StackbarTab::new(WindowHandle(1), "browser", true),
+                    StackbarTab::new(WindowHandle(2), "Editor", false),
                     StackbarTab::new(WindowHandle(3), "WindowsTerminal", false),
                 ],
             }])

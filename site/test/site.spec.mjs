@@ -40,7 +40,7 @@ function stableAsset(url) {
 
 // Records what a visitor would see go wrong, and keeps every request on this machine.
 // Warnings the browser itself prints about the panel's probes, let through on /diag only: a test machine
-// has no graphics card, so the graphics probes fail, and Firefox notes that its fingerprinting protection
+// has no graphics card, so the graphics probes fail, and one engine notes that its fingerprinting protection
 // changes the screen size the panel reads.
 const PROBE_WARNINGS = [
   /^No available adapters\.$/,

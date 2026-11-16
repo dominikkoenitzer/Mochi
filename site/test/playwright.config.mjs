@@ -22,7 +22,7 @@ export default defineConfig({
   workers: process.env.CI ? 4 : 2,
   reporter: process.env.CI ? [["list"], ["html", { outputFolder: "report", open: "never" }]] : [["list"]],
   expect: {
-    // A first screenshot needs two matching captures, and WebKit on a CI runner takes longer than the
+    // A first screenshot needs two matching captures, and the slowest engine on a CI runner takes longer than the
     // five second default for a tall phone page, so a screenshot may use the whole test's time.
     toHaveScreenshot: { animations: "disabled", scale: "css", maxDiffPixelRatio: 0.01, timeout: TEST_TIMEOUT },
   },
