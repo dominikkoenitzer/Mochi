@@ -17,6 +17,38 @@ Scripts and other programs can give `state`, `query`, `check`, `schema`,
 `doctor`, `why` and `hotkeys` the `--json` flag and read one JSON document
 instead of text. [json-output.md](json-output.md) lists every field.
 
+## Running it from a terminal
+
+`mochic stop` puts every window it was hiding back on screen, takes the borders
+down, restores transparency and unbinds the keys. The windows keep the size and
+place of their last tile. Nothing is left off screen even if Mochi is killed
+outright: every window taken off screen is written down first, and the next
+start puts back anything the record still owes. While it is running,
+`mochic restore-windows` puts back any window that is off screen with nothing
+in Mochi's state to explain it; the windows of hidden workspaces stay hidden.
+
+Mochi runs as a normal user and wants no admin rights. Windows therefore will
+not let it move a window that belongs to a program running as administrator. It
+notices, says so once in the log, and leaves that window alone instead of
+tiling around a hole it cannot fill. To tile those windows too, set
+`"elevated": true` in `mochi.json`: `mochic start` then starts the daemon as
+administrator after the usual Windows prompt, once per start and so at every
+logon. Declining the prompt starts Mochi with normal rights as before. The
+details are under `elevated` in [docs/configuration.md](configuration.md).
+
+When a window is not being tiled and it is not obvious why, ask:
+
+```
+mochic why
+```
+
+It explains what Mochi makes of the window in front and what can be done about
+it, in plain words. Every answer names either a fix or the reason there is
+nothing to fix.
+
+The log is in `%LOCALAPPDATA%\mochi`, one `mochi.log.<date>` file per day, and
+the last 14 days are kept.
+
 ## Focus
 
 | Command | Arguments | Does |

@@ -5,6 +5,13 @@ tiling window managers on Windows, so moving a working setup over is mechanical.
 Nothing here changes a file of your current setup: the scripts write new files
 next to the old ones and the switch is reversible.
 
+Config keys, command names and the hotkey file format follow the common tiling
+window manager conventions, so an existing JSON config and hotkey file carry over
+with a rename. Given the old config file, the old hotkey file and the old
+command name, `scripts\import-config.ps1` shows the diff, and `-Apply` writes
+the new files next to the old ones. Nothing the old setup owns is changed, and
+two commands switch back at any time.
+
 ## What maps to what
 
 | your current tiling window manager | Mochi |
