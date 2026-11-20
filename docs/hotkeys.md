@@ -5,6 +5,38 @@ alive, and a bound key does not spawn anything: the press is matched inside the
 daemon and turned straight into the command, so it acts on the frame it was
 pressed.
 
+The file lives at `%USERPROFILE%\.config\mochi\hotkeys` and is reloaded the
+moment it is saved. Each line is a key, a colon and a `mochic` command without
+the `mochic`; a line that does not start with a Mochi command is run by the
+shell:
+
+```
+alt + h                 : focus left
+alt + shift + q         : close
+alt + shift + e         : stop
+```
+
+`Pause` turns tiling off and on. Off means Mochi stops touching windows and
+leaves them exactly where they are; on puts them back in their tiles. The daemon
+keeps running either way, which is why the key still works while it is off.
+`alt + f12` does the same on a keyboard with no Pause key.
+
+`alt + shift + e` is the way out for good. It stops Mochi, puts every window it
+was hiding back, takes the borders down and unbinds the keys. Nothing about the
+desktop is left changed.
+
+`alt` plus an arrow is deliberately left alone. `alt + left` and `alt + right`
+are Back and Forward in every browser, and `alt + up` is the parent folder in
+Explorer; a window manager that binds them takes those away everywhere with
+nothing on screen to say why. The shipped file says how to add them if you
+would rather have them.
+
+`mochic hotkeys` prints what Mochi made of the file. Game mode, on
+`alt + shift + g`, pauses tiling and suspends every binding except the one that
+turns it off again, so the game in front gets the whole keyboard. A `mode`
+block holds keys that only work while that mode is on: `alt + shift + s` enters
+the shipped resize mode, where `h`, `j`, `k` and `l` resize and `Esc` leaves.
+
 ## The file you start with
 
 `mochic quickstart` writes a hotkey file when there is none, and the install

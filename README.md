@@ -5,6 +5,8 @@
 A tiling window manager for Windows, written in Rust: it arranges every open
 window into tiles that you focus, move and resize from the keyboard.
 
+<img src="site/img/hero.webp" width="720" alt="Four windows tiled side by side by Mochi, the focused one with a pink border">
+
 ## Download
 
 [Download Mochi](https://mochi.punds.ch),
@@ -19,7 +21,10 @@ puts every window back. To start it again, open Mochi from the Start menu or run
 Windows may say "Windows protected your PC"; click More info, then Run anyway.
 No admin rights are needed. Setup installs Mochi for your user and starts it,
 now and at every login. The PowerShell line and the zip are under
-[Other ways to install](#other-ways-to-install).
+[Other ways to install](docs/install.md).
+
+To update, download and open `Mochi-Setup.exe` again. It stops the running
+Mochi first and leaves your settings and hotkeys alone.
 
 ## What it does
 
@@ -52,7 +57,7 @@ The keys the default hotkey file binds:
 | `Pause` or `alt + f12` | Turn tiling off and on |
 | `alt + shift + e` | Stop Mochi and put every window back |
 
-The rest of the file and how to change it are under [Hotkeys](#hotkeys).
+The rest of the file and how to change it are under [Hotkeys](docs/hotkeys.md).
 
 ## Use it with an AI assistant
 
@@ -92,140 +97,6 @@ Without MCP, call `mochic` itself: every command that reports something takes
 `--json` and prints one JSON document, on success and on failure, as
 [docs/json-output.md](docs/json-output.md) describes.
 
-## Your data, updates and removal
-
-Mochi makes no network connection and keeps everything on your PC:
-
-| What | Where |
-|---|---|
-| `mochi.exe` and `mochic.exe` | `%LOCALAPPDATA%\Programs\Mochi\bin`, added to your user PATH |
-| The copy of `Mochi-Setup.exe` that removes Mochi | `%LOCALAPPDATA%\Programs\Mochi` |
-| Settings | `%USERPROFILE%\mochi.json` |
-| Hotkeys | `%USERPROFILE%\.config\mochi\hotkeys` |
-| The log, and the record of windows Mochi has taken off screen | `%LOCALAPPDATA%\mochi` |
-| The start at login | the HKCU Run value `Mochi` |
-
-Setup writes a default `mochi.json` and hotkey file only when there are none,
-and never overwrites yours. A terminal that was already open does not see the
-new PATH: open a new one before you type `mochic`, or it answers that `mochic`
-is not recognized, which reads like the install failed when it did not.
-
-To update, download and open `Mochi-Setup.exe` again. It stops the running
-Mochi first and leaves your settings and hotkeys alone.
-
-To remove Mochi, open Settings, Apps, Installed apps, and uninstall Mochi. It
-removes the login start and the watchdog task if there is one, stops Mochi,
-which puts every window back, and then removes the Start menu entry, the
-program files, the PATH entry and the Apps & features entry. Your settings, hotkeys and log stay.
-To remove those too, delete `%USERPROFILE%\mochi.json`,
-`%USERPROFILE%\.config\mochi` and `%LOCALAPPDATA%\mochi` afterwards.
-
-## Other ways to install
-
-### Quiet install
-
-`Mochi-Setup.exe --quiet` installs without asking, and
-`Mochi-Setup.exe --uninstall --quiet` removes Mochi the same way. Both exit with
-0 when everything worked. Setup is a windowed program, so a script that needs
-the exit code starts it with `Start-Process -Wait -PassThru`.
-
-### PowerShell
-
-For a scripted install, open PowerShell (Start menu, type PowerShell, Enter) and
-paste this line:
-
-```
-irm https://mochi.punds.ch/install.ps1 | iex
-```
-
-It works in Windows PowerShell 5.1 and PowerShell 7. It downloads the
-[latest release](https://github.com/dominikkoenitzer/Mochi/releases/latest),
-checks its SHA256 and installs the same way Setup does: the same folder, PATH
-entry, default files, login start and Start menu entry, and then it starts
-Mochi right away, which tiles every window on screen. It adds no Apps & features
-entry; `-Uninstall` below removes what it installed.
-
-The same line in this form takes switches:
-
-```
-& ([scriptblock]::Create((irm https://mochi.punds.ch/install.ps1))) -SkipStart -SkipAutostart
-```
-
-`-SkipStart` installs without starting Mochi now. `-SkipAutostart` does not
-register the login start. `-Version v0.1.32` installs that release instead of
-the latest. `-SkipPath` leaves your PATH alone, and `-SkipQuickstart` does not
-write the default `mochi.json` and hotkey file. `-Uninstall` removes Mochi the
-way the Apps & features entry does.
-
-To update this way, run the line again. It refuses while Mochi is running, so
-stop Mochi first with `alt + shift + e` or `mochic stop`.
-
-### Zip
-
-Every release also carries `Mochi-x86_64-pc-windows-msvc.zip` with `mochi.exe`,
-`mochic.exe` and `mochi.schema.json`, and a `.sha256` file beside it. Unpack it
-anywhere and run `mochic start`, which starts the `mochi.exe` next to it.
-Nothing is registered: no PATH entry, no login start, no Start menu entry.
-
-### Watchdog
-
-The Run value only fires at login, so a daemon that stops during the day leaves
-the desktop untiled until the next one. `scripts\autostart.ps1` can register a
-task that asks every five minutes whether Mochi is up, and starts it when it is
-not. When Mochi is already up, `mochic start` only says so, which makes the
-check cheap. The script needs a clone of the repository (see
-[Build from source](#build-from-source)), not a build:
-
-```
-powershell -ExecutionPolicy Bypass -File .\scripts\autostart.ps1 -Watchdog
-```
-
-With the watchdog on, `alt + shift + e` stops Mochi only until the next check:
-the task starts it again within five minutes. `-Disable` removes the watchdog
-along with the Run value, and that is the way out for good. Without a switch the
-script shows what is registered today, and `-DisableStartupItem <name>` moves
-another program's startup item aside until `-EnableStartupItem <name>` puts it
-back.
-
-## Hotkeys
-
-Mochi binds keys itself, in process. There is no second program to install and
-no subprocess per key press.
-
-The file lives at `%USERPROFILE%\.config\mochi\hotkeys` and is reloaded the
-moment it is saved. Each line is a key, a colon and a `mochic` command without
-the `mochic`; a line that does not start with a Mochi command is run by the
-shell:
-
-```
-alt + h                 : focus left
-alt + shift + q         : close
-alt + shift + e         : stop
-```
-
-`Pause` turns tiling off and on. Off means Mochi stops touching windows and
-leaves them exactly where they are; on puts them back in their tiles. The daemon
-keeps running either way, which is why the key still works while it is off.
-`alt + f12` does the same on a keyboard with no Pause key.
-
-`alt + shift + e` is the way out for good. It stops Mochi, puts every window it
-was hiding back, takes the borders down and unbinds the keys. Nothing about the
-desktop is left changed.
-
-`alt` plus an arrow is deliberately left alone. `alt + left` and `alt + right`
-are Back and Forward in every browser, and `alt + up` is the parent folder in
-Explorer; a window manager that binds them takes those away everywhere with
-nothing on screen to say why. The shipped file says how to add them if you
-would rather have them.
-
-`mochic hotkeys` prints what Mochi made of the file. Game mode, on
-`alt + shift + g`, pauses tiling and suspends every binding except the one that
-turns it off again, so the game in front gets the whole keyboard. A `mode`
-block holds keys that only work while that mode is on: `alt + shift + s` enters
-the shipped resize mode, where `h`, `j`, `k` and `l` resize and `Esc` leaves.
-
-The full reference is [docs/hotkeys.md](docs/hotkeys.md).
-
 ## Running it from a terminal
 
 Look before you leap. A dry run reads the desktop and changes nothing on it: no
@@ -246,58 +117,7 @@ mochic start
 mochic stop
 ```
 
-`mochic stop` puts every window it was hiding back on screen, takes the borders
-down, restores transparency and unbinds the keys. The windows keep the size and
-place of their last tile. Nothing is left off screen even if Mochi is killed
-outright: every window taken off screen is written down first, and the next
-start puts back anything the record still owes. While it is running,
-`mochic restore-windows` puts back any window that is off screen with nothing
-in Mochi's state to explain it; the windows of hidden workspaces stay hidden.
-
-Mochi runs as a normal user and wants no admin rights. Windows therefore will
-not let it move a window that belongs to a program running as administrator. It
-notices, says so once in the log, and leaves that window alone instead of
-tiling around a hole it cannot fill. To tile those windows too, set
-`"elevated": true` in `mochi.json`: `mochic start` then starts the daemon as
-administrator after the usual Windows prompt, once per start and so at every
-logon. Declining the prompt starts Mochi with normal rights as before. The
-details are under `elevated` in [docs/configuration.md](docs/configuration.md).
-
-When a window is not being tiled and it is not obvious why, ask:
-
-```
-mochic why
-```
-
-It explains what Mochi makes of the window in front and what can be done about
-it, in plain words. Every answer names either a fix or the reason there is
-nothing to fix.
-
-The log is in `%LOCALAPPDATA%\mochi`, one `mochi.log.<date>` file per day, and
-the last 14 days are kept.
-
-## Importing an existing setup
-
-Config keys, command names and the hotkey file format follow the common tiling
-window manager conventions, so an existing JSON config and hotkey file carry over
-with a rename. Given the old config file, the old hotkey file and the old
-command name, `scripts\import-config.ps1` shows the diff, and `-Apply` writes
-the new files next to the old ones. Nothing the old setup owns is changed, and
-two commands switch back at any time.
-
-The whole path is in [docs/import.md](docs/import.md).
-
-## Status
-
-All six milestones in [PLAN.md](PLAN.md) are done. The test suite drives
-throwaway windows and injects real key presses on a real desktop, and CI runs
-it: the end to end job fails if those tests skip, because a test that returns
-early still reports as passed.
-
-Cross monitor moves and an unplugged screen have only run against a simulated
-second monitor so far, and still need real hardware. Supervised use on a real
-desktop has already found one defect no test could have, a hidden window that
-could be forgotten without being shown again; it is fixed and covered by a test.
+More in [docs/cli.md](docs/cli.md#running-it-from-a-terminal).
 
 ## Build from source
 
@@ -355,7 +175,7 @@ marked as coming from the internet. Without it the script fails before it
 prints anything, with "running scripts is disabled on this system" or "is not
 digitally signed". It changes no setting on the machine, and the same goes for
 the other scripts in `scripts\`. The PowerShell line under
-[Other ways to install](#powershell) is not affected by execution policy,
+[Other ways to install](docs/install.md#powershell) is not affected by execution policy,
 because it never runs a script file.
 
 ### Tests
@@ -394,6 +214,8 @@ cargo test --locked -p mochi-core -p mochi-hotkey -p mochi-render -p mochi-clien
 - [docs/mcp.md](docs/mcp.md): the MCP server's tools
 - [docs/ipc.md](docs/ipc.md): the pipe protocol between `mochic` and the daemon
 - [docs/import.md](docs/import.md): moving an existing setup over
+- [docs/install.md](docs/install.md): other ways to install, your data and removing Mochi
+- [docs/status.md](docs/status.md): what is done and what still needs real hardware
 - [PLAN.md](PLAN.md): decisions, architecture and milestones
 
 ## License
