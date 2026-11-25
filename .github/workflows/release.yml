@@ -223,7 +223,7 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: ${{ inputs.tag || github.ref_name }}
-          body: "Download and install Mochi from https://mochi.punds.ch."
+          body: "Download and install Mochi from https://portfolio-izanagi.vercel.app/projects/mochi."
           generate_release_notes: false
           files: |
             dist/Mochi-Setup.exe

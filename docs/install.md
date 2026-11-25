@@ -13,7 +13,7 @@ For a scripted install, open PowerShell (Start menu, type PowerShell, Enter) and
 paste this line:
 
 ```
-irm https://mochi.punds.ch/install.ps1 | iex
+irm https://get-mochi.vercel.app/install.ps1 | iex
 ```
 
 It works in Windows PowerShell 5.1 and PowerShell 7. It downloads the
@@ -26,7 +26,7 @@ entry; `-Uninstall` below removes what it installed.
 The same line in this form takes switches:
 
 ```
-& ([scriptblock]::Create((irm https://mochi.punds.ch/install.ps1))) -SkipStart -SkipAutostart
+& ([scriptblock]::Create((irm https://get-mochi.vercel.app/install.ps1))) -SkipStart -SkipAutostart
 ```
 
 `-SkipStart` installs without starting Mochi now. `-SkipAutostart` does not

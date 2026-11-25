@@ -9,7 +9,7 @@ window into tiles that you focus, move and resize from the keyboard.
 
 ## Download
 
-[Download Mochi](https://mochi.punds.ch),
+[Download Mochi](https://portfolio-izanagi.vercel.app/projects/mochi),
 then double-click it.
 
 Know the way out before you click Install. The moment Mochi starts, every window
