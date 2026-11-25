@@ -2534,7 +2534,7 @@ mod tests {
     fn the_quickstart_stub_is_valid_json() {
         let value: serde_json::Value = serde_json::from_str(default_config()).unwrap();
         assert!(value.is_object());
-        assert_eq!(value["$schema"], "https://mochi.punds.ch/schema.json");
+        assert_eq!(value["$schema"], "https://get-mochi.vercel.app/schema.json");
     }
 
     /// Runs `quickstart` against a profile folder and the two variables.

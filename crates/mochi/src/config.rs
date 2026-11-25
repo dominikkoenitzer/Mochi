@@ -504,7 +504,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(DEFAULT_CONFIG).unwrap();
         assert!(value.is_object());
         assert!(value.get("monitors").is_some());
-        assert_eq!(value["$schema"], "https://mochi.punds.ch/schema.json");
+        assert_eq!(value["$schema"], "https://get-mochi.vercel.app/schema.json");
     }
 
     #[test]

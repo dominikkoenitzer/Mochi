@@ -24,7 +24,7 @@ use crate::rules::{MatchingRule, RuleSets};
 /// The starting `mochi.json` a quickstart writes, whether `mochic` or the
 /// daemon is asked for it. Kept minimal: every key left out has its default.
 pub const QUICKSTART: &str = r#"{
-  "$schema": "https://mochi.punds.ch/schema.json",
+  "$schema": "https://get-mochi.vercel.app/schema.json",
   "window_hiding_behaviour": "Cloak",
   "default_workspace_padding": 10,
   "default_container_padding": 10,

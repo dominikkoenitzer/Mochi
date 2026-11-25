@@ -9,7 +9,7 @@ use crate::plan::{self, Layout, Mode, Options, RunAction};
 use crate::win;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const DOWNLOAD: &str = "https://mochi.punds.ch/download/windows";
+const DOWNLOAD: &str = "https://get-mochi.vercel.app/download/windows";
 const WAY_OUT: &str = "Pause (or alt + f12) turns tiling off and on, alt + shift + e stops Mochi and puts every window back.";
 const RUN_BACKUP: &str = "RunBackup_Mochi";
 
