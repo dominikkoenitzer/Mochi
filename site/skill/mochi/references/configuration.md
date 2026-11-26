@@ -12,7 +12,7 @@ Mochi reads one JSON file. It takes the first of these that applies:
 
 ```json
 {
-  "$schema": "https://get-mochi.vercel.app/schema.json",
+  "$schema": "https://portfolio-izanagi.vercel.app/get/mochi/schema.json",
   "window_hiding_behaviour": "Cloak",
   "default_workspace_padding": 10,
   "default_container_padding": 10,
@@ -26,7 +26,7 @@ Every key is optional and has a default. The file must be a JSON object.
 
 - Keys are `snake_case`.
 - Enum values in the file are `PascalCase`: `"BSP"`, `"EaseOutQuad"`, `"Equals"`. On the `mochic` command line the same values are kebab-case: `bsp`, `ease-out-quad`, `equals`.
-- `$schema` is only read by editors. Point it at `/schema.json` on the download site, or write a local copy with `mochic schema --output mochi.schema.json` and point at that. Use `--output`, not `>`: Windows PowerShell 5.1 writes a redirect as UTF-16, which is not valid JSON.
+- `$schema` is only read by editors. Point it at `https://portfolio-izanagi.vercel.app/get/mochi/schema.json`, or write a local copy with `mochic schema --output mochi.schema.json` and point at that. Use `--output`, not `>`: Windows PowerShell 5.1 writes a redirect as UTF-16, which is not valid JSON.
 
 ## Validate and reload
 
@@ -209,7 +209,7 @@ A window kept out of the layout and shown with one command, `mochic toggle-scrat
 
 ```json
 {
-  "$schema": "https://get-mochi.vercel.app/schema.json",
+  "$schema": "https://portfolio-izanagi.vercel.app/get/mochi/schema.json",
   "window_hiding_behaviour": "Cloak",
   "default_workspace_padding": 10,
   "default_container_padding": 10,

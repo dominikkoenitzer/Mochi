@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Without a checkout, for example run as
-        irm https://get-mochi.vercel.app/install.ps1 | iex
+        irm https://portfolio-izanagi.vercel.app/get/mochi/install.ps1 | iex
     it downloads the latest release from GitHub and verifies the SHA256 file
     that ships with it. From a checkout it builds the release binaries with
     cargo instead. Either way mochi.exe and mochic.exe end up in
@@ -86,10 +86,8 @@ param(
     [switch] $Uninstall
 )
 
-# Every download goes through this address: /install.ps1 is this script,
-# /latest names the newest release, /download/<tag>/<file> is one of its
-# files.
-$BaseUrl = 'https://get-mochi.vercel.app'
+# Every download goes through this address: /install.ps1, /latest and /download/<tag>/<file>.
+$BaseUrl = 'https://portfolio-izanagi.vercel.app/get/mochi'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
