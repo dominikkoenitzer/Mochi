@@ -27,7 +27,7 @@ Mochi runs as a normal user and needs no admin rights. Windows does not let it m
 
 ## Install
 
-The usual way is `Mochi-Setup.exe`, one file with both programs inside. Download it from `https://get-mochi.vercel.app/download/windows` and open it as the normal user. If Windows says it protected the PC, click More info, then Run anyway. It shows the way out and asks once, needs no admin rights, and then:
+The usual way is `Mochi-Setup.exe`, one file with both programs inside. Download it from `https://portfolio-izanagi.vercel.app/projects/mochi` and open it as the normal user. If Windows says it protected the PC, click More info, then Run anyway. It shows the way out and asks once, needs no admin rights, and then:
 
 - stops a running Mochi, which puts every window back,
 - puts `mochi.exe` and `mochic.exe` in `%LOCALAPPDATA%\Programs\Mochi\bin`, adds that folder to the user PATH and keeps a copy of itself in `%LOCALAPPDATA%\Programs\Mochi`,

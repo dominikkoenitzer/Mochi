@@ -17,7 +17,7 @@ irm https://portfolio-izanagi.vercel.app/get/mochi/install.ps1 | iex
 ```
 
 It works in Windows PowerShell 5.1 and PowerShell 7. It downloads the
-[latest release](https://github.com/dominikkoenitzer/Mochi/releases/latest),
+latest release,
 checks its SHA256 and installs the same way Setup does: the same folder, PATH
 entry, default files, login start and Start menu entry, and then it starts
 Mochi right away, which tiles every window on screen. It adds no Apps & features

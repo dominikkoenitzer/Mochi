@@ -9,7 +9,7 @@ use crate::plan::{self, Layout, Mode, Options, RunAction};
 use crate::win;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const DOWNLOAD: &str = "https://get-mochi.vercel.app/download/windows";
+const DOWNLOAD: &str = "https://portfolio-izanagi.vercel.app/projects/mochi";
 const WAY_OUT: &str = "Pause (or alt + f12) turns tiling off and on, alt + shift + e stops Mochi and puts every window back.";
 const RUN_BACKUP: &str = "RunBackup_Mochi";
 
@@ -791,12 +791,8 @@ mod tests {
     }
 
     #[test]
-    fn the_download_address_is_on_the_site_the_readme_links() {
+    fn the_download_address_is_the_page_the_readme_links() {
         let readme = include_str!("../../../README.md");
-        let routes = include_str!("../../../site/vercel.json");
-        let (at, _) = DOWNLOAD.match_indices('/').nth(2).unwrap();
-        let (site, route) = DOWNLOAD.split_at(at);
-        assert!(readme.contains(&format!("[Download Mochi]({site})")));
-        assert!(routes.contains(&format!("\"source\": \"{route}\"")));
+        assert!(readme.contains(&format!("[Download Mochi]({DOWNLOAD})")));
     }
 }
