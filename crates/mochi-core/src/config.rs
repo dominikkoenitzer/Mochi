@@ -21,16 +21,29 @@ use crate::model::{
 };
 use crate::rules::{MatchingRule, RuleSets};
 
+macro_rules! site {
+    () => {
+        "https://portfolio-izanagi.vercel.app/get/mochi"
+    };
+}
+
+/// Mochi's own address. The schema and the install script are served under it.
+pub const SITE: &str = site!();
+
 /// The starting `mochi.json` a quickstart writes, whether `mochic` or the
 /// daemon is asked for it. Kept minimal: every key left out has its default.
-pub const QUICKSTART: &str = r#"{
-  "$schema": "https://get-mochi.vercel.app/schema.json",
+pub const QUICKSTART: &str = concat!(
+    r#"{
+  "$schema": ""#,
+    site!(),
+    r#"/schema.json",
   "window_hiding_behaviour": "Cloak",
   "default_workspace_padding": 10,
   "default_container_padding": 10,
   "monitors": []
 }
-"#;
+"#
+);
 
 /// A 24 bit colour.
 ///
@@ -1253,6 +1266,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.border, Some(true));
+    }
+
+    #[test]
+    fn a_config_that_links_the_old_schema_address_still_loads() {
+        let config = Config::from_json(
+            r#"{ "$schema": "https://get-mochi.vercel.app/schema.json", "border": true, "monitors": [] }"#,
+        )
+        .unwrap();
+        assert_eq!(config.border, Some(true));
+    }
+
+    #[test]
+    fn the_quickstart_links_the_schema_under_the_site_address() {
+        assert_eq!(SITE, "https://portfolio-izanagi.vercel.app/get/mochi");
+        let value: serde_json::Value = serde_json::from_str(QUICKSTART).unwrap();
+        assert_eq!(
+            value["$schema"],
+            "https://portfolio-izanagi.vercel.app/get/mochi/schema.json"
+        );
     }
 
     #[test]

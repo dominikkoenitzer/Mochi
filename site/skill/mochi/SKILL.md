@@ -42,7 +42,7 @@ The usual way is `Mochi-Setup.exe`, one file with both programs inside. Download
 For a scripted install, open PowerShell (Windows PowerShell 5.1 or PowerShell 7) as the normal user and paste:
 
 ```
-irm https://get-mochi.vercel.app/install.ps1 | iex
+irm https://portfolio-izanagi.vercel.app/get/mochi/install.ps1 | iex
 ```
 
 This installer:
@@ -60,7 +60,7 @@ After the install, open a new terminal before you type `mochic`. A terminal that
 To pass switches, run the script as a script block:
 
 ```
-& ([scriptblock]::Create((irm https://get-mochi.vercel.app/install.ps1))) -SkipStart -SkipAutostart
+& ([scriptblock]::Create((irm https://portfolio-izanagi.vercel.app/get/mochi/install.ps1))) -SkipStart -SkipAutostart
 ```
 
 | Switch | Effect |
@@ -84,7 +84,7 @@ Open Settings, Apps, Installed apps, and uninstall Mochi. It removes the Run val
 After the PowerShell install:
 
 ```
-& ([scriptblock]::Create((irm https://get-mochi.vercel.app/install.ps1))) -Uninstall
+& ([scriptblock]::Create((irm https://portfolio-izanagi.vercel.app/get/mochi/install.ps1))) -Uninstall
 ```
 
 It stops Mochi, which puts every window back, then removes the Run value, the `MochiWatchdog` scheduled task if one exists, the Start menu entry, the binaries and the PATH entry, and in the default folder also a copy of `Mochi-Setup.exe` and its Installed apps entry.
@@ -101,7 +101,7 @@ Both keep `mochi.json`, the hotkey file and the logs in `%LOCALAPPDATA%\mochi`; 
 | Hotkeys | `%USERPROFILE%\.config\mochi\hotkeys`. Overridden by `MOCHI_HOTKEYS`, which is overridden by `--hotkeys <path>`. |
 | Logs | `%LOCALAPPDATA%\mochi\`, one file per day named `mochi.log.<date>`, the last 14 kept |
 | Off-screen record | `%LOCALAPPDATA%\mochi\off-screen.json`, the windows Mochi has hidden. Do not delete it. |
-| Config schema | `mochic schema --output mochi.schema.json` writes it; the download site serves it at `/schema.json` |
+| Config schema | `mochic schema --output mochi.schema.json` writes it; it is also served at `https://portfolio-izanagi.vercel.app/get/mochi/schema.json` |
 
 `--config` and `--hotkeys` are flags of both `mochi` and `mochic start`.
 
@@ -217,7 +217,7 @@ Short example:
 
 ```json
 {
-  "$schema": "https://get-mochi.vercel.app/schema.json",
+  "$schema": "https://portfolio-izanagi.vercel.app/get/mochi/schema.json",
   "default_workspace_padding": 10,
   "default_container_padding": 10,
   "border": true,
