@@ -822,7 +822,7 @@ fn check_run(path: &Path, source: String) -> CheckRun {
 fn hotkey_path() -> Option<PathBuf> {
     hotkey_path_from(
         std::env::var_os("MOCHI_HOTKEYS"),
-        std::env::var("USERPROFILE").ok().map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
     )
 }
 
@@ -835,7 +835,12 @@ fn hotkey_path_from(
     if let Some(path) = explicit.filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    let keys = profile?.join(".config").join("mochi");
+    // An empty profile names no folder: joined, it would point into the
+    // current one. The daemon and quickstart refuse it the same way.
+    let keys = profile
+        .filter(|p| !p.as_os_str().is_empty())?
+        .join(".config")
+        .join("mochi");
     let named = keys.join("hotkeys");
     if named.exists() {
         return Some(named);
@@ -3168,6 +3173,11 @@ mod tests {
         assert_eq!(
             super::hotkey_path_from(Some("".into()), Some(profile.clone())),
             Some(profile.join(".config").join("mochi").join("hotkeys"))
+        );
+        assert_eq!(
+            super::hotkey_path_from(None, Some(PathBuf::new())),
+            None,
+            "an empty profile is no folder"
         );
     }
 
