@@ -274,16 +274,19 @@ struct Switched {
 /// its place in a stack. Checks the result, because a mode in front of the
 /// ring (monocle, maximize, a floating focus) leaves the ring commands with
 /// nothing to do.
+///
+/// What it switched is written into `switched` as it goes, so a caller can
+/// put it back even when focusing fails part way.
 fn focus(
     daemon: &dyn Daemon,
     hwnd: u64,
     sent: &mut Sent,
-) -> std::result::Result<(Place, Switched), String> {
+    switched: &mut Switched,
+) -> std::result::Result<Place, String> {
     let mut state = read_state(daemon)?;
     let (place, _) = locate(&state, hwnd).ok_or_else(|| not_managed(hwnd))?;
-    let mut switched = Switched::default();
     if state["focused_window"].as_u64() == Some(hwnd) {
-        return Ok((place, switched));
+        return Ok(place);
     }
 
     let as_index = |v: &Value| v.as_u64().map(|i| i as usize);
@@ -346,7 +349,7 @@ fn focus(
 
     let after = read_state(daemon).map_err(|e| sent.after(e))?;
     if after["focused_window"].as_u64() == Some(hwnd) {
-        return Ok((place, switched));
+        return Ok(place);
     }
     let shown = format!("monitor {}, workspace {}", place.monitor, place.workspace);
     Err(sent.after(if place.spot == Spot::Floating {
@@ -364,7 +367,7 @@ fn focus(
 
 fn focus_window(daemon: &dyn Daemon, p: &FocusParams) -> Outcome {
     let mut sent = Sent::default();
-    let (place, _) = focus(daemon, p.window, &mut sent)?;
+    let place = focus(daemon, p.window, &mut sent, &mut Switched::default())?;
     Ok(json!({
         "ok": true,
         "window": p.window,
@@ -381,7 +384,7 @@ fn focus_if_given(
     sent: &mut Sent,
 ) -> std::result::Result<(), String> {
     match window {
-        Some(hwnd) => focus(daemon, hwnd, sent).map(|_| ()),
+        Some(hwnd) => focus(daemon, hwnd, sent, &mut Switched::default()).map(|_| ()),
         None => Ok(()),
     }
 }
@@ -398,19 +401,29 @@ fn move_window_to_workspace(daemon: &dyn Daemon, p: &MoveParams) -> Outcome {
         (None, Some(name), false) => Command::SendToNamedWorkspace { name: name.clone() },
     };
     let mut sent = Sent::default();
-    let switched = match p.window {
-        Some(hwnd) => focus(daemon, hwnd, &mut sent)?.1,
-        None => Switched::default(),
-    };
-    sent.act(daemon, command)?;
-    if !p.follow {
-        // Put back what focusing the window switched: its monitor's workspace, then the monitor.
+    let mut switched = Switched::default();
+    // Put back what focusing the window switched: its monitor's workspace, then the monitor.
+    let put_back = |sent: &mut Sent, switched: &Switched| -> std::result::Result<(), String> {
         if let Some(index) = switched.workspace {
             sent.act(daemon, Command::FocusWorkspace { index })?;
         }
         if let Some(index) = switched.monitor {
             sent.act(daemon, Command::FocusMonitor { index })?;
         }
+        Ok(())
+    };
+    if let Some(hwnd) = p.window
+        && let Err(e) = focus(daemon, hwnd, &mut sent, &mut switched)
+    {
+        // The screen stays as it was, as promised, even when the window could not be focused.
+        if !p.follow {
+            let _ = put_back(&mut sent, &switched);
+        }
+        return Err(e);
+    }
+    sent.act(daemon, command)?;
+    if !p.follow {
+        put_back(&mut sent, &switched)?;
     }
     Ok(json!({
         "ok": true,
@@ -1240,6 +1253,30 @@ mod tests {
         assert_eq!(answer["sent"], json!(["cycle-focus", "send-to-workspace"]));
         assert_eq!(answer["window"], 0x20);
         assert_eq!(answer["workspace"], 1);
+    }
+
+    #[test]
+    fn a_window_that_cannot_be_focused_leaves_the_screen_as_it_was() {
+        // Monitor 0 shows workspace 0; the floating 0x40 sits on its workspace 1.
+        let fake = Fake::with_states([desktop(0, 0, 0, 0x10), desktop(0, 1, 0, 0x10)]);
+        let p = MoveParams {
+            window: Some(0x40),
+            workspace: Some(0),
+            workspace_name: None,
+            follow: false,
+        };
+        assert!(move_window_to_workspace(&fake, &p).is_err());
+        let sent = fake.sent();
+        assert_eq!(
+            sent.last(),
+            Some(&Command::FocusWorkspace { index: 0 }),
+            "{sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|c| matches!(c, Command::SendToWorkspace { .. }))
+        );
     }
 
     #[test]
