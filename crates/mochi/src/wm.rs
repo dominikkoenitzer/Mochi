@@ -1497,7 +1497,10 @@ impl WindowManager {
             if self.we_hid(hwnd) {
                 self.show_window(hwnd);
             }
-            record(&self.hidden).show(hwnd);
+            // Kept when it refused to come back; see `unmanage`.
+            if !self.we_hid(hwnd) || self.platform.window_info(hwnd).is_err() {
+                record(&self.hidden).show(hwnd);
+            }
             released = true;
         }
         if released {
@@ -1583,9 +1586,12 @@ impl WindowManager {
             }
             Err(e) => tracing::debug!(%hwnd, error = %e, "the window was already gone"),
         }
-        {
-            let mut hidden = record(&self.hidden);
-            hidden.show(hwnd);
+        // Only a window that is back on screen, or gone, leaves the record. One
+        // that refused to come back stays named in it, so `restore-windows`
+        // and the next start can still find it, as `restore_stranded_windows`
+        // keeps it too.
+        if !self.we_hid(hwnd) || self.platform.window_info(hwnd).is_err() {
+            record(&self.hidden).show(hwnd);
         }
         // The routing ledger is deliberately *not* cleared here. A user
         // minimize, a virtual desktop cloak and a rule change all end up in
@@ -8737,6 +8743,25 @@ alt + j : focus down
         assert_eq!(
             wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
             Some(HidingBehaviour::Hide)
+        );
+    }
+
+    #[test]
+    fn unmanaging_a_window_that_will_not_uncloak_keeps_it_in_the_record() {
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        wm.handle_command(Command::FocusWorkspace { index: 1 });
+        assert_eq!(
+            wm.hidden().lock().unwrap().behaviour_of(Hwnd(2)),
+            Some(HidingBehaviour::Cloak)
+        );
+        platform.unrestorable.lock().unwrap().push(Hwnd(2));
+
+        wm.unmanage(Hwnd(2), "a rule now ignores it");
+
+        assert!(!wm.state().is_managed(WindowId(2)));
+        assert!(
+            record(&wm.hidden).contains(Hwnd(2)),
+            "a window still cloaked was dropped from the record restore-windows reads"
         );
     }
 
