@@ -328,6 +328,7 @@ Fields marked "sometimes" are only there when they apply.
 | `reason` | string, sometimes | Why it is left alone, when not managed. One of the values below. |
 | `scratchpad` | string, sometimes | The scratchpad that holds it, when `reason` is `scratchpad`. |
 | `overridable` | boolean, sometimes | Only with a reason from the second table: whether a `manage_rules` entry or `manage-rule` may overrule it. |
+| `own` | boolean, sometimes | Only with the reason `rule`: whether one of the user's own ignore rules matched (final), rather than one from the community rule file (a manage rule overrules it). |
 | `hotkeys_blocked` | boolean, sometimes | Only there when true: the window runs with more rights than Mochi, so no hotkey works while it has the focus. |
 
 The daemon asks in this order and gives the first reason that holds.

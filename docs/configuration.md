@@ -117,6 +117,13 @@ anything, and it names the line and the column. Run it after every edit.
 | `monitor_index_preferences` | object | none | Monitor index to rect, pins an entry to the screen at that position. See below. |
 | `display_index_preferences` | object | none | Monitor index to display id, pins an entry to a physical display. See below. |
 
+When several rule lists match one window, Mochi decides in this order. An
+`ignore_rules` entry of your own (in `mochi.json`, or added with `mochic
+ignore-rule`) is final. Otherwise a `manage_rules` entry wins over any other
+ignore rule, such as one from the community rule file. Otherwise a matching
+ignore rule leaves the window alone. A window that is managed floats when a
+`floating_applications` entry matches, and is tiled when none does.
+
 ## focus_follows_mouse
 
 This is not a boolean. It is optional and names an implementation:

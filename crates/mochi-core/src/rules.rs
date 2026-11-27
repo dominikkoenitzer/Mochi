@@ -213,16 +213,50 @@ impl IdWithIdentifier {
 }
 
 /// A rule: either one condition or a set of conditions that all have to hold.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(
-    untagged,
-    expecting = "expected a rule object with a kind and an id, or a list of rule objects"
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(untagged)]
 pub enum MatchingRule {
     /// A single condition.
     Simple(IdWithIdentifier),
     /// Several conditions, combined with a logical and.
     Composite(Vec<IdWithIdentifier>),
+}
+
+// Read by hand rather than untagged: an untagged enum reads the whole value
+// before it tries a variant, so a mistake inside a rule was reported after it,
+// on the next rule's line, and without saying what the mistake was.
+impl<'de> Deserialize<'de> for MatchingRule {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct RuleVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RuleVisitor {
+            type Value = MatchingRule;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a rule object with a kind and an id, or a list of rule objects")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> std::result::Result<MatchingRule, A::Error> {
+                IdWithIdentifier::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(MatchingRule::Simple)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                seq: A,
+            ) -> std::result::Result<MatchingRule, A::Error> {
+                Vec::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+                    .map(MatchingRule::Composite)
+            }
+        }
+
+        deserializer.deserialize_any(RuleVisitor)
+    }
 }
 
 impl MatchingRule {
@@ -905,7 +939,7 @@ const fn folds_case(kind: ApplicationIdentifier) -> bool {
 /// Lower cases `value` when the comparison folds case, and borrows it otherwise.
 fn fold_case(value: &str, fold: bool) -> Cow<'_, str> {
     if fold {
-        Cow::Owned(value.to_ascii_lowercase())
+        Cow::Owned(value.to_lowercase())
     } else {
         Cow::Borrowed(value)
     }

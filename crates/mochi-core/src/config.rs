@@ -793,7 +793,9 @@ impl Config {
         if let Some(value) = self.float_override {
             state.float_override = value;
         }
-        if let Some(value) = self.resize_delta {
+        // A step below 1 moves nothing or the wrong way; keep the default.
+        // `mochic check` names the value.
+        if let Some(value) = self.resize_delta.filter(|value| *value >= 1) {
             state.resize_delta = value;
         }
         if let Some(value) = self.minimum_window_width {
@@ -880,6 +882,31 @@ impl Config {
         !monitor_config.workspaces.is_empty()
     }
 
+    /// Index keys of `monitor_index_preferences` and `display_index_preferences`
+    /// that point at no `monitors` entry, as `(config key, index)` pairs.
+    ///
+    /// An entry is addressed by its 0-based position, so a key equal to or past
+    /// the number of entries (a 1-based slip) is never looked up and the pin is
+    /// silently ignored.
+    #[must_use]
+    pub fn past_end_index_preferences(&self) -> Vec<(&'static str, usize)> {
+        let count = self.monitors.as_ref().map_or(0, Vec::len);
+        let monitor = self.monitor_index_preferences.iter().flat_map(|prefs| {
+            prefs
+                .keys()
+                .map(|&index| ("monitor_index_preferences", index))
+        });
+        let display = self.display_index_preferences.iter().flat_map(|prefs| {
+            prefs
+                .keys()
+                .map(|&index| ("display_index_preferences", index))
+        });
+        monitor
+            .chain(display)
+            .filter(|&(_, index)| index >= count)
+            .collect()
+    }
+
     /// Resolves which monitor of `state` each `monitors` entry configures.
     ///
     /// The result has one slot per entry, holding the index of the monitor
@@ -904,6 +931,9 @@ impl Config {
     /// simply keeps the workspaces it already has until its display is back.
     /// An entry that names both keys is decided by the display id alone, the
     /// stronger of the two statements, and held when that display is missing.
+    /// Entries pinned by rectangle alone are matched first: a rectangle names
+    /// one panel, a model name may name several, so a display pin never takes
+    /// the panel a rectangle pin named.
     ///
     /// An entry that names neither key takes the monitor at its own position
     /// when no pinned entry claimed it, and the first monitor still unclaimed
@@ -937,30 +967,34 @@ impl Config {
         let mut claimed = vec![false; monitors.len()];
         let mut pinned = vec![false; count];
 
-        for (idx, slot) in assigned.iter_mut().enumerate() {
-            let display = self
-                .display_index_preferences
-                .as_ref()
-                .and_then(|prefs| prefs.get(&idx));
-            let rect = self
-                .monitor_index_preferences
-                .as_ref()
-                .and_then(|prefs| prefs.get(&idx));
-            if display.is_none() && rect.is_none() {
-                continue;
-            }
-            pinned[idx] = true;
-            let found = monitors.iter().enumerate().position(|(at, monitor)| {
-                !claimed[at]
-                    && match display {
-                        Some(id) => names_display(monitor, id),
-                        // Only reached when the entry named no display.
-                        None => rect.is_some_and(|rect| monitor.size == *rect),
-                    }
-            });
-            if let Some(at) = found {
-                claimed[at] = true;
-                *slot = Some(at);
+        // Rectangle pins first: a rectangle names one panel, a model name may
+        // name several, so a name pin must not take the panel a rectangle named.
+        for by_display in [false, true] {
+            for (idx, slot) in assigned.iter_mut().enumerate() {
+                let display = self
+                    .display_index_preferences
+                    .as_ref()
+                    .and_then(|prefs| prefs.get(&idx));
+                let rect = self
+                    .monitor_index_preferences
+                    .as_ref()
+                    .and_then(|prefs| prefs.get(&idx));
+                if (display.is_none() && rect.is_none()) || display.is_some() != by_display {
+                    continue;
+                }
+                pinned[idx] = true;
+                let found = monitors.iter().enumerate().position(|(at, monitor)| {
+                    !claimed[at]
+                        && match display {
+                            Some(id) => names_display(monitor, id),
+                            // Only reached when the entry named no display.
+                            None => rect.is_some_and(|rect| monitor.size == *rect),
+                        }
+                });
+                if let Some(at) = found {
+                    claimed[at] = true;
+                    *slot = Some(at);
+                }
             }
         }
 
@@ -1014,6 +1048,22 @@ fn configure_monitor(monitor_config: &MonitorConfig, monitor: &mut crate::model:
 
 #[cfg(test)]
 mod tests {
+    /// A resize step below 1 moves nothing, or moves the wrong way. The daemon
+    /// keeps its default instead of copying the value across.
+    #[test]
+    fn a_resize_delta_below_one_keeps_the_default() {
+        for bad in [0, -5] {
+            let config = Config::from_json(&format!(r#"{{ "resize_delta": {bad} }}"#)).unwrap();
+            let mut state = State::default();
+            config.apply_to(&mut state);
+            assert_eq!(state.resize_delta, 50, "resize_delta {bad}");
+        }
+        let config = Config::from_json(r#"{ "resize_delta": 20 }"#).unwrap();
+        let mut state = State::default();
+        config.apply_to(&mut state);
+        assert_eq!(state.resize_delta, 20);
+    }
+
     /// The configuration documentation offers a complete file to copy. If it
     /// does not parse, the first thing a new user is told to do fails, and
     /// nothing else in this crate would ever notice.
@@ -1646,6 +1696,36 @@ mod tests {
                 .map(String::as_str),
             Some("PT2400HZ-12345")
         );
+    }
+
+    #[test]
+    fn index_preferences_past_the_last_entry_are_reported() {
+        let config = Config::from_json(
+            r#"{
+                "monitors": [ {"workspaces": []}, {"workspaces": []} ],
+                "monitor_index_preferences": {
+                    "1": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 },
+                    "2": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 }
+                },
+                "display_index_preferences": { "0": "A", "2": "B", "3": "C" }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.past_end_index_preferences(),
+            vec![
+                ("monitor_index_preferences", 2),
+                ("display_index_preferences", 2),
+                ("display_index_preferences", 3),
+            ]
+        );
+
+        let fine = Config::from_json(
+            r#"{ "monitors": [ {"workspaces": []} ], "display_index_preferences": { "0": "A" } }"#,
+        )
+        .unwrap();
+        assert!(fine.past_end_index_preferences().is_empty());
+        assert!(Config::default().past_end_index_preferences().is_empty());
     }
 
     #[test]

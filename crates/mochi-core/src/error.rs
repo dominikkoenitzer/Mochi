@@ -299,3 +299,40 @@ fn whole_number(word: &str, out_of_range: bool) -> Option<String> {
 
 /// A [`Result`](std::result::Result) with this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Why an I/O call failed, in the words the system has for it, without the
+/// error number Rust adds after them.
+#[must_use]
+pub fn io_reason(error: &std::io::Error) -> String {
+    let said = error.to_string();
+    match error.raw_os_error() {
+        Some(code) => said
+            .strip_suffix(&format!(" (os error {code})"))
+            .unwrap_or(&said)
+            .to_owned(),
+        None => said,
+    }
+}
+
+#[cfg(test)]
+mod io_reason_tests {
+    use super::io_reason;
+
+    #[test]
+    fn an_os_error_loses_its_number() {
+        // The pipe refusing the connection: ERROR_ACCESS_DENIED on Windows,
+        // EACCES here. Either way Rust appends " (os error N)".
+        let refused = std::io::Error::from_raw_os_error(13);
+        assert!(refused.to_string().contains("(os error 13)"));
+        let reason = io_reason(&refused);
+        assert!(!reason.contains("os error"), "{reason}");
+        assert!(!reason.is_empty());
+    }
+
+    #[test]
+    fn an_error_without_a_number_keeps_its_text() {
+        let busy = std::io::Error::other("pipe busy (os error is not a code here)");
+        assert_eq!(io_reason(&busy), "pipe busy (os error is not a code here)");
+        assert_eq!(io_reason(&std::io::Error::other("pipe busy")), "pipe busy");
+    }
+}

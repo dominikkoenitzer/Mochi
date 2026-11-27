@@ -258,11 +258,19 @@ fn send(command: &Command) -> Result<Response> {
         )
         .into()),
         Err(Error::Daemon(message)) => Err(Coded::new(ErrorCode::Daemon, message).into()),
-        Err(e) => {
-            Err(anyhow::Error::new(e)
-                .context(Coded::new(ErrorCode::Ipc, "could not talk to mochi")))
-        }
+        Err(e @ Error::StillRunning(_)) => Err(Coded::new(ErrorCode::Daemon, e.to_string()).into()),
+        Err(e) => Err(talk_failed(e)),
     }
+}
+
+/// "could not talk to mochi", then why. An I/O failure gives the plain reason
+/// only, not the client's "pipe I/O failed" layer or the error number.
+fn talk_failed(e: Error) -> anyhow::Error {
+    let cause = match e {
+        Error::Io(io) => anyhow::anyhow!(mochi_core::error::io_reason(&io)),
+        other => anyhow::Error::new(other),
+    };
+    cause.context(Coded::new(ErrorCode::Ipc, "could not talk to mochi"))
 }
 
 /// Prints a JSON scalar without its quotes, so shells can use the value directly.
@@ -534,7 +542,7 @@ fn subscribe(name: &str) -> Result<()> {
     // the same sentence a second time as the cause.
     if let Err(e) = mochi_client::validate_pipe_name(name) {
         match e {
-            Error::Io(io) => bail!("{io}"),
+            Error::Io(io) => bail!("{}", mochi_core::error::io_reason(&io)),
             other => bail!("{other}"),
         }
     }
@@ -546,6 +554,8 @@ fn subscribe(name: &str) -> Result<()> {
         }
         // `{e}` and not the source chain: every `Error::Io` carries the same
         // sentence as its cause and would otherwise be printed twice.
+        // The plain reason for an I/O failure, as `send` gives it.
+        Err(Error::Io(io)) => bail!("could not subscribe: {}", mochi_core::error::io_reason(&io)),
         Err(e) => bail!("could not subscribe: {e}"),
     };
     eprintln!(
@@ -691,7 +701,7 @@ fn check(explicit: Option<&Path>, json: bool) -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let run = check_run(&path, source);
+    let run = check_run(&path, source, explicit.is_none());
 
     let label = run.label;
     println!("checking {label}\n  ({})", run.source);
@@ -719,7 +729,7 @@ fn check(explicit: Option<&Path>, json: bool) -> std::process::ExitCode {
 fn check_document(explicit: Option<&Path>) -> std::result::Result<CheckOutput, ErrorOutput> {
     let (path, source) = resolve_config_path(explicit)
         .map_err(|e| ErrorOutput::new(ErrorCode::Config, format!("{e:#}")))?;
-    let run = check_run(&path, source);
+    let run = check_run(&path, source, explicit.is_none());
     let kind = if run.app_rules {
         CheckKind::AppRules
     } else {
@@ -738,11 +748,20 @@ fn check_document(explicit: Option<&Path>) -> std::result::Result<CheckOutput, E
 }
 
 /// Checks the configuration at `path` and everything it points at, and prints
-/// nothing.
-fn check_run(path: &Path, source: String) -> CheckRun {
+/// nothing. `daemon_file` says `path` is the file the daemon would load, not
+/// one given on the command line.
+fn check_run(path: &Path, source: String, daemon_file: bool) -> CheckRun {
     let label = path.display().to_string();
 
-    let text = match read_config(path) {
+    // No file where the daemon looks is not a broken one: the daemon starts
+    // on its built-in defaults, so those are checked, and the missing file is
+    // a warning. A path given on the command line has to be there.
+    let missing = daemon_file && !path.exists();
+    let text = match if missing {
+        Ok("{}".to_owned())
+    } else {
+        read_config(path)
+    } {
         Ok(text) => text,
         Err(reason) => {
             // The hotkey file is a different file with different problems,
@@ -779,6 +798,15 @@ fn check_run(path: &Path, source: String) -> CheckRun {
     }
 
     let mut found = check_config_text(&label, &text);
+    if missing {
+        found.warnings.insert(
+            0,
+            format!(
+                "there is no file at {label}, so the daemon starts on its built-in defaults; \
+                 `mochic quickstart` writes a starting file."
+            ),
+        );
+    }
 
     // The community rule file is not Mochi's file: the daemon logs what is
     // wrong with it and carries on, so everything it produces is a warning.
@@ -822,7 +850,7 @@ fn check_run(path: &Path, source: String) -> CheckRun {
 fn hotkey_path() -> Option<PathBuf> {
     hotkey_path_from(
         std::env::var_os("MOCHI_HOTKEYS"),
-        std::env::var("USERPROFILE").ok().map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
     )
 }
 
@@ -835,7 +863,12 @@ fn hotkey_path_from(
     if let Some(path) = explicit.filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    let keys = profile?.join(".config").join("mochi");
+    // An empty profile names no folder: joined, it would point into the
+    // current one. The daemon and quickstart refuse it the same way.
+    let keys = profile
+        .filter(|p| !p.as_os_str().is_empty())?
+        .join(".config")
+        .join("mochi");
     let named = keys.join("hotkeys");
     if named.exists() {
         return Some(named);
@@ -1135,6 +1168,11 @@ fn check_config_text(label: &str, text: &str) -> Findings {
             label
         ));
     }
+    if let Some(value) = config.resize_delta.filter(|value| *value < 1) {
+        found.warnings.push(format!(
+            "{label} sets `resize_delta` to {value}. A step below 1 is ignored and the default of 50 is used."
+        ));
+    }
     let per_workspace_behaviour = config
         .monitors
         .iter()
@@ -1154,6 +1192,24 @@ fn check_config_text(label: &str, text: &str) -> Findings {
                 "key is read; the per workspace one is accepted and then dropped."
             ),
             label, per_workspace_behaviour, plural
+        ));
+    }
+
+    // The index keys count from 0. A key at or past the number of `monitors`
+    // entries is never looked up, so the pin does nothing.
+    let entries = config.monitors.as_ref().map_or(0, Vec::len);
+    for (key, index) in config.past_end_index_preferences() {
+        found.warnings.push(format!(
+            concat!(
+                "{} has {}[\"{}\"], but `monitors` has {} {} (indexes 0 to {}). ",
+                "The key points at no entry and is ignored. Indexes start at 0."
+            ),
+            label,
+            key,
+            index,
+            entries,
+            if entries == 1 { "entry" } else { "entries" },
+            entries.saturating_sub(1)
         ));
     }
 
@@ -1831,10 +1887,12 @@ fn advice(reason: &str, exe: &str) -> (String, Option<String>) {
             Some("start it again: mochic toggle-pause".into()),
         ),
         "rule" => (
-            "your own configuration tells Mochi to leave it alone: one of the ignore rules in your mochi.json matches this window.".into(),
-            Some(format!(
-                "remove that rule from your mochi.json, or overrule it for this application: mochic manage-rule exe {exe}"
-            )),
+            "your own configuration tells Mochi to leave it alone: one of your own ignore rules (in mochi.json, or added with mochic ignore-rule) matches this window.".into(),
+            Some("remove that rule from your mochi.json. A manage rule cannot overrule your own ignore rules.".into()),
+        ),
+        "community rule" => (
+            "the community rule file tells Mochi to leave it alone: one of its ignore rules matches this window.".into(),
+            Some(format!("overrule it for this application: mochic manage-rule exe {exe}")),
         ),
         "elevated, out of reach" => (
             "it belongs to a program running as administrator, and Mochi does not. Windows turns down every request a normal program makes to move such a window, so Mochi leaves it where it is rather than tiling around a hole it cannot fill.".into(),
@@ -1946,7 +2004,16 @@ fn why_paragraph(why: &serde_json::Value) -> String {
 
     out.push_str("Mochi is leaving this window alone.\n");
     out.push_str(&keyboard_note(why));
-    let (explanation, fix) = advice(text("reason"), exe);
+    // A community rule yields to a manage rule, the user's own does not; a
+    // daemon that does not say which counts as the user's own.
+    let reason = match (
+        text("reason"),
+        why.get("own").and_then(serde_json::Value::as_bool),
+    ) {
+        ("rule", Some(false)) => "community rule",
+        (reason, _) => reason,
+    };
+    let (explanation, fix) = advice(reason, exe);
     out.push_str(&field("Why", &explanation));
     if let Some(fix) = fix {
         out.push_str(&field("Fix", &fix));
@@ -2241,6 +2308,21 @@ mod tests {
     }
 
     #[test]
+    fn only_a_community_rule_is_offered_a_manage_rule() {
+        let (_, own) = super::advice("rule", "app.exe");
+        assert!(
+            !own.unwrap_or_default().contains("manage-rule"),
+            "a manage rule cannot overrule the user's own ignore"
+        );
+        let (_, community) = super::advice("community rule", "app.exe");
+        assert!(
+            community
+                .unwrap_or_default()
+                .contains("mochic manage-rule exe app.exe")
+        );
+    }
+
+    #[test]
     fn every_verdict_the_daemon_can_give_is_explained_in_words() {
         // The daemon answers with `Unmanageable::as_str`, plus the reasons the
         // explain path adds itself. A verdict with no case here would reach a
@@ -2263,6 +2345,7 @@ mod tests {
             "no-tiling marker",
             "paused",
             "rule",
+            "community rule",
             "manage-class",
             "scratchpad",
             "unknown",
@@ -2330,6 +2413,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_refused_pipe_is_reported_by_its_plain_reason() {
+        let refused = Error::Io(std::io::Error::from_raw_os_error(5));
+        let said = ErrorOutput::from_error(&talk_failed(refused)).error.message;
+        assert!(said.starts_with("could not talk to mochi: "), "{said}");
+        assert!(!said.contains("pipe I/O failed"), "{said}");
+        assert!(!said.contains("os error"), "{said}");
+    }
 
     #[test]
     fn query_scalars_print_without_json_quotes() {
@@ -2613,6 +2705,24 @@ mod tests {
         assert!(found.warnings.is_empty(), "{:?}", found.warnings);
         assert!(
             found.notes.iter().any(|n| n.contains("parses")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_resize_delta_below_one_is_a_warning_naming_the_value() {
+        let found = check_config_text("mochi.json", r#"{ "resize_delta": -5 }"#);
+        assert!(found.errors.is_empty(), "{found:?}");
+        assert!(
+            found
+                .warnings
+                .iter()
+                .any(|w| w.contains("resize_delta") && w.contains("-5")),
+            "{found:?}"
+        );
+        let found = check_config_text("mochi.json", r#"{ "resize_delta": 20 }"#);
+        assert!(
+            found.warnings.iter().all(|w| !w.contains("resize_delta")),
             "{found:?}"
         );
     }
@@ -2970,6 +3080,30 @@ mod tests {
     }
 
     #[test]
+    fn an_index_preference_past_the_last_monitor_entry_is_a_warning() {
+        let text = r#"{
+  "monitors": [ { "workspaces": [] }, { "workspaces": [] } ],
+  "display_index_preferences": { "1": "A", "2": "B" }
+}"#;
+        let found = check_config_text("mochi.json", text);
+        assert!(found.errors.is_empty(), "{found:?}");
+        let hits: Vec<_> = found
+            .warnings
+            .iter()
+            .filter(|w| w.contains("display_index_preferences"))
+            .collect();
+        assert_eq!(hits.len(), 1, "{found:?}");
+        assert!(hits[0].contains("[\"2\"]"), "{found:?}");
+        assert!(hits[0].contains("2 entries"), "{found:?}");
+
+        let fine = check_config_text(
+            "mochi.json",
+            r#"{ "monitors": [ { "workspaces": [] } ], "display_index_preferences": { "0": "A" } }"#,
+        );
+        assert!(fine.warnings.is_empty(), "{fine:?}");
+    }
+
+    #[test]
     fn the_community_file_reports_its_mistyped_list_names_as_warnings() {
         let text = r#"{
   "$schema": "https://example.invalid/applications.json",
@@ -3169,6 +3303,33 @@ mod tests {
             super::hotkey_path_from(Some("".into()), Some(profile.clone())),
             Some(profile.join(".config").join("mochi").join("hotkeys"))
         );
+        assert_eq!(
+            super::hotkey_path_from(None, Some(PathBuf::new())),
+            None,
+            "an empty profile is no folder"
+        );
+    }
+
+    #[test]
+    fn a_missing_configuration_is_usable_with_a_warning() {
+        let path = std::env::temp_dir().join("mochi-check-no-such-file.json");
+        let _ = std::fs::remove_file(&path);
+        let run = super::check_run(&path, "test".into(), true);
+        assert!(run.unreadable.is_none(), "{:?}", run.unreadable);
+        assert!(run.found.errors.is_empty(), "{:?}", run.found.errors);
+        assert!(
+            run.found.warnings[0].contains("there is no file at"),
+            "{:?}",
+            run.found.warnings
+        );
+    }
+
+    #[test]
+    fn a_missing_file_given_on_the_command_line_is_unreadable() {
+        let path = std::env::temp_dir().join("mochi-check-no-such-given-file.json");
+        let _ = std::fs::remove_file(&path);
+        let run = super::check_run(&path, "test".into(), false);
+        assert!(run.unreadable.is_some(), "{:?}", run.found.warnings);
     }
 
     #[test]
