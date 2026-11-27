@@ -1836,10 +1836,12 @@ fn advice(reason: &str, exe: &str) -> (String, Option<String>) {
             Some("start it again: mochic toggle-pause".into()),
         ),
         "rule" => (
-            "your own configuration tells Mochi to leave it alone: one of the ignore rules in your mochi.json matches this window.".into(),
-            Some(format!(
-                "remove that rule from your mochi.json, or overrule it for this application: mochic manage-rule exe {exe}"
-            )),
+            "your own configuration tells Mochi to leave it alone: one of your own ignore rules (in mochi.json, or added with mochic ignore-rule) matches this window.".into(),
+            Some("remove that rule from your mochi.json. A manage rule cannot overrule your own ignore rules.".into()),
+        ),
+        "community rule" => (
+            "the community rule file tells Mochi to leave it alone: one of its ignore rules matches this window.".into(),
+            Some(format!("overrule it for this application: mochic manage-rule exe {exe}")),
         ),
         "elevated, out of reach" => (
             "it belongs to a program running as administrator, and Mochi does not. Windows turns down every request a normal program makes to move such a window, so Mochi leaves it where it is rather than tiling around a hole it cannot fill.".into(),
@@ -1951,7 +1953,16 @@ fn why_paragraph(why: &serde_json::Value) -> String {
 
     out.push_str("Mochi is leaving this window alone.\n");
     out.push_str(&keyboard_note(why));
-    let (explanation, fix) = advice(text("reason"), exe);
+    // A community rule yields to a manage rule, the user's own does not; a
+    // daemon that does not say which counts as the user's own.
+    let reason = match (
+        text("reason"),
+        why.get("own").and_then(serde_json::Value::as_bool),
+    ) {
+        ("rule", Some(false)) => "community rule",
+        (reason, _) => reason,
+    };
+    let (explanation, fix) = advice(reason, exe);
     out.push_str(&field("Why", &explanation));
     if let Some(fix) = fix {
         out.push_str(&field("Fix", &fix));
@@ -2246,6 +2257,21 @@ mod tests {
     }
 
     #[test]
+    fn only_a_community_rule_is_offered_a_manage_rule() {
+        let (_, own) = super::advice("rule", "app.exe");
+        assert!(
+            !own.unwrap_or_default().contains("manage-rule"),
+            "a manage rule cannot overrule the user's own ignore"
+        );
+        let (_, community) = super::advice("community rule", "app.exe");
+        assert!(
+            community
+                .unwrap_or_default()
+                .contains("mochic manage-rule exe app.exe")
+        );
+    }
+
+    #[test]
     fn every_verdict_the_daemon_can_give_is_explained_in_words() {
         // The daemon answers with `Unmanageable::as_str`, plus the reasons the
         // explain path adds itself. A verdict with no case here would reach a
@@ -2268,6 +2294,7 @@ mod tests {
             "no-tiling marker",
             "paused",
             "rule",
+            "community rule",
             "manage-class",
             "scratchpad",
             "unknown",

@@ -4080,6 +4080,13 @@ impl WindowManager {
             }
             _ if self.rules_say_ignore(&info) => {
                 object.insert("reason".into(), "rule".into());
+                // The user's own ignore is final, a community one yields to a
+                // manage rule; `mochic why` advises differently for the two.
+                let own = mochi_core::rules::matches_any(
+                    &self.core.rules.own_ignore_rules,
+                    &rule_info(&info),
+                );
+                object.insert("own".into(), own.into());
             }
             // Manageable, not ignored and still not in the model: it has only
             // just appeared, or a previous attempt to take it failed.
