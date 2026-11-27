@@ -931,6 +931,9 @@ impl Config {
     /// simply keeps the workspaces it already has until its display is back.
     /// An entry that names both keys is decided by the display id alone, the
     /// stronger of the two statements, and held when that display is missing.
+    /// Entries pinned by rectangle alone are matched first: a rectangle names
+    /// one panel, a model name may name several, so a display pin never takes
+    /// the panel a rectangle pin named.
     ///
     /// An entry that names neither key takes the monitor at its own position
     /// when no pinned entry claimed it, and the first monitor still unclaimed
