@@ -692,7 +692,7 @@ fn check(explicit: Option<&Path>, json: bool) -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let run = check_run(&path, source);
+    let run = check_run(&path, source, explicit.is_none());
 
     let label = run.label;
     println!("checking {label}\n  ({})", run.source);
@@ -720,7 +720,7 @@ fn check(explicit: Option<&Path>, json: bool) -> std::process::ExitCode {
 fn check_document(explicit: Option<&Path>) -> std::result::Result<CheckOutput, ErrorOutput> {
     let (path, source) = resolve_config_path(explicit)
         .map_err(|e| ErrorOutput::new(ErrorCode::Config, format!("{e:#}")))?;
-    let run = check_run(&path, source);
+    let run = check_run(&path, source, explicit.is_none());
     let kind = if run.app_rules {
         CheckKind::AppRules
     } else {
@@ -739,11 +739,20 @@ fn check_document(explicit: Option<&Path>) -> std::result::Result<CheckOutput, E
 }
 
 /// Checks the configuration at `path` and everything it points at, and prints
-/// nothing.
-fn check_run(path: &Path, source: String) -> CheckRun {
+/// nothing. `daemon_file` says `path` is the file the daemon would load, not
+/// one given on the command line.
+fn check_run(path: &Path, source: String, daemon_file: bool) -> CheckRun {
     let label = path.display().to_string();
 
-    let text = match read_config(path) {
+    // No file where the daemon looks is not a broken one: the daemon starts
+    // on its built-in defaults, so those are checked, and the missing file is
+    // a warning. A path given on the command line has to be there.
+    let missing = daemon_file && !path.exists();
+    let text = match if missing {
+        Ok("{}".to_owned())
+    } else {
+        read_config(path)
+    } {
         Ok(text) => text,
         Err(reason) => {
             // The hotkey file is a different file with different problems,
@@ -780,6 +789,15 @@ fn check_run(path: &Path, source: String) -> CheckRun {
     }
 
     let mut found = check_config_text(&label, &text);
+    if missing {
+        found.warnings.insert(
+            0,
+            format!(
+                "there is no file at {label}, so the daemon starts on its built-in defaults; \
+                 `mochic quickstart` writes a starting file."
+            ),
+        );
+    }
 
     // The community rule file is not Mochi's file: the daemon logs what is
     // wrong with it and carries on, so everything it produces is a warning.
@@ -3207,6 +3225,28 @@ mod tests {
             None,
             "an empty profile is no folder"
         );
+    }
+
+    #[test]
+    fn a_missing_configuration_is_usable_with_a_warning() {
+        let path = std::env::temp_dir().join("mochi-check-no-such-file.json");
+        let _ = std::fs::remove_file(&path);
+        let run = super::check_run(&path, "test".into(), true);
+        assert!(run.unreadable.is_none(), "{:?}", run.unreadable);
+        assert!(run.found.errors.is_empty(), "{:?}", run.found.errors);
+        assert!(
+            run.found.warnings[0].contains("there is no file at"),
+            "{:?}",
+            run.found.warnings
+        );
+    }
+
+    #[test]
+    fn a_missing_file_given_on_the_command_line_is_unreadable() {
+        let path = std::env::temp_dir().join("mochi-check-no-such-given-file.json");
+        let _ = std::fs::remove_file(&path);
+        let run = super::check_run(&path, "test".into(), false);
+        assert!(run.unreadable.is_some(), "{:?}", run.found.warnings);
     }
 
     #[test]
