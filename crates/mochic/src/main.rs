@@ -259,11 +259,18 @@ fn send(command: &Command) -> Result<Response> {
         .into()),
         Err(Error::Daemon(message)) => Err(Coded::new(ErrorCode::Daemon, message).into()),
         Err(e @ Error::StillRunning(_)) => Err(Coded::new(ErrorCode::Daemon, e.to_string()).into()),
-        Err(e) => {
-            Err(anyhow::Error::new(e)
-                .context(Coded::new(ErrorCode::Ipc, "could not talk to mochi")))
-        }
+        Err(e) => Err(talk_failed(e)),
     }
+}
+
+/// "could not talk to mochi", then why. An I/O failure gives the plain reason
+/// only, not the client's "pipe I/O failed" layer or the error number.
+fn talk_failed(e: Error) -> anyhow::Error {
+    let cause = match e {
+        Error::Io(io) => anyhow::anyhow!(mochi_core::error::io_reason(&io)),
+        other => anyhow::Error::new(other),
+    };
+    cause.context(Coded::new(ErrorCode::Ipc, "could not talk to mochi"))
 }
 
 /// Prints a JSON scalar without its quotes, so shells can use the value directly.
@@ -535,7 +542,7 @@ fn subscribe(name: &str) -> Result<()> {
     // the same sentence a second time as the cause.
     if let Err(e) = mochi_client::validate_pipe_name(name) {
         match e {
-            Error::Io(io) => bail!("{io}"),
+            Error::Io(io) => bail!("{}", mochi_core::error::io_reason(&io)),
             other => bail!("{other}"),
         }
     }
@@ -547,6 +554,8 @@ fn subscribe(name: &str) -> Result<()> {
         }
         // `{e}` and not the source chain: every `Error::Io` carries the same
         // sentence as its cause and would otherwise be printed twice.
+        // The plain reason for an I/O failure, as `send` gives it.
+        Err(Error::Io(io)) => bail!("could not subscribe: {}", mochi_core::error::io_reason(&io)),
         Err(e) => bail!("could not subscribe: {e}"),
     };
     eprintln!(
@@ -2404,6 +2413,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_refused_pipe_is_reported_by_its_plain_reason() {
+        let refused = Error::Io(std::io::Error::from_raw_os_error(5));
+        let said = ErrorOutput::from_error(&talk_failed(refused)).error.message;
+        assert!(said.starts_with("could not talk to mochi: "), "{said}");
+        assert!(!said.contains("pipe I/O failed"), "{said}");
+        assert!(!said.contains("os error"), "{said}");
+    }
 
     #[test]
     fn query_scalars_print_without_json_quotes() {
