@@ -31,6 +31,10 @@ pub enum Error {
     /// The daemon answered with [`Response::Error`].
     #[error("{0}")]
     Daemon(String),
+    /// The daemon accepted `stop` but its process was still running when the
+    /// wait for it ran out, in seconds.
+    #[error("mochi accepted the stop but was still running after {0} s")]
+    StillRunning(u64),
     /// Anything the operating system reported.
     #[error("pipe I/O failed: {0}")]
     Io(#[from] std::io::Error),
@@ -92,8 +96,10 @@ pub fn stop_on(pipe: &str, wait: std::time::Duration) -> Result<Response> {
             Some(Response::Error { message }) => Err(Error::Daemon(message)),
             Some(other) => Ok(other),
         });
+    let mut response = response;
     if let Some(process) = process {
         if response.is_ok() {
+            let mut timed_out;
             // A timed wait can end up to a clock tick early, so it is resumed until all of `wait` has passed.
             let deadline = std::time::Instant::now().checked_add(wait);
             loop {
@@ -101,10 +107,16 @@ pub fn stop_on(pipe: &str, wait: std::time::Duration) -> Result<Response> {
                     d.saturating_duration_since(std::time::Instant::now())
                 });
                 let millis = u32::try_from(left.as_micros().div_ceil(1000)).unwrap_or(u32::MAX - 1);
-                let timed_out = unsafe { WaitForSingleObject(process, millis) } == WAIT_TIMEOUT;
+                timed_out = unsafe { WaitForSingleObject(process, millis) } == WAIT_TIMEOUT;
                 if !timed_out || deadline.is_none_or(|d| std::time::Instant::now() >= d) {
                     break;
                 }
+            }
+            // Said, not swallowed: a restart script would otherwise run
+            // `start` against the old daemon and be told it is already up.
+            if timed_out {
+                let seconds = u64::try_from(wait.as_millis().div_ceil(1000)).unwrap_or(u64::MAX);
+                response = Err(Error::StillRunning(seconds));
             }
         }
         let _ = unsafe { CloseHandle(process) };
@@ -315,11 +327,16 @@ mod tests {
         ready_rx.recv().unwrap();
         let wait = std::time::Duration::from_millis(400);
         let started = std::time::Instant::now();
-        let response = stop_on(&pipe, wait).expect("stop should be answered");
+        // The process behind this pipe is the test itself, which never exits:
+        // stop waits the whole time and then says it is still running.
+        let response = stop_on(&pipe, wait);
         let took = started.elapsed();
         daemon.join().unwrap();
 
-        assert!(matches!(response, Response::Ok), "{response:?}");
+        assert!(
+            matches!(response, Err(Error::StillRunning(1))),
+            "{response:?}"
+        );
         assert!(
             took >= wait,
             "stop returned after {took:?}, while the process behind the pipe was still running"

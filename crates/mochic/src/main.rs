@@ -258,6 +258,7 @@ fn send(command: &Command) -> Result<Response> {
         )
         .into()),
         Err(Error::Daemon(message)) => Err(Coded::new(ErrorCode::Daemon, message).into()),
+        Err(e @ Error::StillRunning(_)) => Err(Coded::new(ErrorCode::Daemon, e.to_string()).into()),
         Err(e) => {
             Err(anyhow::Error::new(e)
                 .context(Coded::new(ErrorCode::Ipc, "could not talk to mochi")))
