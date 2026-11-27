@@ -1,6 +1,4 @@
-// Failing-first test for Mochi: a broken rule's error must name the rule's own line and what is wrong with it.
-// Fails today: MatchingRule is an untagged enum, so serde reports "expected a rule object ..." at the position
-// after the value, which is the next (valid) rule's line, and drops the cause.
+// A broken rule's error names the rule's own line and what is wrong with it.
 use mochi_core::config::Config;
 
 fn error(text: &str) -> String {

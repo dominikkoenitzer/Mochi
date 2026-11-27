@@ -1,5 +1,4 @@
-// Failing-first test for Mochi: a Path rule should match the same folder whatever the case,
-// as Windows does for non-ASCII letters too. Fails today: fold_case uses to_ascii_lowercase.
+// A path rule matches a folder whatever the case of its letters, non-ASCII ones included.
 use mochi_core::rules::{ApplicationIdentifier, MatchingRule, MatchingStrategy, WindowInfo};
 
 #[test]

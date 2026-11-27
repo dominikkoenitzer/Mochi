@@ -1,6 +1,4 @@
-// Failing-first test for Mochi: the doc's own advice for two identical panels ("pin one by rectangle")
-// must work whatever order the entries are in. Fails today: pins are resolved in file order, so a model-name
-// pin on entry 0 takes the panel that entry 1 pinned by rectangle, and entry 1 is held back.
+// Two identical panels, one pinned by rectangle: each pin holds in any entry order.
 use mochi_core::config::Config;
 use mochi_core::{Monitor, Rect, State};
 
