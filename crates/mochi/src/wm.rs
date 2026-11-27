@@ -560,6 +560,18 @@ struct WorkspaceRule {
     initial_only: bool,
 }
 
+/// A workspace rule a command added, with the screen it was added for.
+///
+/// The index alone is the position Windows enumerated that screen at, which
+/// a display change can reorder; the device name and rectangle find the same
+/// panel again, the way `display_index_preferences` and `monitor_index_preferences` do.
+#[derive(Debug, Clone)]
+struct AddedRule {
+    rule: WorkspaceRule,
+    device: String,
+    size: Rect,
+}
+
 /// A `scratchpads` entry and the window it holds.
 #[derive(Debug, Clone)]
 struct Scratchpad {
@@ -659,7 +671,7 @@ pub struct WindowManager {
     /// the same reason; rules were the one thing that was not.
     added_rules: Vec<(RuleDecision, MatchingRule)>,
     /// Workspace rules a `mochic` command added, rebuilt after every reload.
-    added_workspace_rules: Vec<WorkspaceRule>,
+    added_workspace_rules: Vec<AddedRule>,
     /// The foreground window, as far as Mochi knows.
     foreground: Option<Hwnd>,
     /// Windows kept out of the model and summoned by name, in file order.
@@ -1116,8 +1128,8 @@ impl WindowManager {
         self.workspace_rules = Self::routing(&loaded.config, &self.core);
         // Same reasoning as the rules above: the file's list replaces this one
         // wholesale, so what a command added has to be put back.
-        self.workspace_rules
-            .extend(self.added_workspace_rules.iter().cloned());
+        let added = self.added_rules_now();
+        self.workspace_rules.extend(added);
         self.set_scratchpads(loaded.config.scratchpads.clone().unwrap_or_default());
 
         if let Some(mouse) = &self.mouse {
@@ -1165,8 +1177,28 @@ impl WindowManager {
     /// enumerated in a different order pointed at the wrong one.
     fn reroute_after_display_change(&mut self) {
         self.workspace_rules = Self::routing(&self.visual_config, &self.core);
-        self.workspace_rules
-            .extend(self.added_workspace_rules.iter().cloned());
+        let added = self.added_rules_now();
+        self.workspace_rules.extend(added);
+    }
+
+    /// The rules a command added, each pointed at the index its screen has
+    /// now. A rule whose screen is not attached is left out until it is back,
+    /// rather than sent to whichever screen took its old index.
+    fn added_rules_now(&self) -> Vec<WorkspaceRule> {
+        let monitors = self.core.monitors();
+        self.added_workspace_rules
+            .iter()
+            .filter_map(|added| {
+                let at = monitors
+                    .iter()
+                    .position(|m| !added.device.is_empty() && m.device == added.device)
+                    .or_else(|| monitors.iter().position(|m| m.size == added.size));
+                if at.is_none() {
+                    tracing::info!(device = %added.device, "a rule added for a screen that is not attached waits for it");
+                }
+                at.map(|monitor| WorkspaceRule { monitor, ..added.rule.clone() })
+            })
+            .collect()
     }
 
     /// Takes over every window that is already on the desktop.
@@ -4315,8 +4347,19 @@ impl WindowManager {
             rule,
             initial_only,
         };
-        // Remembered so a reload puts it back, the same as the rules above.
-        self.added_workspace_rules.push(entry.clone());
+        // Remembered so a reload puts it back, the same as the rules above,
+        // with the screen it is for, which a display change can renumber.
+        let (device, size) = self
+            .core
+            .monitors()
+            .get(monitor)
+            .map(|m| (m.device.clone(), m.size))
+            .unwrap_or_default();
+        self.added_workspace_rules.push(AddedRule {
+            rule: entry.clone(),
+            device,
+            size,
+        });
         self.workspace_rules.push(WorkspaceRule {
             monitor: entry.monitor,
             workspace: entry.workspace,
@@ -8287,6 +8330,44 @@ alt + j : focus down
             "a rule that routes nowhere would only show up as a window that \
              never opens where it was told to"
         );
+        assert!(wm.workspace_rules.is_empty());
+    }
+
+    #[test]
+    fn a_rule_added_for_a_screen_follows_it_when_the_screens_are_renumbered() {
+        let (mut wm, platform) = manager(vec![window(1, "Editor")]);
+        platform.set_monitors(vec![main_screen(), portrait_screen()]);
+        wm.refresh_monitors();
+        let (response, _) = wm.handle_command(Command::WorkspaceRule {
+            identifier: mochi_client::RuleIdentifier::Exe,
+            id: "Mail.exe".into(),
+            monitor: 1,
+            workspace: 0,
+            initial_only: false,
+            matching_strategy: mochi_client::MatchingStrategy::Equals,
+        });
+        assert_eq!(response, Response::Ok);
+
+        // Windows hands the same two screens out the other way round.
+        platform.set_monitors(vec![portrait_screen(), main_screen()]);
+        wm.refresh_monitors();
+        let portrait = wm
+            .state()
+            .monitors()
+            .iter()
+            .position(|m| m.device == portrait_screen().device_name)
+            .expect("the portrait screen is attached");
+        assert_eq!(portrait, 0);
+        let routed: Vec<usize> = wm.workspace_rules.iter().map(|r| r.monitor).collect();
+        assert_eq!(
+            routed,
+            [portrait],
+            "the rule went to whichever screen took index 1"
+        );
+
+        // Unplugged: the rule waits instead of landing on the other screen.
+        platform.set_monitors(vec![main_screen()]);
+        wm.refresh_monitors();
         assert!(wm.workspace_rules.is_empty());
     }
 
