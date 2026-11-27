@@ -1159,6 +1159,11 @@ fn check_config_text(label: &str, text: &str) -> Findings {
             label
         ));
     }
+    if let Some(value) = config.resize_delta.filter(|value| *value < 1) {
+        found.warnings.push(format!(
+            "{label} sets `resize_delta` to {value}. A step below 1 is ignored and the default of 50 is used."
+        ));
+    }
     let per_workspace_behaviour = config
         .monitors
         .iter()
@@ -2664,6 +2669,24 @@ mod tests {
         assert!(found.warnings.is_empty(), "{:?}", found.warnings);
         assert!(
             found.notes.iter().any(|n| n.contains("parses")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_resize_delta_below_one_is_a_warning_naming_the_value() {
+        let found = check_config_text("mochi.json", r#"{ "resize_delta": -5 }"#);
+        assert!(found.errors.is_empty(), "{found:?}");
+        assert!(
+            found
+                .warnings
+                .iter()
+                .any(|w| w.contains("resize_delta") && w.contains("-5")),
+            "{found:?}"
+        );
+        let found = check_config_text("mochi.json", r#"{ "resize_delta": 20 }"#);
+        assert!(
+            found.warnings.iter().all(|w| !w.contains("resize_delta")),
             "{found:?}"
         );
     }

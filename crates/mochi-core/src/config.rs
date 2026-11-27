@@ -793,7 +793,9 @@ impl Config {
         if let Some(value) = self.float_override {
             state.float_override = value;
         }
-        if let Some(value) = self.resize_delta {
+        // A step below 1 moves nothing or the wrong way; keep the default.
+        // `mochic check` names the value.
+        if let Some(value) = self.resize_delta.filter(|value| *value >= 1) {
             state.resize_delta = value;
         }
         if let Some(value) = self.minimum_window_width {
@@ -1018,6 +1020,22 @@ fn configure_monitor(monitor_config: &MonitorConfig, monitor: &mut crate::model:
 
 #[cfg(test)]
 mod tests {
+    /// A resize step below 1 moves nothing, or moves the wrong way. The daemon
+    /// keeps its default instead of copying the value across.
+    #[test]
+    fn a_resize_delta_below_one_keeps_the_default() {
+        for bad in [0, -5] {
+            let config = Config::from_json(&format!(r#"{{ "resize_delta": {bad} }}"#)).unwrap();
+            let mut state = State::default();
+            config.apply_to(&mut state);
+            assert_eq!(state.resize_delta, 50, "resize_delta {bad}");
+        }
+        let config = Config::from_json(r#"{ "resize_delta": 20 }"#).unwrap();
+        let mut state = State::default();
+        config.apply_to(&mut state);
+        assert_eq!(state.resize_delta, 20);
+    }
+
     /// The configuration documentation offers a complete file to copy. If it
     /// does not parse, the first thing a new user is told to do fails, and
     /// nothing else in this crate would ever notice.
