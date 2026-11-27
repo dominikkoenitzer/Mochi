@@ -2218,7 +2218,10 @@ impl WindowManager {
                     managed = self.core.is_managed(window_id(hwnd)),
                     "a window went off screen"
                 );
-                if !ours {
+                // One that arrives after the window is back on screen is the
+                // late echo of a switch already undone (ws1, ws2, ws1 in quick
+                // succession): the record is gone, but the window is showing.
+                if !ours && !self.platform.is_on_screen(hwnd) {
                     self.unmanage(hwnd, kind.as_str());
                 }
             }
@@ -5752,6 +5755,16 @@ mod tests {
         manager_on(windows, vec![main_screen()])
     }
 
+    /// Cloaks or uncloaks `hwnd` on the fake desktop, the way something other
+    /// than Mochi does before Windows reports it.
+    fn set_fake_cloaked(platform: &FakePlatform, hwnd: Hwnd, cloaked: bool) {
+        for w in platform.windows.lock().unwrap().iter_mut() {
+            if w.hwnd == hwnd {
+                w.cloaked = cloaked;
+            }
+        }
+    }
+
     /// A manager that starts with `hwnd` holding the foreground, the way a
     /// desktop looks when the user was last working in that window.
     ///
@@ -6406,7 +6419,8 @@ mod tests {
 
     #[test]
     fn a_window_cloaked_by_something_else_leaves_the_model() {
-        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
+        set_fake_cloaked(&platform, Hwnd(2), true);
         wm.on_window_event(WindowEventKind::Cloaked, Hwnd(2));
         assert_eq!(wm.state().all_window_ids().count(), 1);
     }
@@ -8615,14 +8629,16 @@ alt + j : focus down
 
     #[test]
     fn manage_and_a_new_window_on_the_same_handle_end_an_unmanage() {
-        let (mut wm, _) = manager(vec![window(1, "One"), window(2, "Two")]);
+        let (mut wm, platform) = manager(vec![window(1, "One"), window(2, "Two")]);
         wm.foreground = Some(Hwnd(2));
         assert_eq!(wm.handle_command(Command::Unmanage).0, Response::Ok);
         wm.foreground = Some(Hwnd(2));
         assert_eq!(wm.handle_command(Command::Manage).0, Response::Ok);
         // Taken back, it comes back after a cloak like any other window.
+        set_fake_cloaked(&platform, Hwnd(2), true);
         wm.on_window_event(WindowEventKind::Cloaked, Hwnd(2));
         assert!(!wm.state().is_managed(window_id(Hwnd(2))));
+        set_fake_cloaked(&platform, Hwnd(2), false);
         wm.on_window_event(WindowEventKind::Uncloaked, Hwnd(2));
         assert!(wm.state().is_managed(window_id(Hwnd(2))));
 
@@ -11486,6 +11502,24 @@ alt + j : focus down
             !wm.state().is_managed(WindowId(1)),
             "the user's own minimize was taken for Mochi's"
         );
+    }
+
+    #[test]
+    fn a_cloak_reporting_in_after_the_switch_back_keeps_the_tile() {
+        for hiding in [HidingBehaviour::Cloak, HidingBehaviour::Hide] {
+            let (mut wm, _platform) = manager(vec![window(1, "One")]);
+            wm.core.window_hiding_behaviour = hiding;
+            wm.handle_command(Command::FocusWorkspace { index: 1 });
+            wm.handle_command(Command::FocusWorkspace { index: 0 });
+
+            for kind in [WindowEventKind::Cloaked, WindowEventKind::Hidden] {
+                wm.on_window_event(kind, Hwnd(1));
+                assert!(
+                    wm.state().is_managed(WindowId(1)),
+                    "a late {kind:?} under {hiding:?} cost the window its tile"
+                );
+            }
+        }
     }
 
     /// The same with hiding by minimizing: there and back before a busy window
