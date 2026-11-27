@@ -1186,6 +1186,24 @@ fn check_config_text(label: &str, text: &str) -> Findings {
         ));
     }
 
+    // The index keys count from 0. A key at or past the number of `monitors`
+    // entries is never looked up, so the pin does nothing.
+    let entries = config.monitors.as_ref().map_or(0, Vec::len);
+    for (key, index) in config.past_end_index_preferences() {
+        found.warnings.push(format!(
+            concat!(
+                "{} has {}[\"{}\"], but `monitors` has {} {} (indexes 0 to {}). ",
+                "The key points at no entry and is ignored. Indexes start at 0."
+            ),
+            label,
+            key,
+            index,
+            entries,
+            if entries == 1 { "entry" } else { "entries" },
+            entries.saturating_sub(1)
+        ));
+    }
+
     // Every broken rule, not the first: a file usually carries a handful, and
     // finding them one reload at a time is the loop this command exists to end.
     let before = found.errors.len();
@@ -3041,6 +3059,30 @@ mod tests {
         assert!(nested_inert_keys(mochi_core::config::QUICKSTART).is_empty());
         assert!(nested_inert_keys("\u{feff}{ \"animation\": { \"enabled\": true } }").is_empty());
         assert!(nested_inert_keys("not json at all").is_empty());
+    }
+
+    #[test]
+    fn an_index_preference_past_the_last_monitor_entry_is_a_warning() {
+        let text = r#"{
+  "monitors": [ { "workspaces": [] }, { "workspaces": [] } ],
+  "display_index_preferences": { "1": "A", "2": "B" }
+}"#;
+        let found = check_config_text("mochi.json", text);
+        assert!(found.errors.is_empty(), "{found:?}");
+        let hits: Vec<_> = found
+            .warnings
+            .iter()
+            .filter(|w| w.contains("display_index_preferences"))
+            .collect();
+        assert_eq!(hits.len(), 1, "{found:?}");
+        assert!(hits[0].contains("[\"2\"]"), "{found:?}");
+        assert!(hits[0].contains("2 entries"), "{found:?}");
+
+        let fine = check_config_text(
+            "mochi.json",
+            r#"{ "monitors": [ { "workspaces": [] } ], "display_index_preferences": { "0": "A" } }"#,
+        );
+        assert!(fine.warnings.is_empty(), "{fine:?}");
     }
 
     #[test]

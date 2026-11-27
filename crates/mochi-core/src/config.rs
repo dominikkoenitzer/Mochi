@@ -882,6 +882,31 @@ impl Config {
         !monitor_config.workspaces.is_empty()
     }
 
+    /// Index keys of `monitor_index_preferences` and `display_index_preferences`
+    /// that point at no `monitors` entry, as `(config key, index)` pairs.
+    ///
+    /// An entry is addressed by its 0-based position, so a key equal to or past
+    /// the number of entries (a 1-based slip) is never looked up and the pin is
+    /// silently ignored.
+    #[must_use]
+    pub fn past_end_index_preferences(&self) -> Vec<(&'static str, usize)> {
+        let count = self.monitors.as_ref().map_or(0, Vec::len);
+        let monitor = self.monitor_index_preferences.iter().flat_map(|prefs| {
+            prefs
+                .keys()
+                .map(|&index| ("monitor_index_preferences", index))
+        });
+        let display = self.display_index_preferences.iter().flat_map(|prefs| {
+            prefs
+                .keys()
+                .map(|&index| ("display_index_preferences", index))
+        });
+        monitor
+            .chain(display)
+            .filter(|&(_, index)| index >= count)
+            .collect()
+    }
+
     /// Resolves which monitor of `state` each `monitors` entry configures.
     ///
     /// The result has one slot per entry, holding the index of the monitor
@@ -1668,6 +1693,36 @@ mod tests {
                 .map(String::as_str),
             Some("PT2400HZ-12345")
         );
+    }
+
+    #[test]
+    fn index_preferences_past_the_last_entry_are_reported() {
+        let config = Config::from_json(
+            r#"{
+                "monitors": [ {"workspaces": []}, {"workspaces": []} ],
+                "monitor_index_preferences": {
+                    "1": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 },
+                    "2": { "left": 0, "top": 0, "right": 3840, "bottom": 2160 }
+                },
+                "display_index_preferences": { "0": "A", "2": "B", "3": "C" }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.past_end_index_preferences(),
+            vec![
+                ("monitor_index_preferences", 2),
+                ("display_index_preferences", 2),
+                ("display_index_preferences", 3),
+            ]
+        );
+
+        let fine = Config::from_json(
+            r#"{ "monitors": [ {"workspaces": []} ], "display_index_preferences": { "0": "A" } }"#,
+        )
+        .unwrap();
+        assert!(fine.past_end_index_preferences().is_empty());
+        assert!(Config::default().past_end_index_preferences().is_empty());
     }
 
     #[test]
