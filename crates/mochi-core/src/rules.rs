@@ -905,7 +905,7 @@ const fn folds_case(kind: ApplicationIdentifier) -> bool {
 /// Lower cases `value` when the comparison folds case, and borrows it otherwise.
 fn fold_case(value: &str, fold: bool) -> Cow<'_, str> {
     if fold {
-        Cow::Owned(value.to_ascii_lowercase())
+        Cow::Owned(value.to_lowercase())
     } else {
         Cow::Borrowed(value)
     }
