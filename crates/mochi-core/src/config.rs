@@ -937,30 +937,34 @@ impl Config {
         let mut claimed = vec![false; monitors.len()];
         let mut pinned = vec![false; count];
 
-        for (idx, slot) in assigned.iter_mut().enumerate() {
-            let display = self
-                .display_index_preferences
-                .as_ref()
-                .and_then(|prefs| prefs.get(&idx));
-            let rect = self
-                .monitor_index_preferences
-                .as_ref()
-                .and_then(|prefs| prefs.get(&idx));
-            if display.is_none() && rect.is_none() {
-                continue;
-            }
-            pinned[idx] = true;
-            let found = monitors.iter().enumerate().position(|(at, monitor)| {
-                !claimed[at]
-                    && match display {
-                        Some(id) => names_display(monitor, id),
-                        // Only reached when the entry named no display.
-                        None => rect.is_some_and(|rect| monitor.size == *rect),
-                    }
-            });
-            if let Some(at) = found {
-                claimed[at] = true;
-                *slot = Some(at);
+        // Rectangle pins first: a rectangle names one panel, a model name may
+        // name several, so a name pin must not take the panel a rectangle named.
+        for by_display in [false, true] {
+            for (idx, slot) in assigned.iter_mut().enumerate() {
+                let display = self
+                    .display_index_preferences
+                    .as_ref()
+                    .and_then(|prefs| prefs.get(&idx));
+                let rect = self
+                    .monitor_index_preferences
+                    .as_ref()
+                    .and_then(|prefs| prefs.get(&idx));
+                if (display.is_none() && rect.is_none()) || display.is_some() != by_display {
+                    continue;
+                }
+                pinned[idx] = true;
+                let found = monitors.iter().enumerate().position(|(at, monitor)| {
+                    !claimed[at]
+                        && match display {
+                            Some(id) => names_display(monitor, id),
+                            // Only reached when the entry named no display.
+                            None => rect.is_some_and(|rect| monitor.size == *rect),
+                        }
+                });
+                if let Some(at) = found {
+                    claimed[at] = true;
+                    *slot = Some(at);
+                }
             }
         }
 
